@@ -1,0 +1,8 @@
+{
+  "name": "Mandao Conciliaciones",
+  "description": "Sistema de conciliaciones para el ecosistema Mandao Finance",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+@theme {
+  /* ── Marca y shell ── */
+  --color-brand: #FFBF00;           /* Identidad Mandao */
+  --color-brand-dark: #E6AC00;
+  --color-brand-ink: #171717;
+  --color-brand-active: #FFF8C5;
+  --color-brand-active-border: #FDE68A;
+  --color-brand-subtle: #FFFBEB;
+
+  /* ── Acción e interactividad ── */
+  --color-primary: #0F766E;         /* Teal */
+  --color-primary-hover: #0B5E58;
+
+  /* ── Superficies ── */
+  --color-bg: #F5F7FA;
+  --color-surface: #FFFFFF;
+  --color-surface-2: #F8FAFC;
+  --color-surface-3: #EEF2F7;
+
+  /* ── Bordes ── */
+  --color-border: #D9E2EC;
+  --color-border-strong: #94A3B8;
+
+  /* ── Texto ── */
+  --color-text: #0F172A;
+  --color-text-muted: #475569;
+  --color-text-faint: #64748B;
+
+  /* ── Semánticos ── */
+  --color-success: #15803D;
+  --color-success-bg: #DCFCE7;
+  --color-warning: #B45309;
+  --color-warning-bg: #FEF3C7;
+  --color-danger: #B91C1C;
+  --color-danger-bg: #FEE2E2;
+  --color-info: #1D4ED8;
+  --color-info-bg: #DBEAFE;
+
+  /* ── Radios ── */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+
+  /* ── Tipografía ── */
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer base {
+  html, body {
+    @apply h-full overflow-hidden subpixel-antialiased;
+    background-color: var(--color-bg);
+    color: var(--color-text);
+  }
+
+  #root {
+    @apply h-full;
+  }
+}
+
+@layer utilities {
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}

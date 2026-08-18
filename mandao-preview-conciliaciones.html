@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mandao Conciliaciones - Maquetación Oficial</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts: Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        :root {
+            /* ── Marca y shell ── */
+            --color-brand: #FFBF00;           /* Identidad Mandao */
+            --color-brand-dark: #E6AC00;
+            --color-brand-ink: #171717;
+            --color-brand-active: #FFF8C5;
+            --color-brand-active-border: #FDE68A;
+            --color-brand-subtle: #FFFBEB;
+
+            /* ── Acción e interactividad ── */
+            --color-primary: #0F766E;         /* Teal */
+            --color-primary-hover: #0B5E58;
+
+            /* ── Superficies ── */
+            --color-bg: #F5F7FA;
+            --color-surface: #FFFFFF;
+            --color-surface-2: #F8FAFC;
+            --color-surface-3: #EEF2F7;
+
+            /* ── Bordes ── */
+            --color-border: #D9E2EC;
+            --color-border-strong: #94A3B8;
+
+            /* ── Texto ── */
+            --color-text: #0F172A;
+            --color-text-muted: #475569;
+            --color-text-faint: #64748B;
+
+            /* ── Semánticos ── */
+            --color-success: #15803D;
+            --color-success-bg: #DCFCE7;
+            --color-warning: #B45309;
+            --color-warning-bg: #FEF3C7;
+            --color-danger: #B91C1C;
+            --color-danger-bg: #FEE2E2;
+            --color-info: #1D4ED8;
+            --color-info-bg: #DBEAFE;
+
+            /* ── Radios ── */
+            --radius-xs: 6px;
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 16px;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--color-bg);
+            color: var(--color-text);
+            margin: 0;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        .sidebar-item-active {
+            background-color: var(--color-brand-active);
+            color: var(--color-brand-ink);
+            font-weight: 600;
+            border-left: 4px solid var(--color-brand-active-border);
+        }
+
+        .tabular-nums {
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* Scroll personalizado */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--color-border);
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--color-border-strong);
+        }
+    </style>
+</head>
+<body class="antialiased">
+
+<div class="flex h-screen overflow-hidden">
+    <!-- SIDEBAR -->
+    <aside class="w-64 bg-white border-r border-[#D9E2EC] flex flex-col shrink-0">
+        <div class="h-16 flex items-center px-6 border-b border-[#D9E2EC]">
+            <div class="w-8 h-8 rounded bg-[#FFBF00] flex items-center justify-center">
+                <span class="font-bold text-[#171717]">M</span>
+            </div>
+            <span class="ml-3 font-semibold text-lg text-[#0F172A]">Mandao</span>
+        </div>
+
+        <nav class="flex-1 overflow-y-auto p-3 space-y-1">
+            <div class="px-3 mb-2 text-[10px] font-bold uppercase tracking-wider text-[#64748B]">Módulo Negocios</div>
+            <a href="#" class="flex items-center px-3 h-10 rounded-[8px] sidebar-item-active">
+                <i data-lucide="layout-dashboard" class="w-5 h-5 mr-3"></i>
+                <span class="text-sm">Dashboard</span>
+            </a>
+            <a href="#" class="flex items-center px-3 h-10 rounded-[8px] text-[#475569] hover:bg-[#F8FAFC]">
+                <i data-lucide="send" class="w-5 h-5 mr-3"></i>
+                <span class="text-sm">Dispatcher</span>
+            </a>
+            <a href="#" class="flex items-center px-3 h-10 rounded-[8px] text-[#475569] hover:bg-[#F8FAFC]">
+                <i data-lucide="git-merge" class="w-5 h-5 mr-3"></i>
+                <span class="text-sm">Conciliación</span>
+            </a>
+            <a href="#" class="flex items-center px-3 h-10 rounded-[8px] text-[#475569] hover:bg-[#F8FAFC]">
+                <i data-lucide="file-text" class="w-5 h-5 mr-3"></i>
+                <span class="text-sm">Facturación</span>
+            </a>
+            
+            <div class="pt-4 mt-2 px-3 mb-2 text-[10px] font-bold uppercase tracking-wider text-[#64748B]">Módulo Mensajeros</div>
+            <a href="#" class="flex items-center px-3 h-10 rounded-[8px] text-[#475569] hover:bg-[#F8FAFC]">
+                <i data-lucide="users" class="w-5 h-5 mr-3"></i>
+                <span class="text-sm">Gestión Mensajeros</span>
+            </a>
+            <a href="#" class="flex items-center px-3 h-10 rounded-[8px] text-[#475569] hover:bg-[#F8FAFC]">
+                <i data-lucide="credit-card" class="w-5 h-5 mr-3"></i>
+                <span class="text-sm">Cuentas por Pagar</span>
+            </a>
+
+            <div class="pt-4 mt-4 border-t border-[#D9E2EC]">
+                <div class="px-3 mb-2 text-[10px] font-bold uppercase tracking-wider text-[#64748B]">Sistemas Externos</div>
+                <a href="#" class="flex items-center px-3 h-10 rounded-[8px] text-[#475569] hover:bg-[#F8FAFC] group">
+                    <i data-lucide="package" class="w-5 h-5 mr-3"></i>
+                    <span class="text-sm">Inventario</span>
+                    <i data-lucide="external-link" class="ml-auto w-3 h-3 opacity-0 group-hover:opacity-100"></i>
+                </a>
+            </div>
+        </nav>
+
+        <div class="p-4 border-t border-[#D9E2EC]">
+            <button class="w-full flex items-center px-3 h-10 rounded-[8px] text-[#B91C1C] hover:bg-[#FEE2E2] transition-colors">
+                <i data-lucide="log-out" class="w-5 h-5 mr-3"></i>
+                <span class="text-sm font-medium">Cerrar Sesión</span>
+            </button>
+        </div>
+    </aside>
+
+    <!-- CONTENT AREA -->
+    <div class="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <!-- TOPBAR -->
+        <header class="h-16 bg-white border-b border-[#D9E2EC] flex items-center justify-between px-8 shrink-0">
+            <div class="flex items-center gap-2 text-sm">
+                <span class="text-[#64748B]">Mandao</span>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-[#64748B]"></i>
+                <span class="text-[#64748B]">Conciliaciones</span>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-[#64748B]"></i>
+                <span class="font-medium text-[#0F172A]">Dashboard</span>
+            </div>
+
+            <div class="flex items-center gap-5">
+                <!-- Company Chip -->
+                <div class="flex items-center gap-2 px-3 py-1.5 bg-[#FFFBEB] border border-[#FDE68A] rounded-full">
+                    <div class="w-2 h-2 rounded-full bg-[#FFBF00]"></div>
+                    <span class="text-xs font-bold text-[#171717]">Mandao HQ</span>
+                </div>
+                
+                <div class="flex items-center gap-3 pl-5 border-l border-[#D9E2EC]">
+                    <div class="text-right">
+                        <p class="text-sm font-bold text-[#0F172A] leading-none">Raul Mandao</p>
+                        <p class="text-[10px] text-[#64748B] mt-1 uppercase tracking-widest font-semibold">Super Admin</p>
+                    </div>
+                    <div class="w-10 h-10 rounded-full bg-[#FFBF00] flex items-center justify-center text-[#171717] font-bold border-2 border-white shadow-sm">
+                        R
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- VIEWPORT CONTENT -->
+        <main class="flex-1 overflow-y-auto p-8">
+            <div class="max-w-6xl mx-auto space-y-8">
+                <!-- Header Section -->
+                <div>
+                    <h1 class="text-xl font-bold text-[#0F172A]">Panel de Control</h1>
+                    <p class="text-sm text-[#475569] mt-1">Visión consolidada de la operación financiera de Mandao.</p>
+                </div>
+
+                <!-- KPI GRID -->
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <!-- KPI Card -->
+                    <div class="p-5 bg-white border border-[#D9E2EC] rounded-[12px] shadow-sm">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <p class="text-[10px] font-bold text-[#64748B] uppercase tracking-wider">Pendientes</p>
+                                <p class="text-2xl font-bold text-[#0F172A] mt-1 tabular-nums">$12,450.00</p>
+                            </div>
+                            <div class="p-2.5 rounded-[8px] bg-[#FEF3C7]">
+                                <i data-lucide="clock" class="w-5 h-5 text-[#B45309]"></i>
+                            </div>
+                        </div>
+                        <div class="mt-4 flex items-center gap-1.5 text-xs font-medium text-[#15803D]">
+                            <i data-lucide="trending-up" class="w-3 h-3"></i>
+                            <span>12% más que el mes pasado</span>
+                        </div>
+                    </div>
+
+                    <div class="p-5 bg-white border border-[#D9E2EC] rounded-[12px] shadow-sm">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <p class="text-[10px] font-bold text-[#64748B] uppercase tracking-wider">Conciliados</p>
+                                <p class="text-2xl font-bold text-[#0F172A] mt-1 tabular-nums">$84,200.00</p>
+                            </div>
+                            <div class="p-2.5 rounded-[8px] bg-[#DCFCE7]">
+                                <i data-lucide="check-circle-2" class="w-5 h-5 text-[#15803D]"></i>
+                            </div>
+                        </div>
+                        <div class="mt-4 flex items-center gap-1.5 text-xs font-medium text-[#15803D]">
+                            <i data-lucide="check" class="w-3 h-3"></i>
+                            <span>Todo al día</span>
+                        </div>
+                    </div>
+
+                    <div class="p-5 bg-white border border-[#D9E2EC] rounded-[12px] shadow-sm">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <p class="text-[10px] font-bold text-[#64748B] uppercase tracking-wider">Discrepancias</p>
+                                <p class="text-2xl font-bold text-[#0F172A] mt-1 tabular-nums">4</p>
+                            </div>
+                            <div class="p-2.5 rounded-[8px] bg-[#FEE2E2]">
+                                <i data-lucide="alert-circle" class="w-5 h-5 text-[#B91C1C]"></i>
+                            </div>
+                        </div>
+                        <div class="mt-4 flex items-center gap-1.5 text-xs font-medium text-[#B91C1C]">
+                            <i data-lucide="alert-triangle" class="w-3 h-3"></i>
+                            <span>Requieren atención inmediata</span>
+                        </div>
+                    </div>
+
+                    <div class="p-5 bg-white border border-[#D9E2EC] rounded-[12px] shadow-sm">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <p class="text-[10px] font-bold text-[#64748B] uppercase tracking-wider">Efectividad</p>
+                                <p class="text-2xl font-bold text-[#0F172A] mt-1 tabular-nums">98.2%</p>
+                            </div>
+                            <div class="p-2.5 rounded-[8px] bg-[#DBEAFE]">
+                                <i data-lucide="bar-chart" class="w-5 h-5 text-[#1D4ED8]"></i>
+                            </div>
+                        </div>
+                        <div class="mt-4 flex items-center gap-1.5 text-xs font-medium text-[#1D4ED8]">
+                            <i data-lucide="arrow-up" class="w-3 h-3"></i>
+                            <span>+2.1% esta semana</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TABLE SECTION / EMPTY STATE -->
+                <div class="bg-white border border-[#D9E2EC] rounded-[12px] shadow-sm overflow-hidden">
+                    <div class="px-6 py-4 border-b border-[#D9E2EC] flex items-center justify-between">
+                        <h2 class="font-bold text-[#0F172A]">Movimientos para Conciliar</h2>
+                        <div class="flex gap-2">
+                             <div class="h-9 px-3 bg-[#F8FAFC] border border-[#D9E2EC] rounded-[8px] flex items-center gap-2 text-sm text-[#475569]">
+                                <i data-lucide="filter" class="w-4 h-4"></i>
+                                Filtrar
+                             </div>
+                             <button class="h-9 px-4 bg-[#FFBF00] text-[#171717] font-bold text-sm rounded-[8px] hover:bg-[#E6AC00] transition-colors">
+                                Nueva Conciliación
+                             </button>
+                        </div>
+                    </div>
+                    
+                    <!-- PURE EMPTY STATE PATTERN -->
+                    <div class="p-20 flex flex-col items-center justify-center text-center">
+                        <div class="w-16 h-16 rounded-full bg-[#F8FAFC] flex items-center justify-center mb-6">
+                            <i data-lucide="git-merge" class="w-8 h-8 text-[#94A3B8]"></i>
+                        </div>
+                        <h3 class="text-lg font-bold text-[#0F172A]">No hay movimientos pendientes</h3>
+                        <p class="text-[#475569] text-sm mt-2 max-w-sm">
+                            Tu bandeja de conciliación está vacía. Todos los movimientos bancarios hasta la fecha han sido procesados correctamente.
+                        </p>
+                        <div class="mt-8 flex gap-3">
+                            <button class="h-10 px-5 bg-[#FFBF00] text-[#171717] font-bold rounded-[8px] flex items-center gap-2">
+                                <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+                                Sincronizar Banco
+                            </button>
+                            <button class="h-10 px-5 border border-[#D9E2EC] text-[#475569] font-semibold rounded-[8px]">
+                                Ver Historial
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+</div>
+
+<script>
+    // Inicializar iconos de Lucide
+    lucide.createIcons();
+</script>
+</body>
+</html>
