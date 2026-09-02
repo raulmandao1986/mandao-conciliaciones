@@ -18,26 +18,35 @@ import {
   RefreshCw,
   Info,
   Check,
-  Send
+  Send,
+  HelpCircle
 } from 'lucide-react';
 import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
-import { db, auth, logAuditEvent } from '../../lib/firebase';
-import { 
-  collection, 
-  addDoc, 
-  serverTimestamp, 
-  doc, 
-  getDoc, 
-  setDoc, 
-  query, 
-  orderBy, 
-  onSnapshot,
-  getDocs
-} from 'firebase/firestore';
-import { GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
-import { useAuth } from '../../lib/auth';
+import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
+import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
+
+// Catálogo de métodos de pago de mensajeros usado para validar RN-005.
+// Se mantiene fijo en código porque el módulo de Gestión (donde vivirá
+// la tabla editable de Métodos de Pago) todavía no se ha construido en
+// Supabase (fuera de alcance de esta fase, ver PLAN_MIGRACION.md).
+const DEFAULT_MESSENGER_PAYMENT_METHODS = [
+  { nombre: 'Efectivo' },
+  { nombre: 'Transferencia' },
+  { nombre: 'Transferencia-Efectivo' },
+  { nombre: 'Transferencia-Especial' },
+  { nombre: 'Transferencia-Exterior' },
+  { nombre: 'Transferencia-Saldo' }
+];
+
+// Persistencia local (por navegador) de los correos de notificación.
+// Firestore tenía un doc global 'settings/dispatcher_config'; Supabase
+// todavía no tiene una tabla de configuración (fuera de alcance —
+// pertenece a la fase de Configuración/Gestión). Se comparte la misma
+// key entre Dispatcher y Disponibilidad, igual que el fallback que
+// tenía el código original.
+const NOTIFY_EMAILS_STORAGE_KEY = 'mandao_notify_emails';
 
 interface VerificationResult {
   orders: any[];
@@ -267,9 +276,15 @@ function mapRowToRecord(row: any[], headerMap: Record<string, number>, sheetRow?
   };
 }
 
-export function VerificationPage({ permissions = [] }: { permissions?: string[] }) {
-  const { user, permissions: userPermissions = [] } = useAuth();
-  
+export function VerificationPage() {
+  const { user } = useAuth();
+  // El botón "Importar a la BD" solo puede ser visible para Super Admin/
+  // Supervisor (sección 5.1 UI/UX de las instrucciones) — coincide con la
+  // política RLS "insert_dispatcher_rows"/"insert_availability_rows" de
+  // supabase_schema.sql, que ya rechaza el insert a nivel de base de datos
+  // para cualquier otro rol (RN-007: la validación real vive en el backend).
+  const canImport = ROLE_CAN_IMPORT(user?.role || 'visitante');
+
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [isSendingEmail, setIsSendingEmail] = useState(false);
@@ -278,6 +293,7 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
   const [showIncidenceDetails, setShowIncidenceDetails] = useState<any | null>(null);
   const [history, setHistory] = useState<any[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [logs, setLogs] = useState<{ id: string; t: string; lvl: 'info' | 'success' | 'warn' | 'error'; msg: string }[]>([]);
   const [toasts, setToasts] = useState<{ id: string; type: 'success' | 'error'; message: string }[]>([]);
 
@@ -323,51 +339,53 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
     tipo: 'habana'
   });
 
-  // Load configuration from Firestore and Verification History on mount
+  const loadAreas = async () => {
+    const { data, error } = await supabase
+      .from('areas')
+      .select('area_id, name, province, sheet_document_id, active');
+    if (error) {
+      console.warn("Error loading Areas:", error.message);
+      return;
+    }
+    const records = (data || []).map(a => ({
+      id: a.area_id,
+      nombre: a.name,
+      provincia: a.province,
+      spreadsheetId: a.sheet_document_id,
+      estado: a.active ? 'activo' : 'inactivo'
+    }));
+    setAreas(records);
+  };
+
+  const loadHistory = async () => {
+    const { data, error } = await supabase
+      .from('dispatcher_verifications')
+      .select('verification_id, area_id, start_date, end_date, verification_date, status, total_orders, total_changes, total_incidents, user_id, areas(name)')
+      .order('verification_date', { ascending: false })
+      .limit(50);
+    if (error) {
+      console.warn("Offline or transient warning loading verification history:", error.message);
+      return;
+    }
+    const records = (data || []).map((r: any) => ({
+      id: r.verification_id,
+      tipo: r.areas?.name || 'N/A',
+      fecha: r.verification_date,
+      rango: `${r.start_date} - ${r.end_date}`,
+      ordenes: r.total_orders,
+      incidencias: r.total_incidents,
+      usuario: r.user_id === user?.uid ? (user?.name || user?.email) : 'Otro usuario'
+    }));
+    setHistory(records);
+  };
+
+  // Load configuration and Verification History on mount
   useEffect(() => {
-    const loadConfigAndHistory = async () => {
-      try {
-        const docRef = doc(db, 'settings', 'dispatcher_config');
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          const data = docSnap.data();
-          if (data.notifyEmails) setNotifyEmails(data.notifyEmails);
-        }
-      } catch (err: any) {
-        console.warn("Error loading settings (the client may be offline):", err?.message || err);
-      }
-    };
-    loadConfigAndHistory();
+    const storedEmails = localStorage.getItem(NOTIFY_EMAILS_STORAGE_KEY);
+    if (storedEmails) setNotifyEmails(storedEmails);
 
-    const q = query(collection(db, 'verification_history'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const records = snapshot.docs.map(docSub => ({ id: docSub.id, ...docSub.data() }));
-      records.sort((a: any, b: any) => {
-        const aDate = a.fecha ? new Date(a.fecha).getTime() : 0;
-        const bDate = b.fecha ? new Date(b.fecha).getTime() : 0;
-        return bDate - aDate;
-      });
-      setHistory(records);
-    }, (err) => {
-      console.warn("Offline or transient warning loading verification history:", err.message);
-    });
-
-    // Load active Areas dynamically from 'Areas' collection
-    const qAreas = query(collection(db, 'Areas'));
-    const unsubscribeAreas = onSnapshot(qAreas, (snapshot) => {
-      const records = snapshot.docs.map(docSub => ({
-        id: docSub.id,
-        ...docSub.data()
-      }));
-      setAreas(records);
-    }, (err) => {
-      console.warn("Error loading Areas (the client may be offline):", err?.message || err);
-    });
-
-    return () => {
-      unsubscribe();
-      unsubscribeAreas();
-    };
+    loadHistory();
+    loadAreas();
   }, []);
 
   const handleAreaChange = (areaId: string) => {
@@ -411,35 +429,18 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
     }
   }, [areas, selectedAreaId]);
 
-  const handleConnectGoogle = async (): Promise<string | null> => {
+  // Con Supabase, "reconectar Google" ya no es un popup síncrono: es el
+  // mismo flujo OAuth con redirect completo de página (ver lib/supabase.ts).
+  // No puede devolver un token en la misma ejecución de JS porque el
+  // navegador navega fuera de la app y vuelve. Por eso el que la llama
+  // debe abortar el flujo actual y esperar a que el usuario reintente
+  // tras volver.
+  const handleConnectGoogle = async (): Promise<null> => {
     try {
-      const provider = new GoogleAuthProvider();
-      provider.addScope('https://www.googleapis.com/auth/spreadsheets.readonly');
-      provider.addScope('https://www.googleapis.com/auth/gmail.send');
-      
-      const currentUserEmail = auth.currentUser?.email;
-      if (currentUserEmail) {
-        provider.setCustomParameters({
-          login_hint: currentUserEmail
-        });
-      }
-      
-      const result = await signInWithPopup(auth, provider);
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      if (credential?.accessToken) {
-        setGoogleToken(credential.accessToken);
-        sessionStorage.setItem('google_access_token', credential.accessToken);
-        return credential.accessToken;
-      } else {
-        alert("No se obtuvo el token de Google. Inténtalo de nuevo.");
-      }
+      await reconnectGoogle();
     } catch (error: any) {
       console.error("Error connecting Google:", error);
-      if (error?.code === 'auth/popup-blocked') {
-        alert("El navegador bloqueó la ventana de autenticación de Google. Por favor, permite ventanas emergentes para este sitio o ábrelo en una nueva pestaña e inténtalo de nuevo.");
-      } else {
-        alert("Error al conectar con Google: " + error.message);
-      }
+      alert("Error al conectar con Google: " + error.message);
     }
     return null;
   };
@@ -453,9 +454,8 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
   const handleSaveConfig = async () => {
     setIsSavingConfig(true);
     try {
-      const docRef = doc(db, 'settings', 'dispatcher_config');
-      await setDoc(docRef, { notifyEmails }, { merge: true });
-      alert("¡Parámetros de configuración guardados correctamente en Firestore!");
+      localStorage.setItem(NOTIFY_EMAILS_STORAGE_KEY, notifyEmails);
+      alert("¡Parámetros de configuración guardados correctamente!");
     } catch (err: any) {
       console.error("Error saving config:", err);
       alert("Error al guardar la configuración: " + err.message);
@@ -475,52 +475,18 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
 
     let activeToken = googleToken;
     if (!activeToken) {
-      addLog('info', 'Google Access Token ausente. Solicitando conexión con Google Auth...');
-      // Automáticamente levanta la conexión usando el correo del usuario activo sin entorpecer el flujo
-      activeToken = await handleConnectGoogle();
-      if (!activeToken) {
-        addLog('error', 'Autorización de Google denegada o cancelada por el usuario. Abortando.');
-        return; // Detener flujo si no se concretó la autorización
-      }
-      addLog('success', 'Autenticación en Google completada con éxito.');
+      addLog('info', 'Google Access Token ausente o expirado. Redirigiendo para reconectar con Google...');
+      await handleConnectGoogle();
+      addLog('warn', 'Serás redirigido a Google para autorizar de nuevo. Vuelve a pulsar "Verificar Dispatcher" al regresar.');
+      return; // El navegador navega fuera de la app; se retoma tras el redirect
     }
 
     setLoading(true);
     setResult(null);
-    
-    try {
-      addLog('info', 'Consultando catálogo de Métodos de Pago de Mensajeros activos en Firestore...');
-      let activeMessengerMethods: any[] = [];
-      try {
-        const methodsSnap = await getDocs(collection(db, 'MetodosPago'));
-        activeMessengerMethods = methodsSnap.docs
-          .map(docSub => docSub.data() as any)
-          .filter(m => m.aplicaMensajeros !== false && m.estado !== 'inactivo');
 
-        if (activeMessengerMethods.length === 0) {
-          addLog('info', 'No se encontraron métodos de pago activos para mensajeros en Firestore. Usando catálogo por defecto temporal.');
-          activeMessengerMethods = [
-            { nombre: 'Efectivo' },
-            { nombre: 'Transferencia' },
-            { nombre: 'Transferencia-Efectivo' },
-            { nombre: 'Transferencia-Especial' },
-            { nombre: 'Transferencia-Exterior' },
-            { nombre: 'Transferencia-Saldo' }
-          ];
-        } else {
-          addLog('success', `Cargados ${activeMessengerMethods.length} métodos de pago de mensajeros para validación.`);
-        }
-      } catch (err: any) {
-        addLog('warn', `No se pudieron cargar los métodos de pago desde Firestore (${err.message}). Usando catálogo por defecto.`);
-        activeMessengerMethods = [
-          { nombre: 'Efectivo' },
-          { nombre: 'Transferencia' },
-          { nombre: 'Transferencia-Efectivo' },
-          { nombre: 'Transferencia-Especial' },
-          { nombre: 'Transferencia-Exterior' },
-          { nombre: 'Transferencia-Saldo' }
-        ];
-      }
+    try {
+      addLog('info', `Usando catálogo de Métodos de Pago de Mensajeros (${DEFAULT_MESSENGER_PAYMENT_METHODS.length} métodos activos).`);
+      const activeMessengerMethods: any[] = DEFAULT_MESSENGER_PAYMENT_METHODS;
 
       addLog('info', `Paso 1: Conectando con Google Sheets API v4. Consultando metadatos para el Spreadsheet ID: ...${spreadsheetId.slice(-8)}`);
       // 1. Fetch metadata first to get exact sheet titles
@@ -530,25 +496,11 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
 
       if (!metaRes.ok) {
         if (metaRes.status === 401) {
-          addLog('warn', 'La sesión o el token de acceso de Google ha expirado (401). Intentando renovación de token automática...');
+          addLog('warn', 'La sesión o el token de acceso de Google ha expirado (401). Redirigiendo para reconectar con Google...');
           setGoogleToken(null);
           sessionStorage.removeItem('google_access_token');
-          
-          const renewedToken = await handleConnectGoogle();
-          if (!renewedToken) {
-            throw new Error("No se pudo renovar la sesión de Google automáticamente. Haz clic de nuevo en Verificar para conectarte.");
-          }
-          
-          addLog('success', 'Nueva sesión de Google autorizada con éxito. Reintentando consulta de metadatos...');
-          activeToken = renewedToken;
-          
-          metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`, {
-            headers: { Authorization: `Bearer ${activeToken}` }
-          });
-          
-          if (!metaRes.ok) {
-            throw new Error(`Fallo tras renovación de token de Google (Código: ${metaRes.status}). Re-intente la operación.`);
-          }
+          await handleConnectGoogle();
+          throw new Error("Sesión de Google expirada. Serás redirigido para reconectar — vuelve a pulsar Verificar al regresar.");
         } else {
           throw new Error(`Google Sheets API Error: ${metaRes.statusText} (${metaRes.status}). Asegúrate de que el ID del documento sea correcto y tengas permisos de acceso.`);
         }
@@ -582,25 +534,11 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
 
       if (!batchRes.ok) {
         if (batchRes.status === 401) {
-          addLog('warn', 'La sesión o el token de acceso de Google ha expirado durante la descarga (401). Intentando renovación de token automática...');
+          addLog('warn', 'La sesión o el token de acceso de Google ha expirado durante la descarga (401). Redirigiendo para reconectar con Google...');
           setGoogleToken(null);
           sessionStorage.removeItem('google_access_token');
-          
-          const renewedToken = await handleConnectGoogle();
-          if (!renewedToken) {
-            throw new Error("No se pudo renovar la sesión de Google automáticamente para la descarga. Haz clic de nuevo en Verificar para conectarte.");
-          }
-          
-          addLog('success', 'Nueva sesión de Google autorizada con éxito. Reintentando descarga de datos...');
-          activeToken = renewedToken;
-          
-          batchRes = await fetch(batchUrl, {
-            headers: { Authorization: `Bearer ${activeToken}` }
-          });
-          
-          if (!batchRes.ok) {
-            throw new Error(`Fallo tras renovación de token de Google en descarga (Código: ${batchRes.status}). Re-intente la operación.`);
-          }
+          await handleConnectGoogle();
+          throw new Error("Sesión de Google expirada. Serás redirigido para reconectar — vuelve a pulsar Verificar al regresar.");
         } else {
           throw new Error(`Google API Error: ${batchRes.statusText} (${batchRes.status})`);
         }
@@ -815,7 +753,16 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
         const incidencesList: { type: 'data_error', severity: 'critica' | 'advertencia' | 'informativa', ruleCode: string, detail: string, id: string, record: any }[] = [];
 
         const isMandaoExpress = o.negocio?.trim().toLowerCase() === 'mandao express';
-        const isPickup = isCellEmpty(o.deliveryChargeRaw) || o.deliveryCharge === 0;
+        // RN-003: es Recogida por Cliente solo si las 4 columnas de cargos de
+        // entrega están vacías/'-' (o en 0, mismo criterio que ya usaba el
+        // código para "Delivery Charge" antes de esta corrección) — no basta
+        // con que "Delivery Charge" por sí sola esté vacía.
+        const isFieldWaived = (raw: any, num: number) => isCellEmpty(raw) || num === 0;
+        const isPickup =
+          isFieldWaived(o.deliveryChargeRaw, o.deliveryCharge) &&
+          isFieldWaived(o.extraDeliveryChargeRaw, o.extraDeliveryCharge) &&
+          isFieldWaived(o.driverAdminChargeRaw, o.driverAdminCharge) &&
+          isFieldWaived(o.complementaryDeliveryRaw, o.complementaryDelivery);
 
         // 1. Validar campos obligatorios núcleo (No deben estar vacíos)
         if (isCellEmpty(o.deliveryDate)) {
@@ -956,56 +903,34 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
   };
 
   const handleImport = async () => {
-    if (!result) return;
+    if (!result || !selectedAreaId) return;
     setImporting(true);
-    
+
     try {
-      addLog('info', 'Paso 1: Consultando registros ya almacenados en Firestore para prevenir duplicados durante la importación...');
-      const existingDbOrders: any[] = [];
-      const existingDbCambios: any[] = [];
-      const existingDbDisps: any[] = [];
+      addLog('info', 'Paso 1: Consultando registros ya almacenados en Supabase para prevenir duplicados durante la importación...');
+      const [{ data: existingDbOrders, error: ordersErr }, { data: existingDbCambios, error: cambiosErr }, { data: existingDbDisps, error: dispsErr }] = await Promise.all([
+        supabase.from('dispatcher').select('order_id, delivery_date, product_amount, store'),
+        supabase.from('dispatcher_changes').select('order_id, change_date, product_amount, delivery_charge'),
+        supabase.from('availabilities').select('messenger_name, availability_date, amount_to_pay, reason')
+      ]);
 
-      try {
-        const qOrders = query(collection(db, 'dispatcher_orders'));
-        const querySnapshot = await getDocs(qOrders);
-        querySnapshot.forEach(docSnap => {
-          existingDbOrders.push(docSnap.data());
-        });
-
-        const qCambios = query(collection(db, 'dispatcher_cambios'));
-        const cambiosQuerySnapshot = await getDocs(qCambios);
-        cambiosQuerySnapshot.forEach(docSnap => {
-          existingDbCambios.push(docSnap.data());
-        });
-
-        const qDisps = query(collection(db, 'dispatcher_disponibilidades'));
-        const dispsQuerySnapshot = await getDocs(qDisps);
-        dispsQuerySnapshot.forEach(docSnap => {
-          existingDbDisps.push(docSnap.data());
-        });
-
-        addLog('success', `Cargados correctamente ${existingDbOrders.length} órdenes, ${existingDbCambios.length} cambios y ${existingDbDisps.length} disponibilidades registradas de la base de datos para filtrado automático.`);
-      } catch (dbErr: any) {
-        addLog('warn', `No se completó la carga de registros previos: ${dbErr.message}. Continuando importación sin filtrado de duplicados.`);
+      if (ordersErr || cambiosErr || dispsErr) {
+        addLog('warn', `No se completó la carga de registros previos: ${(ordersErr || cambiosErr || dispsErr)?.message}. Continuando importación sin filtrado de duplicados.`);
+      } else {
+        addLog('success', `Cargados correctamente ${existingDbOrders?.length || 0} órdenes, ${existingDbCambios?.length || 0} cambios y ${existingDbDisps?.length || 0} disponibilidades registradas de la base de datos para filtrado automático.`);
       }
 
-      const ordersRef = collection(db, 'dispatcher_orders');
-      const cambiosRef = collection(db, 'dispatcher_cambios');
-      const dispsRef = collection(db, 'dispatcher_disponibilidades');
-      
       const activeAreaObj = areas.find(a => a.id === selectedAreaId);
       const activeAreaName = activeAreaObj ? activeAreaObj.nombre : 'Habana';
-
-      const promises: Promise<any>[] = [];
 
       // Filter arrays on import
       const filteredOrdersToImport = result.orders.filter((o: any) => {
         if (!o.orderId) return true;
-        const isAlreadyInDb = existingDbOrders.some(dbO => {
-          const sameId = String(dbO.orderId || '').trim().toLowerCase() === String(o.orderId || '').trim().toLowerCase();
-          const sameDate = dbO.deliveryDate && o.deliveryDate && (normalizeDateStr(dbO.deliveryDate) === normalizeDateStr(o.deliveryDate));
-          const sameMonto = Math.abs((dbO.productAmount || 0) - (o.productAmount || 0)) < 0.02;
-          const sameStore = String(dbO.negocio || dbO.store || '').trim().toLowerCase() === String(o.negocio || '').trim().toLowerCase();
+        const isAlreadyInDb = (existingDbOrders || []).some((dbO: any) => {
+          const sameId = String(dbO.order_id || '').trim().toLowerCase() === String(o.orderId || '').trim().toLowerCase();
+          const sameDate = dbO.delivery_date && o.deliveryDate && (normalizeDateStr(dbO.delivery_date) === normalizeDateStr(o.deliveryDate));
+          const sameMonto = Math.abs((dbO.product_amount || 0) - (o.productAmount || 0)) < 0.02;
+          const sameStore = String(dbO.store || '').trim().toLowerCase() === String(o.negocio || '').trim().toLowerCase();
           return sameId && sameDate && sameMonto && sameStore;
         });
         return !isAlreadyInDb;
@@ -1013,11 +938,11 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
 
       const filteredCambiosToImport = result.cambios.filter((c: any) => {
         if (!c.orden) return true;
-        const isAlreadyInDbCambio = existingDbCambios.some(dbC => {
-          const sameId = String(dbC.orden || dbC.id || '').trim().toLowerCase() === String(c.orden || '').trim().toLowerCase();
-          const sameDate = dbC.fecha && c.fecha && (normalizeDateStr(dbC.fecha) === normalizeDateStr(c.fecha));
-          const sameMontoProd = Math.abs((dbC.montoProducto || 0) - (c.montoProducto || 0)) < 0.02;
-          const sameMontoDel = Math.abs((dbC.montoDelivery || 0) - (c.montoDelivery || 0)) < 0.02;
+        const isAlreadyInDbCambio = (existingDbCambios || []).some((dbC: any) => {
+          const sameId = String(dbC.order_id || '').trim().toLowerCase() === String(c.orden || '').trim().toLowerCase();
+          const sameDate = dbC.change_date && c.fecha && (normalizeDateStr(dbC.change_date) === normalizeDateStr(c.fecha));
+          const sameMontoProd = Math.abs((dbC.product_amount || 0) - (c.montoProducto || 0)) < 0.02;
+          const sameMontoDel = Math.abs((dbC.delivery_charge || 0) - (c.montoDelivery || 0)) < 0.02;
           return sameId && sameDate && sameMontoProd && sameMontoDel;
         });
         return !isAlreadyInDbCambio;
@@ -1025,11 +950,11 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
 
       const filteredDispsToImport = result.disponibilidades.filter((d: any) => {
         if (!d.mensajero) return true;
-        const isAlreadyInDbDisp = existingDbDisps.some(dbD => {
-          const sameDriver = String(dbD.mensajero || '').trim().toLowerCase() === String(d.mensajero || '').trim().toLowerCase();
-          const sameDate = dbD.fecha && d.fecha && (normalizeDateStr(dbD.fecha) === normalizeDateStr(d.fecha));
-          const sameMonto = Math.abs((dbD.monto || 0) - (d.monto || 0)) < 0.02;
-          const sameDetalle = String(dbD.detalle || '').trim().toLowerCase() === String(d.detalle || '').trim().toLowerCase();
+        const isAlreadyInDbDisp = (existingDbDisps || []).some((dbD: any) => {
+          const sameDriver = String(dbD.messenger_name || '').trim().toLowerCase() === String(d.mensajero || '').trim().toLowerCase();
+          const sameDate = dbD.availability_date && d.fecha && (normalizeDateStr(dbD.availability_date) === normalizeDateStr(d.fecha));
+          const sameMonto = Math.abs((dbD.amount_to_pay || 0) - (d.monto || 0)) < 0.02;
+          const sameDetalle = String(dbD.reason || '').trim().toLowerCase() === String(d.detalle || '').trim().toLowerCase();
           return sameDriver && sameDate && sameMonto && sameDetalle;
         });
         return !isAlreadyInDbDisp;
@@ -1047,61 +972,113 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
         return;
       }
 
-      // 1. Queue all order additions
-      for (const order of filteredOrdersToImport) {
-        promises.push(
-          addDoc(ordersRef, { 
-            ...order, 
-            origen: formData.tipo, 
-            area: activeAreaName,
-            createdAt: serverTimestamp() 
-          })
+      addLog('info', `Iniciando importación a Supabase para ${newOrdersCount} órdenes nuevas, ${newCambiosCount} cambios nuevos y ${newDispsCount} disponibilidades nuevas...`);
+
+      // 0. Registrar la corrida de verificación primero (para obtener verification_id)
+      const { data: userData } = await supabase.auth.getUser();
+      const currentUserId = userData?.user?.id;
+      const { data: verificationRow, error: verificationErr } = await supabase
+        .from('dispatcher_verifications')
+        .insert({
+          area_id: selectedAreaId,
+          start_date: formData.fechaInicio,
+          end_date: formData.fechaFin,
+          user_id: currentUserId,
+          status: result.incidences.length === 0 ? 'correcta' : 'con_incidencias',
+          total_orders: newOrdersCount,
+          total_changes: newCambiosCount,
+          total_incidents: result.incidences.length,
+          imported_by: currentUserId,
+          import_completed_at: new Date().toISOString()
+        })
+        .select('verification_id')
+        .single();
+
+      if (verificationErr || !verificationRow) {
+        throw new Error(`No se pudo registrar la verificación: ${verificationErr?.message}`);
+      }
+      const verificationId = verificationRow.verification_id;
+
+      // 1. Insertar órdenes nuevas
+      if (newOrdersCount > 0) {
+        const { error } = await supabase.from('dispatcher').insert(
+          filteredOrdersToImport.map((o: any) => ({
+            delivery_date: normalizeDateStr(o.deliveryDate) || null,
+            order_date: normalizeDateStr(o.orderDate) || null,
+            payment_type: o.paymentType,
+            customer: o.cliente,
+            customer_number: o.customerNumber,
+            driver: o.driver,
+            store: o.negocio,
+            order_id: o.orderId,
+            product_amount: o.productAmount,
+            store_offer: o.storeOffer,
+            processing_fee: o.processingFee,
+            store_admin_charge: o.storeAdminCharge,
+            delivery_charge: o.deliveryCharge,
+            extra_delivery_charge: o.extraDeliveryCharge,
+            driver_admin_charge: o.driverAdminCharge,
+            complementary_delivery: String(o.complementaryDelivery ?? ''),
+            tax: o.transactionFee,
+            promocode: o.promocode,
+            area_id: selectedAreaId,
+            verification_id: verificationId
+          }))
         );
+        if (error) throw new Error(`Error importando órdenes: ${error.message}`);
       }
 
-      // 2. Queue all change additions
-      for (const cambio of filteredCambiosToImport) {
-        promises.push(
-          addDoc(cambiosRef, { 
-            ...cambio, 
-            origen: formData.tipo, 
-            area: activeAreaName,
-            createdAt: serverTimestamp() 
-          })
+      // 2. Insertar cambios nuevos (dispatcher_changes = filas reales de la pestaña "Cambios")
+      if (newCambiosCount > 0) {
+        const { error } = await supabase.from('dispatcher_changes').insert(
+          filteredCambiosToImport.map((c: any) => ({
+            verification_id: verificationId,
+            order_id: c.orden,
+            store: c.negocio,
+            driver: c.mensajero,
+            payment_type: c.tipoPago,
+            product_amount: c.montoProducto,
+            delivery_charge: c.montoDelivery,
+            detail: c.detalle,
+            change_date: normalizeDateStr(c.fecha) || null
+          }))
         );
+        if (error) throw new Error(`Error importando cambios: ${error.message}`);
       }
 
-      // 3. Queue all availability additions
-      for (const disp of filteredDispsToImport) {
-        promises.push(
-          addDoc(dispsRef, { 
-            ...disp, 
-            origen: formData.tipo, 
-            area: activeAreaName,
-            createdAt: serverTimestamp() 
-          })
+      // 3. Insertar disponibilidades detectadas en la pestaña "Disponibilidades" del Dispatcher
+      //    (tabla única availabilities — sin la copia duplicada que tenía Firestore)
+      if (newDispsCount > 0) {
+        const { error } = await supabase.from('availabilities').insert(
+          filteredDispsToImport.map((d: any) => ({
+            messenger_name: d.mensajero,
+            amount_to_pay: d.monto,
+            reason: d.detalle,
+            availability_date: normalizeDateStr(d.fecha) || null,
+            area_id: selectedAreaId
+          }))
         );
+        if (error) throw new Error(`Error importando disponibilidades: ${error.message}`);
       }
 
-      addLog('info', `Iniciando importación en bloque a Firestore para ${newOrdersCount} órdenes nuevas, ${newCambiosCount} cambios nuevos y ${newDispsCount} disponibilidades nuevas...`);
-      // Execute all writes in parallel
-      await Promise.all(promises);
-      addLog('success', 'Datos guardados correctamente en colecciones de Firestore.');
-      
-      // Guardar en historial de verificaciones
-      addLog('info', 'Registrando traza de auditoría en la colección "verification_history"...');
-      await addDoc(collection(db, 'verification_history'), {
-        fecha: new Date().toISOString(),
-        tipo: formData.tipo,
-        rango: `${formData.fechaInicio} - ${formData.fechaFin}`,
-        ordenes: newOrdersCount,
-        incidencias: result.incidences.length,
-        usuario: auth.currentUser?.email || 'raul@mandao.app'
-      });
-      addLog('success', 'Historial actualizado correctamente.');
+      // 4. Persistir las incidencias detectadas para auditoría (dispatcher_incidents)
+      if (result.incidences.length > 0) {
+        const { error } = await supabase.from('dispatcher_incidents').insert(
+          result.incidences.map((inc: any) => ({
+            verification_id: verificationId,
+            order_id: String(inc.id || 'N/A'),
+            severity: inc.severity || 'informativa',
+            rule_code: inc.ruleCode || 'N/A',
+            description: inc.detail
+          }))
+        );
+        if (error) console.error("Failed to persist incidents:", error.message);
+      }
+
+      addLog('success', 'Datos guardados correctamente en Supabase.');
 
       try {
-        logAuditEvent('Verificacion', 'Importación de Datos Completada', {
+        await logAuditEvent('Verificacion', 'Importación de Datos Completada', {
           tipo: formData.tipo,
           areaName: activeAreaName,
           rangoFechas: `${formData.fechaInicio} - ${formData.fechaFin}`,
@@ -1113,10 +1090,11 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
         console.error("Failed to write import audit log:", logErr);
       }
 
+      await loadHistory();
       showToast('success', `¡Importación Exitosa! Se registraron: ${newOrdersCount} órdenes nuevas, ${newCambiosCount} cambios nuevos y ${newDispsCount} disponibilidades nuevas.`);
       setResult(null);
     } catch (error: any) {
-      addLog('error', `Fallo al escribir en la base de datos Firestore: ${error.message}`);
+      addLog('error', `Fallo al escribir en la base de datos Supabase: ${error.message}`);
       console.error("Error importing data:", error);
       showToast('error', "Error al importar datos a la base de datos: " + error.message);
     } finally {
@@ -1169,7 +1147,7 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
 
       const centroDisplay = formData.tipo === 'habana' ? 'La Habana' : formData.tipo === 'holguin' ? 'Holguín' : 'Provincias';
       const rangeDisplay = `${formData.fechaInicio} a ${formData.fechaFin}`;
-      const userDisplay = auth.currentUser?.email || 'raul@mandao.app';
+      const userDisplay = user?.email || 'raul@mandao.app';
       const timestampDisplay = new Date().toLocaleString();
 
       const htmlBody = `
@@ -1330,7 +1308,7 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
         doc.setTextColor(100, 116, 139);
         const rangeText = `Rango de Fechas: ${formData.fechaInicio} a ${formData.fechaFin}`;
         doc.text(rangeText, 14, 26);
-        doc.text(`Despachador/Usuario: ${auth.currentUser?.email || 'sin-autenticar@mandao.app'}`, 14, 31);
+        doc.text(`Despachador/Usuario: ${user?.email || 'sin-autenticar@mandao.app'}`, 14, 31);
         doc.text(`Fecha ejecución: ${new Date().toLocaleString()}`, 14, 36);
 
         // Grid Summary block
@@ -1460,12 +1438,66 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
           </p>
         </div>
         <div className="flex items-center gap-2">
+           <button
+              type="button"
+              onClick={() => setShowHelp(!showHelp)}
+              title="¿Qué valida el diagnóstico?"
+              aria-label="Ayuda sobre la Verificación de Dispatcher"
+              className={cn(
+                "flex items-center justify-center w-10 h-10 rounded-full border text-sm font-bold transition-all shadow-sm shrink-0",
+                showHelp
+                  ? "bg-amber-100 text-amber-700 border-amber-300 scale-105"
+                  : "bg-[var(--color-surface-2)] text-[var(--color-text-faint)] border-[var(--color-border)] hover:text-[var(--color-primary)] hover:border-[var(--color-primary)]"
+              )}
+           >
+              <HelpCircle size={18} />
+           </button>
            <Button variant="ghost" className="gap-2" onClick={() => setShowHistory(true)}>
               <History size={16} />
               Ver Historial
            </Button>
         </div>
       </div>
+
+      {/* Panel de Ayuda — sección 5.1 de las instrucciones: "icono de ayuda
+          donde se muestre como funciona el proceso" */}
+      <AnimatePresence>
+        {showHelp && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden bg-amber-50/75 border border-amber-200/80 rounded-xl p-4 shadow-sm text-xs text-amber-900 space-y-3"
+          >
+            <div className="flex items-center gap-2 font-bold text-amber-800 text-sm">
+              <Info size={16} />
+              <span>¿Qué valida el diagnóstico?</span>
+            </div>
+            <p className="leading-relaxed">
+              El verificador de Dispatcher compara la información bruta introducida en el documento Google Sheets (pestañas "Orders" y "Cambios") contra las reglas de negocio RN-001 a RN-009 antes de habilitar la importación a la Base de Datos.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <p className="font-bold underline mb-1">Reglas de excepción (Celdas Vacías)</p>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li><strong>Negocio (Store) "Mandao Express":</strong> se exceptúa y autoriza la ausencia de "Product Amount", "Store Offer" y "Store Admin Charge" (ejemplo = 0.00 o = "-").</li>
+                  <li><strong>Recogida en el Negocio</strong> (cliente recoge en el establecimiento): se exceptúa la ausencia del Mensajero cuando "Delivery Charge", "Extra Delivery Charge", "Driver Admin Charge" y "Complementary Delivery" están vacíos/"-"/0 (RN-003).</li>
+                  <li><strong>Payment Type:</strong> debe coincidir con los métodos de pago de mensajeros registrados; se acepta coincidencia difusa (tildes, mayúsculas, guiones) como advertencia — sin ninguna coincidencia, es incidencia crítica (RN-005).</li>
+                </ul>
+              </div>
+              <div>
+                <p className="font-bold underline mb-1">Procedimiento de Corrección</p>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li>La importación a la Base de Datos queda completamente restringida si existen incidencias críticas (RN-006).</li>
+                  <li>Los arreglos no se realizan desde la aplicación: corrija los datos directamente en el documento de Google Sheets original.</li>
+                  <li>Una vez editados, vuelva a pulsar "Verificar Dispatcher" para validar los cambios y habilitar el botón "Importar a la BD".</li>
+                  <li>Solo Super Admin o Supervisor pueden importar; Operador puede ejecutar Verificaciones pero no Importar.</li>
+                </ul>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Config Panel */}
@@ -1553,25 +1585,34 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
                   </Button>
                 </div>
 
-                <div className="pt-2 border-t border-[var(--color-border)]">
-                  <Button 
-                    variant="brand" 
-                    className="w-full gap-2 h-11 transition shadow-sm uppercase font-black" 
-                    onClick={handleImport} 
-                    disabled={
-                      importing || 
-                      result.incidences.filter((i: any) => i.severity === 'critica').length > 0 || 
-                      (
-                        result.orders.length === 0 && 
-                        result.cambios.length === 0 && 
-                        result.disponibilidades.length === 0
-                      )
-                    }
-                  >
-                    {importing ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
-                    Importar a la BD
-                  </Button>
-                </div>
+                {canImport ? (
+                  <div className="pt-2 border-t border-[var(--color-border)]">
+                    <Button
+                      variant="brand"
+                      className="w-full gap-2 h-11 transition shadow-sm uppercase font-black"
+                      onClick={handleImport}
+                      disabled={
+                        importing ||
+                        result.incidences.filter((i: any) => i.severity === 'critica').length > 0 ||
+                        (
+                          result.orders.length === 0 &&
+                          result.cambios.length === 0 &&
+                          result.disponibilidades.length === 0
+                        )
+                      }
+                    >
+                      {importing ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
+                      Importar a la BD
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="pt-2 border-t border-[var(--color-border)]">
+                    <div className="flex items-center gap-2 p-3 rounded-[var(--radius-sm)] bg-[var(--color-surface-2)] border border-[var(--color-border)] text-xs text-[var(--color-text-muted)]">
+                      <Lock size={14} className="text-[var(--color-text-faint)] shrink-0" />
+                      Solo Super Admin o Supervisor pueden importar a la Base de Datos.
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-3 pt-1">
                   <Button variant="outline" className="text-xs gap-2" onClick={exportToPDF}>
@@ -1898,7 +1939,7 @@ export function VerificationPage({ permissions = [] }: { permissions?: string[] 
                    <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-3">
                       <AlertCircle className="text-rose-600 shrink-0 mt-0.5" size={18} />
                       <p className="text-xs text-rose-800 leading-relaxed font-semibold">
-                        * Los arreglos no se realizan desde la aplicación. Deberá corregir las incidencias detectadas directamente en el documento de Google Sheets original. Una vez editadas, vuelva a ejecutar la verificación para validar los cambios y habilitar el botón de importación a Firestore.
+                        * Los arreglos no se realizan desde la aplicación. Deberá corregir las incidencias detectadas directamente en el documento de Google Sheets original. Una vez editadas, vuelva a ejecutar la verificación para validar los cambios y habilitar el botón de importación a la Base de Datos.
                       </p>
                    </div>
                  )}

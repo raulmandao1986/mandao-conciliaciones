@@ -31,22 +31,8 @@ import {
 } from 'lucide-react';
 import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
-import { db, auth, logAuditEvent } from '../../lib/firebase';
-import { 
-  collection, 
-  onSnapshot, 
-  query, 
-  where, 
-  doc, 
-  updateDoc, 
-  deleteDoc, 
-  addDoc, 
-  orderBy, 
-  getDoc,
-  getDocs 
-} from 'firebase/firestore';
-import { GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
-import { useAuth } from '../../lib/auth';
+import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
+import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
 
 interface DisponibilidadRecord {
   id: string;
@@ -178,7 +164,7 @@ function normalizeDateStr(dateStr: string): string {
   return parsed ? formatDateToYYYYMMDD(parsed) : '';
 }
 
-export function DisponibilidadRevisionPage({ permissions = [] }: { permissions?: string[] }) {
+export function DisponibilidadRevisionPage() {
   const { user } = useAuth();
   const [areas, setAreas] = useState<any[]>([]);
   const [selectedAreaId, setSelectedAreaId] = useState<string>('');
@@ -223,21 +209,62 @@ export function DisponibilidadRevisionPage({ permissions = [] }: { permissions?:
     orden: ''
   });
 
+  // La edición/eliminación manual de disponibilidades solo la permiten
+  // super_admin/supervisor — coincide con las políticas RLS de
+  // UPDATE/DELETE de la tabla 'availabilities'.
+  const canWrite = ROLE_CAN_IMPORT(user?.role || 'visitante');
+
+  const loadRecords = async () => {
+    setLoading(true);
+    const { data, error } = await supabase
+      .from('availabilities')
+      .select('availability_id, ts, email_address, order_id, availability_date, reason, requested_by, messenger_name, amount_to_pay, province, comment, area_id')
+      .order('availability_date', { ascending: false });
+
+    if (error) {
+      console.error("Error loading availabilities:", error.message);
+      setLoading(false);
+      return;
+    }
+
+    const allRecords = (data || []).map((r: any) => ({
+      id: r.availability_id,
+      fecha: r.availability_date || '',
+      mensajero: r.messenger_name || '',
+      monto: Number(r.amount_to_pay) || 0,
+      detalle: r.reason || r.comment || 'Disponibilidad',
+      orden: r.order_id || '',
+      area: '',
+      areaId: r.area_id,
+      emailAddress: r.email_address || '',
+      requestedBy: r.requested_by || '',
+      province: r.province || ''
+    })) as DisponibilidadRecord[];
+
+    setRecords(allRecords);
+    setLoading(false);
+  };
+
   // Load Areas and active records on mount or parameter changes
   useEffect(() => {
-    // Load active Areas
-    const qAreas = query(collection(db, 'Areas'));
-    const unsubscribeAreas = onSnapshot(qAreas, (snapshot) => {
-      const recordsArea = snapshot.docs.map(docSub => ({
-        id: docSub.id,
-        ...docSub.data()
-      }));
-      setAreas(recordsArea);
-    });
-
-    return () => {
-      unsubscribeAreas();
+    const loadAreas = async () => {
+      const { data, error } = await supabase
+        .from('areas')
+        .select('area_id, name, province, sheet_document_id, active');
+      if (error) {
+        console.error('Error loading Areas:', error.message);
+        return;
+      }
+      setAreas((data || []).map(a => ({
+        id: a.area_id,
+        nombre: a.name,
+        provincia: a.province,
+        spreadsheetId: a.sheet_document_id,
+        estado: a.active ? 'activo' : 'inactivo'
+      })));
     };
+
+    loadAreas();
   }, []);
 
   const handleAreaChange = (areaId: string) => {
@@ -262,34 +289,9 @@ export function DisponibilidadRevisionPage({ permissions = [] }: { permissions?:
     }
   }, [areas, selectedAreaId]);
 
-  // Read registered records in Real-time from dispatcher_disponibilidades
+  // Load availability records once on mount (Supabase no usa listeners en tiempo real aquí)
   useEffect(() => {
-    setLoading(true);
-    const dispsRef = collection(db, 'dispatcher_disponibilidades');
-    
-    // Subscribe to all changes so we can filter client-side or use light queries
-    const qDisps = query(dispsRef);
-    const unsubscribe = onSnapshot(qDisps, (snapshot) => {
-      const allRecords = snapshot.docs.map(docSub => ({
-        id: docSub.id,
-        ...docSub.data()
-      })) as DisponibilidadRecord[];
-      
-      allRecords.sort((a, b) => {
-        const aDate = a.fecha ? new Date(a.fecha).getTime() : 0;
-        const bDate = b.fecha ? new Date(b.fecha).getTime() : 0;
-        return bDate - aDate;
-      });
-      setRecords(allRecords);
-      setLoading(false);
-    }, (err) => {
-      console.error("Firestore loading error:", err);
-      setLoading(false);
-    });
-
-    return () => {
-      unsubscribe();
-    };
+    loadRecords();
   }, []);
 
   // Filter records based on selected params
@@ -345,24 +347,10 @@ export function DisponibilidadRevisionPage({ permissions = [] }: { permissions?:
     setExpandedRows(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  // Google authentication helper
-  const handleConnectGoogle = async (): Promise<string | null> => {
+  // Con Supabase, reconectar Google es un redirect completo de página.
+  const handleConnectGoogle = async (): Promise<null> => {
     try {
-      const provider = new GoogleAuthProvider();
-      provider.addScope('https://www.googleapis.com/auth/spreadsheets.readonly');
-      
-      const currentUserEmail = auth.currentUser?.email;
-      if (currentUserEmail) {
-        provider.setCustomParameters({ login_hint: currentUserEmail });
-      }
-      
-      const result = await signInWithPopup(auth, provider);
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      if (credential?.accessToken) {
-        setGoogleToken(credential.accessToken);
-        sessionStorage.setItem('google_access_token', credential.accessToken);
-        return credential.accessToken;
-      }
+      await reconnectGoogle();
     } catch (error: any) {
       console.error("Auth Error:", error);
       alert("Error al conectar con Google G-Suite: " + error.message);
@@ -384,12 +372,10 @@ export function DisponibilidadRevisionPage({ permissions = [] }: { permissions?:
 
     let activeToken = googleToken;
     if (!activeToken) {
-      activeToken = await handleConnectGoogle();
-      if (!activeToken) {
-        setAuditing(false);
-        setAuditLogs(prev => [...prev, '✖ Error: Conexión con Google G-Suite cancelada o fallida.']);
-        return;
-      }
+      setAuditLogs(prev => [...prev, 'Token de Google no disponible o expirado. Redirigiendo para reconectar...']);
+      await handleConnectGoogle();
+      setAuditing(false);
+      return;
     }
 
     try {
@@ -401,25 +387,11 @@ export function DisponibilidadRevisionPage({ permissions = [] }: { permissions?:
 
       if (!metaRes.ok) {
         if (metaRes.status === 401) {
-          setAuditLogs(prev => [...prev, 'La sesión o el token de acceso de Google ha expirado (401). Intentando renovación de token automática...']);
+          setAuditLogs(prev => [...prev, 'La sesión o el token de acceso de Google ha expirado (401). Redirigiendo para reconectar...']);
           setGoogleToken(null);
           sessionStorage.removeItem('google_access_token');
-          
-          const renewedToken = await handleConnectGoogle();
-          if (!renewedToken) {
-            throw new Error("No se pudo renovar la sesión de Google automáticamente. Haz clic de nuevo para conectarte.");
-          }
-          
-          setAuditLogs(prev => [...prev, 'Nueva sesión de Google autorizada con éxito. Reintentando consulta de metadatos...']);
-          activeToken = renewedToken;
-          
-          metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`, {
-            headers: { Authorization: `Bearer ${activeToken}` }
-          });
-          
-          if (!metaRes.ok) {
-            throw new Error(`Fallo consulta de metadatos de Google Sheets (Status: ${metaRes.status})`);
-          }
+          await handleConnectGoogle();
+          throw new Error("Sesión de Google expirada. Serás redirigido para reconectar — vuelve a intentar la auditoría al regresar.");
         } else {
           throw new Error(`Fallo consulta de metadatos de Google Sheets (Status: ${metaRes.status})`);
         }
@@ -583,24 +555,26 @@ export function DisponibilidadRevisionPage({ permissions = [] }: { permissions?:
   const handleSaveEdit = async () => {
     if (!editingRecord) return;
     try {
-      const docRef = doc(db, 'dispatcher_disponibilidades', editingRecord.id);
-      await updateDoc(docRef, {
-        mensajero: editForm.mensajero,
-        monto: editForm.monto,
-        detalle: editForm.detalle,
-        fecha: editForm.fecha,
-        orden: editForm.orden
-      });
+      const { error } = await supabase.from('availabilities').update({
+        messenger_name: editForm.mensajero,
+        amount_to_pay: editForm.monto,
+        reason: editForm.detalle,
+        availability_date: normalizeDateStr(editForm.fecha) || null,
+        order_id: editForm.orden
+      }).eq('availability_id', editingRecord.id);
 
-      logAuditEvent('Revision', 'Disponibilidad Editada', {
+      if (error) throw new Error(error.message);
+
+      await logAuditEvent('Revision', 'Disponibilidad Editada', {
         id: editingRecord.id,
         mensajeroAnterior: editingRecord.mensajero,
         mensajeroNuevo: editForm.mensajero,
         montoNuevo: editForm.monto
       });
 
-      alert("¡Registro actualizado con éxito en Firestore!");
+      alert("¡Registro actualizado con éxito!");
       setEditingRecord(null);
+      await loadRecords();
     } catch (e: any) {
       alert("Error actualizando registro: " + e.message);
     }
@@ -613,10 +587,10 @@ export function DisponibilidadRevisionPage({ permissions = [] }: { permissions?:
   const handleDeleteRecord = async () => {
     if (!deletingRecord) return;
     try {
-      const docRef = doc(db, 'dispatcher_disponibilidades', deletingRecord.id);
-      await deleteDoc(docRef);
+      const { error } = await supabase.from('availabilities').delete().eq('availability_id', deletingRecord.id);
+      if (error) throw new Error(error.message);
 
-      logAuditEvent('Revision', 'Disponibilidad Eliminada', {
+      await logAuditEvent('Revision', 'Disponibilidad Eliminada', {
         id: deletingRecord.id,
         mensajero: deletingRecord.mensajero,
         monto: deletingRecord.monto
@@ -624,6 +598,7 @@ export function DisponibilidadRevisionPage({ permissions = [] }: { permissions?:
 
       alert("Registro de disponibilidad eliminado correctamente.");
       setDeletingRecord(null);
+      await loadRecords();
     } catch (e: any) {
       alert("Error al eliminar registro: " + e.message);
     }
@@ -636,16 +611,17 @@ export function DisponibilidadRevisionPage({ permissions = [] }: { permissions?:
 
     try {
       setLoading(true);
-      const promises = selectedIds.map(id => deleteDoc(doc(db, 'dispatcher_disponibilidades', id)));
-      await Promise.all(promises);
-      
-      logAuditEvent('Revision', 'Eliminación Masiva de Disponibilidades', {
+      const { error } = await supabase.from('availabilities').delete().in('availability_id', selectedIds);
+      if (error) throw new Error(error.message);
+
+      await logAuditEvent('Revision', 'Eliminación Masiva de Disponibilidades', {
         cantidadEliminados: selectedIds.length
       });
 
-      alert(`Se eliminaron con éxito ${selectedIds.length} registros de Firestore.`);
+      alert(`Se eliminaron con éxito ${selectedIds.length} registros.`);
       setSelectedRows({});
       setIsAllSelected(false);
+      await loadRecords();
     } catch (e: any) {
       alert("Error en la eliminación masiva: " + e.message);
     } finally {
@@ -653,7 +629,7 @@ export function DisponibilidadRevisionPage({ permissions = [] }: { permissions?:
     }
   };
 
-  const hasWritePermission = permissions.includes('dispatcher:verify') || permissions.includes('admin') || true;
+  const hasWritePermission = canWrite;
 
   return (
     <div className="h-full flex flex-col space-y-6">

@@ -1,20 +1,15 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { AppShell } from './shell/AppShell';
 import { AuthProvider, useAuth } from './lib/auth';
 import { ModuleRouter } from './modules/ModuleRouter';
 import { LoginPage } from './modules/auth/LoginPage';
-import { seedDatabase } from './lib/seed';
+// 'lib/seed.ts' todavía siembra contra Firestore (pendiente de migrar
+// a Supabase o eliminar — ver PLAN_MIGRACION.md sección 8, punto 2).
+// Se desactiva la siembra automática al iniciar sesión para no romper
+// toda la app con un import roto mientras se decide su reemplazo.
 
 function AppContent({ activeTab, userRole }: { activeTab?: string; userRole?: string }) {
   const { isAuthenticated, isLoading } = useAuth();
-
-  useEffect(() => {
-    if (isAuthenticated) {
-      seedDatabase().catch((err) => {
-        console.warn("Failed to automatically seed database (the client may be offline):", err?.message || err);
-      });
-    }
-  }, [isAuthenticated]);
 
   if (isLoading) {
     return (

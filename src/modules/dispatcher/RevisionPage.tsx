@@ -22,13 +22,26 @@ import {
   Eye,
   Database,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  HelpCircle
 } from 'lucide-react';
 import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
-import { db, auth, logAuditEvent } from '../../lib/firebase';
-import { collection, onSnapshot, query, where, doc, updateDoc, deleteDoc, addDoc, orderBy, getDoc } from 'firebase/firestore';
-import { GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
+import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
+import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
+import { motion, AnimatePresence } from 'motion/react';
+
+// Catálogo de métodos de pago de mensajeros usado para validar RN-005.
+// Ver nota equivalente en VerificationPage.tsx — el módulo de Gestión
+// (donde vivirá la tabla editable) todavía no existe en Supabase.
+const DEFAULT_MESSENGER_PAYMENT_METHODS = [
+  { nombre: 'Efectivo' },
+  { nombre: 'Transferencia' },
+  { nombre: 'Transferencia-Efectivo' },
+  { nombre: 'Transferencia-Especial' },
+  { nombre: 'Transferencia-Exterior' },
+  { nombre: 'Transferencia-Saldo' }
+];
 
 interface OrderRecord {
   id: string;
@@ -297,12 +310,14 @@ const renderPageNumbers = (current: number, total: number, onChange: (p: number)
   });
 };
 
-export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
+export function RevisionPage() {
+  const { user } = useAuth();
   const [data, setData] = useState<OrderRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
-  
+  const [showHelp, setShowHelp] = useState(false);
+
   // Dynamic Areas selection & Google Auth
   const [areas, setAreas] = useState<any[]>([]);
   const [selectedAreaId, setSelectedAreaId] = useState<string>('');
@@ -350,7 +365,7 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
 
   const [registeredPaymentMethods, setRegisteredPaymentMethods] = useState<any[]>([]);
 
-  // Sorting state for main Firestore table
+  // Sorting state for main dispatcher table
   const [sortField, setSortField] = useState<keyof OrderRecord | 'store'>('deliveryDate');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
 
@@ -399,45 +414,79 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
     setOrphanedPage(1);
   }, [externalComparison, selectedAreaId, filters]);
 
-  const canWrite = permissions.includes('all') || 
-                   permissions.includes('dispatcher:write') || 
-                   permissions.includes('dispatcher-negocio:write') || 
-                   permissions.includes('dispatcher-mensajero:write');
+  // La edición/eliminación manual de registros ya importados solo la
+  // permiten super_admin/supervisor — coincide con las políticas RLS de
+  // UPDATE/DELETE de la tabla 'dispatcher' (ver supabase_schema.sql).
+  const canWrite = ROLE_CAN_IMPORT(user?.role || 'visitante');
+
+  const loadOrders = async () => {
+    setLoading(true);
+    const { data: rows, error } = await supabase
+      .from('dispatcher')
+      .select('order_pk, delivery_date, order_date, payment_type, customer, customer_number, driver, store, order_id, product_amount, store_offer, processing_fee, store_admin_charge, delivery_charge, extra_delivery_charge, driver_admin_charge, complementary_delivery, tax, promocode, area_id, areas(name)')
+      .order('delivery_date', { ascending: false });
+
+    if (error) {
+      console.error('Error loading dispatcher records:', error.message);
+      setLoading(false);
+      return;
+    }
+
+    const records = (rows || []).map((r: any) => ({
+      id: r.order_pk,
+      deliveryDate: r.delivery_date || '',
+      orderDate: r.order_date || '',
+      driver: r.driver || '',
+      store: r.store || '',
+      negocio: r.store || '',
+      orderId: r.order_id || '',
+      productAmount: Number(r.product_amount) || 0,
+      deliveryCharge: Number(r.delivery_charge) || 0,
+      area: r.areas?.name || '',
+      areaId: r.area_id,
+      paymentType: r.payment_type || '',
+      customer: r.customer || '',
+      customerNumber: r.customer_number || '',
+      origen: (r.areas?.name || '').toLowerCase().includes('holguin') ? 'holguin' :
+              (r.areas?.name || '').toLowerCase().includes('provincia') ? 'provincia' : 'habana',
+      monto: Number(r.product_amount) || 0,
+      storeOffer: Number(r.store_offer) || 0,
+      processingFee: Number(r.processing_fee) || 0,
+      storeAdminCharge: Number(r.store_admin_charge) || 0,
+      extraDeliveryCharge: Number(r.extra_delivery_charge) || 0,
+      driverAdminCharge: Number(r.driver_admin_charge) || 0,
+      complementaryDelivery: r.complementary_delivery,
+      tax: Number(r.tax) || 0,
+      promocode: r.promocode || ''
+    })) as OrderRecord[];
+
+    setData(records);
+    setLoading(false);
+  };
 
   // Load operating areas, payment methods, and order records
   useEffect(() => {
-    // 1. Fetch active areas dynamically
-    const qAreas = query(collection(db, 'Areas'));
-    const unsubscribeAreas = onSnapshot(qAreas, (snapshot) => {
-      const records = snapshot.docs.map(docSub => ({
-        id: docSub.id,
-        ...docSub.data()
-      }));
-      setAreas(records);
-    });
-
-    // 2. Load Firestore dispatcher_orders in real-time
-    const q = query(collection(db, 'dispatcher_orders'), orderBy('deliveryDate', 'desc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const records = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as OrderRecord[];
-      setData(records);
-      setLoading(false);
-    });
-
-    // 3. Fetch active messenger payment methods in real-time
-    const qMethods = query(collection(db, 'MetodosPago'));
-    const unsubscribeMethods = onSnapshot(qMethods, (snapshot) => {
-      const records = snapshot.docs
-        .map(docSub => docSub.data() as any)
-        .filter(m => m.aplicaMensajeros !== false && m.estado !== 'inactivo');
-      setRegisteredPaymentMethods(records);
-    });
-
-    return () => {
-      unsubscribe();
-      unsubscribeAreas();
-      unsubscribeMethods();
+    const loadAreas = async () => {
+      const { data: rows, error } = await supabase
+        .from('areas')
+        .select('area_id, name, province, sheet_document_id, active');
+      if (error) {
+        console.error('Error loading Areas:', error.message);
+        return;
+      }
+      setAreas((rows || []).map(a => ({
+        id: a.area_id,
+        nombre: a.name,
+        provincia: a.province,
+        spreadsheetId: a.sheet_document_id,
+        estado: a.active ? 'activo' : 'inactivo'
+      })));
     };
+
+    loadAreas();
+    loadOrders();
+    // Métodos de pago de mensajeros: catálogo fijo (ver nota arriba, no hay tabla en Supabase todavía)
+    setRegisteredPaymentMethods(DEFAULT_MESSENGER_PAYMENT_METHODS);
   }, []);
 
   const addComparisonLog = (lvl: 'info' | 'success' | 'warn' | 'error', msg: string) => {
@@ -448,27 +497,31 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
     ]);
   };
 
-  const handleConnectGoogle = async (): Promise<string | null> => {
+  // Con Supabase, reconectar Google es un redirect completo de página
+  // (no un popup síncrono) — ver la nota equivalente en VerificationPage.tsx.
+  const handleConnectGoogle = async (): Promise<null> => {
     try {
-      const provider = new GoogleAuthProvider();
-      provider.addScope('https://www.googleapis.com/auth/spreadsheets.readonly');
-      const currentUserEmail = auth.currentUser?.email;
-      if (currentUserEmail) {
-        provider.setCustomParameters({ login_hint: currentUserEmail });
-      }
-      const result = await signInWithPopup(auth, provider);
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      if (credential?.accessToken) {
-        setGoogleToken(credential.accessToken);
-        sessionStorage.setItem('google_access_token', credential.accessToken);
-        return credential.accessToken;
-      }
+      await reconnectGoogle();
     } catch (error: any) {
       console.error(error);
       alert("Error de conexión Google: " + error.message);
     }
     return null;
   };
+
+  // Catálogos dinámicos para los filtros "Driver" y "Store" — derivados de
+  // los registros ya cargados de 'dispatcher', igual que 'registeredPaymentMethods'.
+  const uniqueDrivers = useMemo(() => {
+    const set = new Set<string>();
+    data.forEach(item => { if (item.driver) set.add(item.driver); });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [data]);
+
+  const uniqueStores = useMemo(() => {
+    const set = new Set<string>();
+    data.forEach(item => { if (item.store) set.add(item.store); });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [data]);
 
   // 2. Filter data considering range inputs and operational filters
   const filteredData = useMemo(() => {
@@ -638,14 +691,11 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
 
     let activeToken = googleToken;
     if (!activeToken) {
-      addComparisonLog('info', 'Token de Google no disponible. Abriendo ventana de autorización...');
-      activeToken = await handleConnectGoogle();
-      if (!activeToken) {
-        addComparisonLog('error', 'Autorización revocada o cancelada. Imposible cargar cambios externos.');
-        setComparing(false);
-        return;
-      }
-      addComparisonLog('success', 'Sesión autorizada de Google restaurada con éxito.');
+      addComparisonLog('info', 'Token de Google no disponible o expirado. Redirigiendo para reconectar con Google...');
+      await handleConnectGoogle();
+      addComparisonLog('warn', 'Serás redirigido a Google. Vuelve a pulsar "Detectar Cambios" al regresar.');
+      setComparing(false);
+      return;
     }
 
     try {
@@ -656,25 +706,11 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
 
       if (!metaRes.ok) {
         if (metaRes.status === 401) {
-          addComparisonLog('warn', 'Sesión de Google expirada (401). Intentando renovación de token automática...');
+          addComparisonLog('warn', 'Sesión de Google expirada (401). Redirigiendo para reconectar con Google...');
           setGoogleToken(null);
           sessionStorage.removeItem('google_access_token');
-          
-          const renewedToken = await handleConnectGoogle();
-          if (!renewedToken) {
-            throw new Error("No se pudo renovar la sesión de Google automáticamente. Haz clic en Detectar Cambios para intentar de nuevo.");
-          }
-          
-          addComparisonLog('success', 'Sesión de Google renovada correctamente. Reintentando consulta de metadatos...');
-          activeToken = renewedToken;
-          
-          metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`, {
-            headers: { Authorization: `Bearer ${activeToken}` }
-          });
-          
-          if (!metaRes.ok) {
-            throw new Error(`Fallo tras renovación de token de Google (Código: ${metaRes.status}).`);
-          }
+          await handleConnectGoogle();
+          throw new Error("Sesión de Google expirada. Serás redirigido para reconectar — vuelve a pulsar Detectar Cambios al regresar.");
         } else {
           throw new Error(`Google Sheets API devolvió código ${metaRes.status}: ${metaRes.statusText}`);
         }
@@ -694,20 +730,11 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
       
       if (!res.ok) {
         if (res.status === 401) {
-          addComparisonLog('warn', 'La sesión de Google expiró durante la descarga de valores. Intentando renovar...');
+          addComparisonLog('warn', 'La sesión de Google expiró durante la descarga de valores. Redirigiendo para reconectar...');
           setGoogleToken(null);
           sessionStorage.removeItem('google_access_token');
-          
-          const renewedToken = await handleConnectGoogle();
-          if (!renewedToken) {
-            throw new Error("No se pudo renovar la sesión de Google automáticamente para la descarga. Re-intente la operación.");
-          }
-          activeToken = renewedToken;
-          
-          res = await fetch(url, { headers: { Authorization: `Bearer ${activeToken}` } });
-          if (!res.ok) {
-            throw new Error(`Fallo tras renovación en descarga de valores: ${res.statusText}`);
-          }
+          await handleConnectGoogle();
+          throw new Error("Sesión de Google expirada. Serás redirigido para reconectar — vuelve a pulsar Detectar Cambios al regresar.");
         } else {
           throw new Error(`Fallo al descargar valores de la pestaña: ${res.statusText}`);
         }
@@ -765,16 +792,16 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
       console.log(`- Órdenes en BD (filtradas para comparación): ${compareDbOrders.length}`);
       console.log(`- Órdenes en Documento Dispatcher (filtradas): ${filteredSheetOrders.length}`);
       addComparisonLog('info', `Rango fecha análisis: [${filters.fechaInicio}] a [${filters.fechaFin}]`);
-      addComparisonLog('info', `Órdenes en Firestore: ${compareDbOrders.length} | Órdenes en Documento Dispatcher: ${filteredSheetOrders.length}`);
+      addComparisonLog('info', `Órdenes en BD: ${compareDbOrders.length} | Órdenes en Documento Dispatcher: ${filteredSheetOrders.length}`);
 
       const discrepancies: Record<string, string[]> = {};
       const deletedInSheets = new Set<string>();
       const newInSheets: any[] = [];
       const discrepanciesList: any[] = [];
 
-      // A. Scan each Firestore record against Google Sheets matching by OrderId
+      // A. Scan each dispatcher DB record against Google Sheets matching by OrderId
       addComparisonLog('info', 'Paso 2: Iniciando comparación fila a fila con los registros de la Base de Datos...');
-      console.log("Paso 2: Iniciando comparación Firestore vs Google Sheets...");
+      console.log("Paso 2: Iniciando comparación BD vs Google Sheets...");
 
       compareDbOrders.forEach(dbOrder => {
         const match = filteredSheetOrders.find(sheetOrder => {
@@ -789,7 +816,7 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
             id: `${dbOrder.orderId}-inexistente`,
             orderId: dbOrder.orderId,
             campo: 'Existencia en Dispatcher',
-            valorFirestore: 'Registrada',
+            valorBD: 'Registrada',
             valorDispatcher: 'Eliminado / Ausente',
             diferencia: diffStr,
             tipo: 'inexistente',
@@ -812,7 +839,7 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
                 id: `${dbOrder.orderId}-${label}`,
                 orderId: dbOrder.orderId,
                 campo: label,
-                valorFirestore: `$${parsedDb.toFixed(2)}`,
+                valorBD: `$${parsedDb.toFixed(2)}`,
                 valorDispatcher: `$${parsedSheet.toFixed(2)}`,
                 diferencia: `Variación de $${Math.abs(parsedSheet - parsedDb).toFixed(2)}`,
                 tipo: 'discrepancia_valor',
@@ -823,7 +850,7 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
               });
 
               diffs.push(`${label}: Sheets $${parsedSheet.toFixed(2)} vs BD $${parsedDb.toFixed(2)}`);
-              console.warn(`[DIFERENCIA: VALOR] Orden ID ${dbOrder.orderId} -> Campo: ${label} | Sheets: ${parsedSheet} vs Firestore: ${parsedDb}`);
+              console.warn(`[DIFERENCIA: VALOR] Orden ID ${dbOrder.orderId} -> Campo: ${label} | Sheets: ${parsedSheet} vs BD: ${parsedDb}`);
             }
           };
 
@@ -837,7 +864,7 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
                 id: `${dbOrder.orderId}-${label}`,
                 orderId: dbOrder.orderId,
                 campo: label,
-                valorFirestore: cleanDb || 'Vacío',
+                valorBD: cleanDb || 'Vacío',
                 valorDispatcher: cleanSheet || 'Vacío',
                 diferencia: diffStr,
                 tipo: 'discrepancia_valor',
@@ -848,7 +875,7 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
               });
 
               diffs.push(`${label}: Sheets "${cleanSheet || 'N/A'}" vs BD "${cleanDb || 'N/A'}"`);
-              console.warn(`[DIFERENCIA: TEXTO] Orden ID ${dbOrder.orderId} -> Campo: ${label} | Sheets: "${cleanSheet}" vs Firestore: "${cleanDb}"`);
+              console.warn(`[DIFERENCIA: TEXTO] Orden ID ${dbOrder.orderId} -> Campo: ${label} | Sheets: "${cleanSheet}" vs BD: "${cleanDb}"`);
             }
           };
 
@@ -876,7 +903,7 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
         }
       });
 
-      // B. Scan if there are new orders in Sheets not residing in Firestore
+      // B. Scan if there are new orders in Sheets not residing in the dispatcher DB
       console.log("Paso 3: Escaneando órdenes nuevas en Google Sheets...");
       filteredSheetOrders.forEach(sheetOrder => {
         const match = compareDbOrders.find(dbOrder => String(dbOrder.orderId || '').trim().toLowerCase() === String(sheetOrder.orderId || '').trim().toLowerCase());
@@ -887,7 +914,7 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
             id: `${sheetOrder.orderId}-solo_sheets`,
             orderId: sheetOrder.orderId,
             campo: 'Existencia en Dispatcher',
-            valorFirestore: 'Ausente',
+            valorBD: 'Ausente',
             valorDispatcher: 'Pendiente Importación',
             diferencia: `Registro presente en Documento Dispatcher pero ausente en BD (Fecha: ${sheetOrder.deliveryDate || 'N/A'})`,
             tipo: 'solo_sheets',
@@ -964,46 +991,62 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
         
         try {
           if (item.tipo === 'inexistente') {
-            await deleteDoc(doc(db, 'dispatcher_orders', item.dbRecord.id));
+            const { error } = await supabase.from('dispatcher').delete().eq('order_pk', item.dbRecord.id);
+            if (error) throw new Error(error.message);
             addComparisonLog('success', `✓ Eliminada de BD (inexistente en DIspatcher): Orden ID ${item.orderId}`);
             console.log(`[SYNC: ELIMINACIÓN INTENCIONADA] Eliminado registro ID ${item.dbRecord.id} (Orden: ${item.orderId})`);
-          } 
+          }
           else if (item.tipo === 'solo_sheets') {
-            const itemToSave = {
-              ...item.rawData,
-              area: selectedAreaId ? areas.find(a => a.id === selectedAreaId)?.nombre || 'Todos' : 'Todos'
-            };
-            delete itemToSave.id;
-            await addDoc(collection(db, 'dispatcher_orders'), itemToSave);
+            const rd = item.rawData;
+            const { error } = await supabase.from('dispatcher').insert({
+              delivery_date: normalizeDateStr(rd.deliveryDate) || null,
+              order_date: normalizeDateStr(rd.orderDate) || null,
+              payment_type: rd.paymentType,
+              customer: rd.customer,
+              customer_number: rd.customerNumber,
+              driver: rd.driver,
+              store: rd.store || rd.negocio,
+              order_id: rd.orderId,
+              product_amount: rd.productAmount,
+              store_offer: rd.storeOffer,
+              processing_fee: rd.processingFee,
+              store_admin_charge: rd.storeAdminCharge,
+              delivery_charge: rd.deliveryCharge,
+              extra_delivery_charge: rd.extraDeliveryCharge,
+              driver_admin_charge: rd.driverAdminCharge,
+              complementary_delivery: String(rd.complementaryDelivery ?? ''),
+              tax: rd.tax,
+              promocode: rd.promocode,
+              area_id: selectedAreaId || null
+            });
+            if (error) throw new Error(error.message);
             addComparisonLog('success', `✓ Creada en BD (nueva en Dispatcher): Orden ID ${item.orderId}`);
             console.log(`[SYNC: CREACIÓN INTENCIONADA] Creado nuevo registro para Orden: ${item.orderId}`);
-          } 
+          }
           else if (item.tipo === 'discrepancia_valor') {
-            const docRef = doc(db, 'dispatcher_orders', item.dbRecord.id);
             const dbFieldMap: Record<string, string> = {
-              'Monto Producto': 'productAmount',
-              'Cargo Entrega': 'deliveryCharge',
-              'Store Offer': 'storeOffer',
-              'Processing Fee': 'processingFee',
-              'Store Admin Charge': 'storeAdminCharge',
-              'Extra Delivery Charge': 'extraDeliveryCharge',
-              'Driver Admin Charge': 'driverAdminCharge',
-              'Complementary Delivery': 'complementaryDelivery',
+              'Monto Producto': 'product_amount',
+              'Cargo Entrega': 'delivery_charge',
+              'Store Offer': 'store_offer',
+              'Processing Fee': 'processing_fee',
+              'Store Admin Charge': 'store_admin_charge',
+              'Extra Delivery Charge': 'extra_delivery_charge',
+              'Driver Admin Charge': 'driver_admin_charge',
+              'Complementary Delivery': 'complementary_delivery',
               'Tax/Impuesto': 'tax',
               'Mensajero/Driver': 'driver',
-              'Método de Pago': 'paymentType',
+              'Método de Pago': 'payment_type',
               'Establecimiento/Store': 'store',
               'Cliente': 'customer',
-              'Teléfono Cliente': 'customerNumber',
+              'Teléfono Cliente': 'customer_number',
               'Promocode': 'promocode'
             };
-            
+
             const dbField = dbFieldMap[item.campo];
             if (dbField) {
               const rawVal = item.sheetValue;
-              await updateDoc(docRef, {
-                [dbField]: rawVal
-              });
+              const { error } = await supabase.from('dispatcher').update({ [dbField]: rawVal }).eq('order_pk', item.dbRecord.id);
+              if (error) throw new Error(error.message);
               addComparisonLog('success', `✓ Actualizado campo "${item.campo}" en BD para Orden ID ${item.orderId} a "${rawVal}"`);
               console.log(`[SYNC: ACTUALIZACIÓN INTENCIONADA] Sincronizado ${dbField} para Orden: ${item.orderId} a: ${rawVal}`);
             }
@@ -1032,7 +1075,9 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
       }
 
       alert(`Sincronización masiva finalizada:\n- Exitosos: ${successCount}\n- Fallados: ${failCount}\nSe borrará la comparación anterior para que re-ejecute si lo desea.`);
-      
+
+      await loadOrders();
+
       // Clear selection and previous diff structures
       setSelectedDiscrepancyIds([]);
       setExternalComparison(null);
@@ -1050,7 +1095,9 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
   const handleDelete = async (id: string) => {
     if (!window.confirm("¿Estás seguro de eliminar permanentemente este registro de BD?")) return;
     try {
-      await deleteDoc(doc(db, 'dispatcher_orders', id));
+      const { error } = await supabase.from('dispatcher').delete().eq('order_pk', id);
+      if (error) throw new Error(error.message);
+      setData(prev => prev.filter(r => r.id !== id));
       addComparisonLog('success', `Registro ID ${id} eliminado de BD.`);
     } catch (e: any) {
       console.error(e);
@@ -1180,9 +1227,23 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
           </p>
         </div>
         <div className="flex items-center gap-2.5 shrink-0">
-          <Button 
-            variant="outline" 
-            className="gap-2 text-xs font-bold uppercase tracking-wider h-10 border-slate-200" 
+          <button
+            type="button"
+            onClick={() => setShowHelp(!showHelp)}
+            title="¿Cómo funciona la Revisión del Dispatcher?"
+            aria-label="Ayuda sobre la Revisión del Dispatcher"
+            className={cn(
+              "flex items-center justify-center w-10 h-10 rounded-full border text-sm font-bold transition-all shadow-sm shrink-0",
+              showHelp
+                ? "bg-amber-100 text-amber-700 border-amber-300 scale-105"
+                : "bg-[var(--color-surface-2)] text-[var(--color-text-faint)] border-[var(--color-border)] hover:text-[var(--color-primary)] hover:border-[var(--color-primary)]"
+            )}
+          >
+            <HelpCircle size={18} />
+          </button>
+          <Button
+            variant="outline"
+            className="gap-2 text-xs font-bold uppercase tracking-wider h-10 border-slate-200"
             onClick={handleExportPDF}
           >
             <Download size={15} />
@@ -1190,6 +1251,48 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
           </Button>
         </div>
       </div>
+
+      {/* Panel de Ayuda — sección 5.3 de las instrucciones: "icono de ayuda
+          donde se muestre la explicación de cómo funciona el proceso" */}
+      <AnimatePresence>
+        {showHelp && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden bg-amber-50/75 border border-amber-200/80 rounded-xl p-4 shadow-sm text-xs text-amber-900 space-y-3"
+          >
+            <div className="flex items-center gap-2 font-bold text-amber-800 text-sm">
+              <Info size={16} />
+              <span>¿Cómo funciona la Revisión del Dispatcher?</span>
+            </div>
+            <p className="leading-relaxed">
+              Este módulo permite realizar consultas consolidadas, filtros avanzados y auditorías rápidas sobre todo el universo de datos que ha sido verificado e importado desde los documentos Dispatcher.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <p className="font-bold underline mb-1">Campos de Búsqueda</p>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li><strong>Rango de fechas:</strong> Filtra las órdenes basándose en la fecha inicial y final registrada (Delivery Date).</li>
+                  <li><strong>Delivery Date / Order Date:</strong> Filtros de fecha exacta, independientes del rango.</li>
+                  <li><strong>Dispatcher o Área:</strong> Filtra por la procedencia del dispatcher (Habana, Holguín, Provincias) o por el área interna registrada.</li>
+                  <li><strong>Driver / Store:</strong> Filtra por un mensajero o negocio específico ya registrado en BD.</li>
+                  <li><strong>Filtros por Texto:</strong> Búsqueda rápida de subcadenas para Customer, Customer Number, Driver u Order ID. No es sensible a mayúsculas ni minúsculas.</li>
+                </ul>
+              </div>
+              <div>
+                <p className="font-bold underline mb-1">Visualización y Despliegue</p>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li>La tabla despliega solo los campos principales inicialmente para optimizar espacio.</li>
+                  <li>Haz clic en cualquier fila para desplegar el panel completo, donde se muestra el resto de la información correspondiente de forma detallada.</li>
+                  <li><strong>Detectar Cambios:</strong> compara la BD contra el documento Google Sheets del área seleccionada y lista discrepancias, registros eliminados y registros nuevos sin importar.</li>
+                  <li><strong>Forzar Sincronización:</strong> solo disponible para Super Admin/Supervisor — edita, crea o elimina en BD para igualar el documento Dispatcher.</li>
+                </ul>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Inputs and Controllers */}
       <div className="bg-[var(--color-surface)] p-5 rounded-[var(--radius-lg)] border border-[var(--color-border)] shadow-sm space-y-4">
@@ -1302,7 +1405,7 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
             )}
           </select>
 
-          <select 
+          <select
             className="h-9 px-2 bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded text-xs"
             value={filters.origen}
             onChange={(e) => setFilters({...filters, origen: e.target.value})}
@@ -1313,7 +1416,53 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
             <option value="Provincia">Provincia</option>
           </select>
 
-          <Button 
+          <select
+            className="h-9 px-2 bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded text-xs"
+            value={filters.store}
+            onChange={(e) => setFilters({...filters, store: e.target.value})}
+            title="Filtrar por Store"
+          >
+            <option value="Todas">Store: Todas</option>
+            {uniqueStores.map(s => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+
+          <select
+            className="h-9 px-2 bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded text-xs"
+            value={filters.driver}
+            onChange={(e) => setFilters({...filters, driver: e.target.value})}
+            title="Filtrar por Driver"
+          >
+            <option value="Todos">Driver: Todos</option>
+            {uniqueDrivers.map(d => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
+
+          <label className="flex items-center gap-1.5 h-9 px-2 bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded text-xs">
+            <span className="text-slate-400 font-bold shrink-0">Delivery Date:</span>
+            <input
+              type="date"
+              className="h-full bg-transparent outline-none font-mono text-xs"
+              value={filters.deliveryDate}
+              onChange={(e) => setFilters({...filters, deliveryDate: e.target.value})}
+              title="Filtrar por Delivery Date exacto"
+            />
+          </label>
+
+          <label className="flex items-center gap-1.5 h-9 px-2 bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded text-xs">
+            <span className="text-slate-400 font-bold shrink-0">Order Date:</span>
+            <input
+              type="date"
+              className="h-full bg-transparent outline-none font-mono text-xs"
+              value={filters.orderDate}
+              onChange={(e) => setFilters({...filters, orderDate: e.target.value})}
+              title="Filtrar por Order Date exacto"
+            />
+          </label>
+
+          <Button
             variant="ghost" 
             className="text-[10px] h-8 font-bold ml-auto" 
             onClick={() => setFilters({
@@ -1440,8 +1589,10 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
               </div>
             </div>
 
-            {/* Bulk Actions control bar */}
-            {selectedDiscrepancyIds.length > 0 && (
+            {/* Bulk Actions control bar — solo visible para roles con permiso de
+                escritura (super_admin/supervisor), igual que las políticas RLS
+                de UPDATE/DELETE/INSERT de la tabla 'dispatcher'. */}
+            {canWrite && selectedDiscrepancyIds.length > 0 && (
               <div className="p-3 bg-amber-50/80 border-b border-amber-200 flex items-center justify-between px-6 animate-fade-in">
                 <div className="flex items-center gap-2 text-xs font-bold text-amber-900">
                   <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping shrink-0" />
@@ -1489,7 +1640,7 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
                     </th>
                     <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-[var(--color-text-faint)] cursor-pointer hover:bg-slate-100 select-none transition" onClick={() => handleDiffSort('orderId')}>Orden ID{renderDiffSortIndicator('orderId')}</th>
                     <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-[var(--color-text-faint)] cursor-pointer hover:bg-slate-100 select-none transition" onClick={() => handleDiffSort('campo')}>Campo{renderDiffSortIndicator('campo')}</th>
-                    <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-[var(--color-text-faint)] cursor-pointer hover:bg-slate-100 select-none transition" onClick={() => handleDiffSort('valorFirestore')}>Valor Firestore{renderDiffSortIndicator('valorFirestore')}</th>
+                    <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-[var(--color-text-faint)] cursor-pointer hover:bg-slate-100 select-none transition" onClick={() => handleDiffSort('valorBD')}>Valor BD{renderDiffSortIndicator('valorBD')}</th>
                     <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-[var(--color-text-faint)] cursor-pointer hover:bg-slate-100 select-none transition" onClick={() => handleDiffSort('valorDispatcher')}>Valor Dispatcher{renderDiffSortIndicator('valorDispatcher')}</th>
                     <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-[var(--color-text-faint)] cursor-pointer hover:bg-slate-100 select-none transition" onClick={() => handleDiffSort('diferencia')}>Diferencia{renderDiffSortIndicator('diferencia')}</th>
                     <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-[var(--color-text-faint)] text-right cursor-pointer hover:bg-slate-100 select-none transition" onClick={() => handleDiffSort('severity')}>Severidad{renderDiffSortIndicator('severity')}</th>
@@ -1546,7 +1697,7 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
                             {d.campo}
                           </td>
                           <td className="px-6 py-4 text-xs text-slate-600 font-mono">
-                            {d.valorFirestore}
+                            {d.valorBD}
                           </td>
                           <td className="px-6 py-2 text-xs text-slate-800 font-bold font-mono">
                             {d.valorDispatcher}
@@ -1702,15 +1853,17 @@ export function RevisionPage({ permissions = [] }: { permissions?: string[] }) {
                           <span className="text-[10px] font-bold uppercase text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">{item.area || 'N/A'}</span>
                         </td>
                         <td className="px-6 py-4 text-right" onClick={(e) => e.stopPropagation()}>
-                          <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button 
-                              onClick={() => handleDelete(item.id)}
-                              className="p-1 px-2.5 text-[10px] text-xs font-bold text-rose-500 bg-rose-50 hover:bg-rose-100 border border-rose-100 rounded-md transition-all uppercase shrink-0"
-                              title="Eliminar de BD"
-                            >
-                              Eliminar
-                            </button>
-                          </div>
+                          {canWrite && (
+                            <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button
+                                onClick={() => handleDelete(item.id)}
+                                className="p-1 px-2.5 text-[10px] text-xs font-bold text-rose-500 bg-rose-50 hover:bg-rose-100 border border-rose-100 rounded-md transition-all uppercase shrink-0"
+                                title="Eliminar de BD"
+                              >
+                                Eliminar
+                              </button>
+                            </div>
+                          )}
                         </td>
                       </tr>
 

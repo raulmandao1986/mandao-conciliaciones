@@ -1,17 +1,5 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { Dashboard } from './dashboard/Dashboard';
-import { ConciliacionPage } from './conciliacion/ConciliacionPage';
-import { FacturacionPage } from './conciliacion/FacturacionPage';
-import { CuentasPagarPage } from './conciliacion/CuentasPagarPage';
-import { CuentasCobrarPage } from './conciliacion/CuentasCobrarPage';
-import { PlanificacionPagosPage } from './conciliacion/PlanificacionPagosPage';
-import { GestionNegociosPage } from './gestion/GestionNegociosPage';
-import { GestionMensajerosPage } from './gestion/GestionMensajerosPage';
-import { RolesUsuariosPage } from './gestion/RolesUsuariosPage';
-import { AreasPage } from './gestion/AreasPage';
-import { MetodosPagoPage } from './gestion/MetodosPagoPage';
-import { RazonCambioPage } from './gestion/RazonCambioPage';
-import { LogsAuditoriaPage } from './gestion/LogsAuditoriaPage';
 import { VerificationPage } from './dispatcher/VerificationPage';
 import { RevisionPage } from './dispatcher/RevisionPage';
 import { DisponibilidadVerificationPage } from './disponibilidad/DisponibilidadVerificationPage';
@@ -21,6 +9,25 @@ import { Package } from 'lucide-react';
 
 import { useAuth } from '../lib/auth';
 
+// Módulos fuera de alcance de esta fase de migración (decisión #3 del
+// plan): todavía usan Firestore/'../../lib/firebase' internamente, por
+// lo que no compilan/ejecutan hasta que se reconstruyan desde cero en
+// su propia fase. Se cargan de forma perezosa (React.lazy) para que un
+// fallo de resolución de módulo en uno de ellos no tumbe el resto de la
+// app (Dispatcher/Disponibilidad) al cargar.
+const ConciliacionPage = lazy(() => import('./conciliacion/ConciliacionPage').then(m => ({ default: m.ConciliacionPage })));
+const FacturacionPage = lazy(() => import('./conciliacion/FacturacionPage').then(m => ({ default: m.FacturacionPage })));
+const CuentasPagarPage = lazy(() => import('./conciliacion/CuentasPagarPage').then(m => ({ default: m.CuentasPagarPage })));
+const CuentasCobrarPage = lazy(() => import('./conciliacion/CuentasCobrarPage').then(m => ({ default: m.CuentasCobrarPage })));
+const PlanificacionPagosPage = lazy(() => import('./conciliacion/PlanificacionPagosPage').then(m => ({ default: m.PlanificacionPagosPage })));
+const GestionNegociosPage = lazy(() => import('./gestion/GestionNegociosPage').then(m => ({ default: m.GestionNegociosPage })));
+const GestionMensajerosPage = lazy(() => import('./gestion/GestionMensajerosPage').then(m => ({ default: m.GestionMensajerosPage })));
+const RolesUsuariosPage = lazy(() => import('./gestion/RolesUsuariosPage').then(m => ({ default: m.RolesUsuariosPage })));
+const AreasPage = lazy(() => import('./gestion/AreasPage').then(m => ({ default: m.AreasPage })));
+const MetodosPagoPage = lazy(() => import('./gestion/MetodosPagoPage').then(m => ({ default: m.MetodosPagoPage })));
+const RazonCambioPage = lazy(() => import('./gestion/RazonCambioPage').then(m => ({ default: m.RazonCambioPage })));
+const LogsAuditoriaPage = lazy(() => import('./gestion/LogsAuditoriaPage').then(m => ({ default: m.LogsAuditoriaPage })));
+
 interface ModuleRouterProps {
   activeTab: string;
   userRole?: string;
@@ -28,20 +35,29 @@ interface ModuleRouterProps {
 }
 
 export function ModuleRouter({ activeTab }: ModuleRouterProps) {
-  const { permissions = [] } = useAuth();
+  const { user } = useAuth();
+  const permissions: string[] = user?.role === 'super_admin' ? ['all'] : [];
+  return (
+    <Suspense fallback={<div className="py-20 text-center text-sm text-[var(--color-text-muted)]">Cargando módulo…</div>}>
+      {renderModule(activeTab, permissions)}
+    </Suspense>
+  );
+}
+
+function renderModule(activeTab: string, permissions: string[]) {
   switch (activeTab) {
     case 'dashboard':
     case 'dashboard-negocio':
     case 'dashboard-mensajero':
       return <Dashboard />;
     case 'dispatcher-verificacion':
-      return <VerificationPage permissions={permissions} />;
+      return <VerificationPage />;
     case 'dispatcher-revision':
-      return <RevisionPage permissions={permissions} />;
+      return <RevisionPage />;
     case 'disponibilidad-verificacion':
-      return <DisponibilidadVerificationPage permissions={permissions} />;
+      return <DisponibilidadVerificationPage />;
     case 'disponibilidad-revision':
-      return <DisponibilidadRevisionPage permissions={permissions} />;
+      return <DisponibilidadRevisionPage />;
     case 'conciliacion':
     case 'conciliacion-negocio':
     case 'conciliacion-mensajero':
