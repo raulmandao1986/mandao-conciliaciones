@@ -8,11 +8,13 @@
 -- dispatcher_orders, verification_history). Ver PLAN_MIGRACION.md
 -- sección 1 para el detalle de cada discrepancia.
 --
--- Alcance: SOLO fase actual -> módulos Dispatcher y Disponibilidad.
--- No incluye tablas de Negocios/Mensajeros/Configuración/Conciliación/
--- Facturación/Cuentas por Cobrar-Pagar (fase posterior, decisión #3
--- del usuario) — esos módulos se construirán desde Claude Code cuando
--- les toque su fase, no se migran desde el código UI parcial existente.
+-- Alcance original: SOLO Dispatcher y Disponibilidad (decisión #3).
+-- AMPLIADO 2026-09-08: se agregan los catálogos del módulo Gestión
+-- (payment_methods, exchange_rates) necesarios para que Verificación/
+-- Revisión del Dispatcher puedan probarse con datos reales — ver
+-- sección "MÓDULO GESTIÓN — CATÁLOGOS" más abajo. Sigue sin incluir
+-- Negocios/Mensajeros completos/Conciliación/Facturación/Cuentas por
+-- Cobrar-Pagar (esos se migran en fases siguientes).
 --
 -- Roles: super_admin / supervisor / operador / visitante (decisión #2).
 -- Se elimina cualquier otro esquema de rol (Super Admin/admin/mensajero/
@@ -317,6 +319,43 @@ create table public.messengers (
 create index idx_messengers_name_trgm on public.messengers using gin (name gin_trgm_ops);
 
 -- =====================================================================
+-- MÓDULO GESTIÓN — CATÁLOGOS (agregado 2026-09-08)
+-- =====================================================================
+-- Traducción directa de las colecciones Firestore 'MetodosPago' y
+-- 'RazonCambio' (src/modules/gestion/MetodosPagoPage.tsx.bak y
+-- RazonCambioPage.tsx.bak) — se mantienen los mismos campos y la misma
+-- lógica de negocio, solo cambia el nombre de columna a snake_case.
+
+-- 13. PAYMENT_METHODS (= 'MetodosPago'). Un solo catálogo compartido
+-- por Negocios/Mensajeros/Órdenes, filtrado por los 3 booleanos
+-- 'applies_to_*' — igual que hacía MetodosPagoPage con su prop `type`.
+create table public.payment_methods (
+  payment_method_id uuid primary key default gen_random_uuid(),
+  name text not null,
+  description text,
+  applies_to_businesses boolean not null default true,
+  applies_to_messengers boolean not null default true,
+  applies_to_orders boolean not null default true,
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- 14. EXCHANGE_RATES (= 'RazonCambio'). RN-010 "Tasa de Cambio Única
+-- Activa": al activar una tasa, todas las demás deben quedar inactivas
+-- — esa regla se aplica en la UI (RazonCambioPage), igual que en el
+-- código original, no como constraint de base de datos.
+create table public.exchange_rates (
+  exchange_rate_id uuid primary key default gen_random_uuid(),
+  name text not null,
+  rate_cup numeric(12,2) not null,
+  description text,
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- =====================================================================
 -- RLS — Row Level Security alineado a los 3 roles del sistema
 -- =====================================================================
 alter table public.areas enable row level security;
@@ -331,6 +370,8 @@ alter table public.availability_verifications enable row level security;
 alter table public.availability_incidents enable row level security;
 alter table public.messengers enable row level security;
 alter table public.profiles enable row level security;
+alter table public.payment_methods enable row level security;
+alter table public.exchange_rates enable row level security;
 
 -- Lectura: los 3 roles pueden leer (Visitante = solo lectura, según matriz de permisos)
 create policy "read_all_authenticated" on public.areas for select using (auth.role() = 'authenticated');
@@ -344,6 +385,8 @@ create policy "read_all_authenticated" on public.availability_verifications for 
 create policy "read_all_authenticated" on public.availability_incidents for select using (auth.role() = 'authenticated');
 create policy "read_all_authenticated" on public.messengers for select using (auth.role() = 'authenticated');
 create policy "read_own_profile" on public.profiles for select using (auth.uid() = id or public.is_admin_or_supervisor());
+create policy "read_all_authenticated" on public.payment_methods for select using (auth.role() = 'authenticated');
+create policy "read_all_authenticated" on public.exchange_rates for select using (auth.role() = 'authenticated');
 
 -- Escritura de Verificaciones: Super Admin, Supervisor, Operador (Operador SÍ puede ejecutar verificaciones)
 create policy "insert_verification" on public.dispatcher_verifications
@@ -391,6 +434,15 @@ create policy "manage_areas" on public.areas
   for all using (public.current_user_role() = 'super_admin')
   with check (public.current_user_role() = 'super_admin');
 create policy "manage_messengers" on public.messengers
+  for all using (public.current_user_role() = 'super_admin')
+  with check (public.current_user_role() = 'super_admin');
+
+-- Métodos de Pago, Razón de Cambio: gestión (CRUD) solo Super Admin,
+-- mismo criterio que Áreas/Mensajeros (ROLE_CAN_MANAGE_CATALOGS en auth.tsx)
+create policy "manage_payment_methods" on public.payment_methods
+  for all using (public.current_user_role() = 'super_admin')
+  with check (public.current_user_role() = 'super_admin');
+create policy "manage_exchange_rates" on public.exchange_rates
   for all using (public.current_user_role() = 'super_admin')
   with check (public.current_user_role() = 'super_admin');
 

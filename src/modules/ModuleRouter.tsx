@@ -84,13 +84,13 @@ function renderModule(activeTab: string, permissions: string[]) {
       return <AreasPage />;
     case 'metodos-pago':
     case 'metodos-pago-negocios':
-      return <MetodosPagoPage permissions={permissions} type="negocios" />;
+      return <MetodosPagoPage type="negocios" />;
     case 'metodos-pago-mensajeros':
-      return <MetodosPagoPage permissions={permissions} type="mensajeros" />;
+      return <MetodosPagoPage type="mensajeros" />;
     case 'metodos-pago-ordenes':
-      return <MetodosPagoPage permissions={permissions} type="ordenes" />;
+      return <MetodosPagoPage type="ordenes" />;
     case 'razon-cambio':
-      return <RazonCambioPage permissions={permissions} />;
+      return <RazonCambioPage />;
     case 'config-logs':
       return <LogsAuditoriaPage permissions={permissions} />;
     default:
