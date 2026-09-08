@@ -81,7 +81,7 @@ function renderModule(activeTab: string, permissions: string[]) {
     case 'roles-usuarios':
       return <RolesUsuariosPage permissions={permissions} />;
     case 'areas':
-      return <AreasPage permissions={permissions} />;
+      return <AreasPage />;
     case 'metodos-pago':
     case 'metodos-pago-negocios':
       return <MetodosPagoPage permissions={permissions} type="negocios" />;
