@@ -26,6 +26,9 @@
 16. [Anti-patrones específicos de Conciliaciones](#16-anti-patrones-específicos-de-conciliaciones)
 17. [Extensibilidad — nuevos módulos futuros](#17-extensibilidad--nuevos-módulos-futuros)
 18. [Módulo Disponibilidad](#18-módulo-disponibilidad) ✅ **FASE ACTUAL**
+19. [Backend y persistencia de datos — Migración a Supabase](#19-backend-y-persistencia-de-datos--migración-a-supabase) 🆕
+20. [Hosting en Google Cloud](#20-hosting-en-google-cloud) 🆕
+21. [Colaboración en GitHub y trabajo en paralelo](#21-colaboración-en-github-y-trabajo-en-paralelo) 🆕
 
 ---
 
@@ -60,7 +63,7 @@ Este sistema hereda **obligatoriamente** todo lo definido en la Constitución pa
 - Lucide React — **único** proveedor de íconos permitido
 - Recharts para gráficas del Dashboard
 - Framer Motion — solo para transiciones de página, slide-overs y toasts
-- Firebase Auth + Firestore (backend)
+- **Supabase Auth + Supabase (backend)** *(antes: Firebase Auth + Firestore — ver sección 19 para detalle de la migración)*
 - `react-hook-form` + `zod` para todos los formularios
 - TanStack Table para tablas complejas
 - Formatters `formatCurrency`, `formatDate`, `formatQty`, `formatPercent` importados desde `@mandao/design-system`
@@ -1312,3 +1315,68 @@ export const navConfig = {
 - ❌ Omitir el campo `area` en los registros guardados en `Availabilities`
 - ❌ Leer la columna fuente corrigiendo el error tipográfico (`solicta`) — debe leerse exactamente como está en el Google Sheet
 - ❌ Procesar el campo `amountToPay` sin convertirlo a `number` y sin usar `formatCurrency` para mostrarlo
+
+---
+
+## 19. Backend y persistencia de datos — Migración a Supabase
+
+> 🆕 Sección agregada. Documenta la migración del backend de Firebase (Auth + Firestore) a Supabase (Auth + Postgres). El resto del documento (secciones 1–18) conserva referencias a "Firestore" en la descripción de colecciones y flujos por ser el diseño de datos original; funcionalmente, esas colecciones ahora viven como **tablas de Postgres en Supabase**, gobernadas por Row Level Security en vez de reglas de seguridad de Firestore. La traducción formal colección→tabla vive en `supabase_schema.sql`, en la raíz del repo, que es la fuente de verdad del esquema actual.
+
+### 19.1 Estado de la migración
+
+- Esquema completo definido y validado en `supabase_schema.sql`: **12 tablas**, con políticas **RLS** activas en todas ellas, más funciones auxiliares (helper functions).
+- Se retiraron del esquema las tablas `email_groups` y `email_templates` (correspondientes a las colecciones `EmailGroups`/`EmailTemplates` documentadas en la sección 12 de este documento como legado de Firestore).
+- Pendiente: reemplazar componentes que aún importan la ruta eliminada `src/lib/firebase` (ej. `RolesUsuariosPage.tsx`) por componentes placeholder mientras se completa su migración.
+- Diferidas para trabajo con Claude Code y pruebas en navegador en vivo: `VerificationPage.tsx`, `RevisionPage.tsx`, `DisponibilidadVerificationPage.tsx`, `DisponibilidadRevisionPage.tsx`.
+- Módulos aún no construidos (Gestión, Conciliación, Facturación) se desarrollarán directamente sobre Supabase, sin pasar por Firebase.
+
+### 19.2 Autenticación
+
+- Proveedor: **Supabase Auth**, con Google OAuth configurado vía Google Cloud ("Google Auth Platform").
+- Se preservan los scopes de Google para **Sheets** y **Gmail**: el sistema sigue leyendo Google Sheets directamente y enviando correo desde la cuenta del usuario autenticado, usando el `google_access_token` almacenado en `session storage`.
+
+### 19.3 Roles — nota de correspondencia con la sección 4
+
+La sección 4 de este documento agrupa "Super Admin" y "Supervisor" en una sola fila de permisos. En Supabase, esos siguen siendo **roles distintos** almacenados en `profiles.role`, con **4 valores fijos**:
+
+- `super_admin`
+- `supervisor`
+- `operador`
+- `visitante`
+
+Este esquema reemplaza el sistema anterior basado en patrones de email. La matriz de permisos de la sección 4 sigue siendo válida como referencia funcional; la diferencia es a nivel de almacenamiento (dos valores de rol con el mismo conjunto de permisos, en vez de uno).
+
+### 19.4 Actores del sistema (actualización de la sección 4)
+
+Donde la sección 4 indica **Firestore** como actor no humano ("Almacenamiento validado, búsquedas, historial"), léase ahora **Supabase (Postgres)**, cumpliendo la misma función.
+
+---
+
+## 20. Hosting en Google Cloud
+
+> 🆕 Sección agregada. El sistema debe quedar desplegado y accesible para otros usuarios (no solo en entorno local), usando Google Cloud como proveedor de hosting.
+
+### 20.1 Opciones de despliegue para el frontend (React/Vite)
+
+- **Cloud Run** (recomendado): empaquetar el build de producción (`npm run build`) en un contenedor con un servidor estático liviano (nginx) y desplegarlo como servicio. Escala a cero, HTTPS incluido, fácil de actualizar en cada release.
+- **Cloud Storage + Cloud CDN/Load Balancer**: alternativa más económica para hosting puramente estático, sin contenedor.
+
+### 20.2 Pendientes de definición
+
+- Proyecto de Google Cloud a usar (puede ser el mismo donde está configurado el OAuth Client ID).
+- Dominio o subdominio de acceso para los usuarios finales.
+- Gestión de variables de entorno de producción (URL y anon key de Supabase, Client ID de Google OAuth) como secretos — **nunca** hardcodeadas en el código ni subidas al repositorio.
+- Pipeline de despliegue: manual al inicio (`gcloud run deploy`), automatizable después vía GitHub Actions.
+
+---
+
+## 21. Colaboración en GitHub y trabajo en paralelo
+
+> 🆕 Sección agregada. El repositorio ya está sincronizado con el proyecto local. Estas reglas aplican para que otros usuarios puedan colaborar en paralelo sin pisarse el trabajo.
+
+1. **Invitar colaboradores** al repositorio (GitHub → Settings → Collaborators, o vía organización si aplica).
+2. **Rama `main` protegida**: evitar pushes directos; toda integración de cambios pasa por Pull Request.
+3. **Convención de ramas**: una rama por feature/fix (ej. `feature/conciliacion-modulo`, `fix/roles-usuarios`).
+4. **Revisión de Pull Requests** antes de mergear a `main`, para reducir conflictos entre quienes trabajan en paralelo.
+5. **Variables sensibles** (claves de Supabase, credenciales OAuth) nunca se suben al repo — usar `.env` (incluido en `.gitignore`) y compartir credenciales por un canal seguro aparte.
+6. Cada colaborador debe tener acceso controlado al proyecto de Supabase (propio entorno de desarrollo o acceso compartido, según se decida) y a las variables de entorno necesarias para levantar el proyecto en local.
