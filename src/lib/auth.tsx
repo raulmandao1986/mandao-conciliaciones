@@ -1,5 +1,5 @@
 import { createContext, useContext, ReactNode, useState, useEffect } from 'react';
-import { supabase, syncGoogleTokenToSessionStorage } from './supabase';
+import { supabase, syncGoogleTokenToSessionStorage, ALLOWED_EMAIL_DOMAIN } from './supabase';
 import type { Session } from '@supabase/supabase-js';
 
 // Modelo de roles fijo — decisión confirmada: solo estos 4 existen.
@@ -21,6 +21,7 @@ interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  authError: string | null;
   logout: () => Promise<void>;
   reloadPermissions: () => Promise<void>;
 }
@@ -56,15 +57,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<{ role: UserRole; active: boolean; full_name: string } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   const loadProfile = async (userId: string) => {
     const p = await fetchProfile(userId);
     setProfile(p);
   };
 
+  // Segunda capa de defensa: aunque la pantalla de consentimiento OAuth
+  // de Google Cloud no esté restringida a la organización, ninguna sesión
+  // de un dominio distinto a ALLOWED_EMAIL_DOMAIN debe quedar activa aquí.
+  const isAllowedEmail = (email: string | undefined) =>
+    !!email && email.toLowerCase().endsWith(`@${ALLOWED_EMAIL_DOMAIN}`);
+
+  const rejectSession = async (email: string | undefined) => {
+    setAuthError(
+      `Acceso restringido a cuentas @${ALLOWED_EMAIL_DOMAIN}` +
+        (email ? ` (se intentó entrar con ${email}).` : '.')
+    );
+    setProfile(null);
+    setSession(null);
+    sessionStorage.removeItem('google_access_token');
+    await supabase.auth.signOut();
+  };
+
   useEffect(() => {
     // Sesión inicial al cargar la app
     supabase.auth.getSession().then(async ({ data }) => {
+      if (data.session?.user && !isAllowedEmail(data.session.user.email)) {
+        setIsLoading(false);
+        await rejectSession(data.session.user.email);
+        return;
+      }
       setSession(data.session);
       if (data.session?.user) {
         await syncGoogleTokenToSessionStorage();
@@ -75,6 +99,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     // Cambios de sesión (login, logout, refresh de token)
     const { data: listener } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
+      if (newSession?.user && !isAllowedEmail(newSession.user.email)) {
+        setIsLoading(false);
+        await rejectSession(newSession.user.email);
+        return;
+      }
+      setAuthError(null);
       setSession(newSession);
       if (newSession?.user) {
         await syncGoogleTokenToSessionStorage();
@@ -118,6 +148,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         user,
         isAuthenticated: !!session?.user,
         isLoading,
+        authError,
         logout,
         reloadPermissions,
       }}

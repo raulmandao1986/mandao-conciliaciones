@@ -22,6 +22,13 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 export const GOOGLE_SCOPES =
   'https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/gmail.send';
 
+// Dominio de Google Workspace autorizado a usar el sistema. La barrera
+// real debe estar en la pantalla de consentimiento OAuth de Google Cloud
+// (tipo "Interno"); esto es una segunda capa de defensa en el propio
+// cliente/servidor para que una cuenta fuera del dominio nunca quede
+// con una sesión válida, aunque el consentimiento OAuth no la bloquee.
+export const ALLOWED_EMAIL_DOMAIN = 'mandao.app';
+
 export type AuditLogModule =
   | 'Verificacion'
   | 'Revision'
@@ -65,7 +72,7 @@ export const signInWithGoogle = async () => {
     provider: 'google',
     options: {
       scopes: GOOGLE_SCOPES,
-      queryParams: { access_type: 'offline', prompt: 'consent' },
+      queryParams: { access_type: 'offline', prompt: 'consent', hd: ALLOWED_EMAIL_DOMAIN },
       redirectTo: window.location.origin,
     },
   });

@@ -1,10 +1,13 @@
 import React from 'react';
 import { Button } from '../../design-system/primitives/Button';
 import { signInWithGoogle } from '../../lib/supabase';
-import { LogIn, ShieldCheck } from 'lucide-react';
+import { useAuth } from '../../lib/auth';
+import { LogIn, ShieldCheck, AlertTriangle } from 'lucide-react';
 import { motion } from 'motion/react';
 
 export function LoginPage() {
+  const { authError } = useAuth();
+
   const handleLogin = async () => {
     try {
       await signInWithGoogle();
@@ -30,15 +33,22 @@ export function LoginPage() {
         </p>
 
         <div className="space-y-4">
-          <Button 
-            variant="brand" 
+          {authError && (
+            <div className="flex items-start gap-2 text-left bg-red-500/10 border border-red-500/30 text-red-500 rounded-[var(--radius-md)] p-3 text-sm">
+              <AlertTriangle size={18} className="shrink-0 mt-0.5" />
+              <span>{authError}</span>
+            </div>
+          )}
+
+          <Button
+            variant="brand"
             className="w-full h-12 gap-3 text-base shadow-sm"
             onClick={handleLogin}
           >
             <LogIn size={20} />
             Continuar con Google
           </Button>
-          
+
           <p className="text-[10px] text-[var(--color-text-faint)] uppercase tracking-widest font-bold">
             Acceso restringido a @mandao.app
           </p>
