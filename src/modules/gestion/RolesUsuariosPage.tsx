@@ -2,9 +2,9 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { DataTable } from '../../design-system/patterns/DataTable';
 import { StatusBadge } from '../../design-system/primitives/StatusBadge';
 import { Button } from '../../design-system/primitives/Button';
-import { supabase, logAuditEvent } from '../../lib/supabase';
+import { supabase, logAuditEvent, ALLOWED_EMAIL_DOMAIN } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_MANAGE_CATALOGS, UserRole } from '../../lib/auth';
-import { ShieldCheck, Search, Loader2, Edit2, Mail, Calendar, Save } from 'lucide-react';
+import { ShieldCheck, Search, Loader2, Edit2, Mail, Calendar, Save, Plus, UserPlus } from 'lucide-react';
 import { SlideOver } from '../../design-system/primitives/SlideOver';
 import { cn } from '../../lib/utils';
 import { formatDate } from '../../lib/formatters';
@@ -44,6 +44,12 @@ export function RolesUsuariosPage() {
   const [selectedUser, setSelectedUser] = useState<UserRecord | null>(null);
   const [formData, setFormData] = useState({ rol: 'visitante' as UserRole, activo: true });
   const [saving, setSaving] = useState(false);
+
+  const [isInviteOpen, setIsInviteOpen] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<UserRole>('visitante');
+  const [inviting, setInviting] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
 
   const loadUsers = async () => {
     setLoading(true);
@@ -111,6 +117,55 @@ export function RolesUsuariosPage() {
     }
   };
 
+  const handleOpenInvite = () => {
+    setInviteEmail('');
+    setInviteRole('visitante');
+    setInviteError(null);
+    setIsInviteOpen(true);
+  };
+
+  // No existe una forma de "crear" un usuario directamente: profiles.id
+  // referencia auth.users(id), y esa fila solo la crea Supabase Auth
+  // cuando alguien inicia sesión de verdad. signInWithOtp({ shouldCreateUser: true })
+  // es la única vía que no requiere la Service Role Key (que nunca debe
+  // vivir en el frontend): registra al usuario y le envía un enlace de
+  // acceso por correo. El trigger handle_new_user() crea su profile con
+  // rol 'visitante' en el mismo instante; aquí lo ajustamos al rol elegido.
+  const handleInvite = async () => {
+    const email = inviteEmail.trim().toLowerCase();
+    setInviteError(null);
+
+    if (!email.endsWith(`@${ALLOWED_EMAIL_DOMAIN}`)) {
+      setInviteError(`El correo debe ser de dominio @${ALLOWED_EMAIL_DOMAIN}.`);
+      return;
+    }
+
+    setInviting(true);
+    try {
+      const { error: otpError } = await supabase.auth.signInWithOtp({
+        email,
+        options: { shouldCreateUser: true, emailRedirectTo: window.location.origin },
+      });
+      if (otpError) throw otpError;
+
+      // El trigger ya creó (o ya existía) el profile — le fijamos el rol elegido.
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({ role: inviteRole, updated_at: new Date().toISOString() })
+        .eq('email', email);
+      if (updateError) throw updateError;
+
+      logAuditEvent('Configuraciones', 'Usuario Invitado', { email, rolAsignado: inviteRole });
+      setIsInviteOpen(false);
+      await loadUsers();
+    } catch (err: any) {
+      console.error('Error inviting user:', err);
+      setInviteError(err?.message || 'No se pudo enviar la invitación.');
+    } finally {
+      setInviting(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -121,16 +176,24 @@ export function RolesUsuariosPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <div className="p-3 bg-brand-subtle rounded-xl border border-brand-active-border">
-          <ShieldCheck className="w-6 h-6 text-brand-ink" />
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="p-3 bg-brand-subtle rounded-xl border border-brand-active-border">
+            <ShieldCheck className="w-6 h-6 text-brand-ink" />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold text-[var(--color-text)]">Roles y Usuarios</h1>
+            <p className="text-sm text-[var(--color-text-muted)] mt-1">
+              Administre el rol de cada usuario registrado. El sistema usa 4 roles fijos: Super Admin, Supervisor, Operador y Visitante.
+            </p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-xl font-bold text-[var(--color-text)]">Roles y Usuarios</h1>
-          <p className="text-sm text-[var(--color-text-muted)] mt-1">
-            Administre el rol de cada usuario registrado. El sistema usa 4 roles fijos: Super Admin, Supervisor, Operador y Visitante.
-          </p>
-        </div>
+        {canWrite && (
+          <Button variant="brand" className="gap-2 shrink-0" onClick={handleOpenInvite}>
+            <Plus size={18} />
+            Nuevo Usuario
+          </Button>
+        )}
       </div>
 
       <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)] shadow-sm overflow-hidden">
@@ -276,6 +339,57 @@ export function RolesUsuariosPage() {
               </button>
             </div>
           </div>
+        </div>
+      </SlideOver>
+
+      <SlideOver
+        isOpen={isInviteOpen}
+        onClose={() => setIsInviteOpen(false)}
+        title="Invitar Nuevo Usuario"
+        footer={
+          <div className="flex gap-3">
+            <Button variant="ghost" className="flex-1" onClick={() => setIsInviteOpen(false)}>Cancelar</Button>
+            <Button variant="brand" className="flex-1" onClick={handleInvite} disabled={!inviteEmail || inviting}>
+              {inviting ? <Loader2 size={16} className="mr-2 inline animate-spin" /> : <UserPlus size={16} className="mr-2 inline" />}
+              Enviar Invitación
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-6">
+          <p className="text-sm text-[var(--color-text-muted)] leading-relaxed">
+            No existe un formulario de "crear usuario": las cuentas se autentican con Google, así que
+            esto le enviará un enlace de acceso a su correo y, en cuanto lo use, ya tendrá asignado el
+            rol que elijas aquí (en vez de entrar como Visitante por defecto).
+          </p>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-bold text-[var(--color-text)]">Correo (@{ALLOWED_EMAIL_DOMAIN})</label>
+            <input
+              type="email"
+              value={inviteEmail}
+              onChange={(e) => setInviteEmail(e.target.value)}
+              placeholder={`nombre@${ALLOWED_EMAIL_DOMAIN}`}
+              className="w-full h-10 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)] transition-all"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-bold text-[var(--color-text)]">Rol Inicial</label>
+            <select
+              value={inviteRole}
+              onChange={(e) => setInviteRole(e.target.value as UserRole)}
+              className="w-full h-10 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] transition-all"
+            >
+              {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+            </select>
+          </div>
+
+          {inviteError && (
+            <div className="text-sm text-[var(--color-danger)] bg-[var(--color-danger-bg)] p-3 rounded-[var(--radius-sm)]">
+              {inviteError}
+            </div>
+          )}
         </div>
       </SlideOver>
     </div>
