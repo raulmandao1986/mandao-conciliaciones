@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../../lib/utils';
-import { logAuditEvent } from '../../lib/firebase';
+import { logAuditEvent } from '../../lib/supabase';
 
 interface ScheduledPayout {
   id: string;
