@@ -1401,3 +1401,30 @@ gcloud run deploy mandao-conciliaciones \
 4. **Revisión de Pull Requests** antes de mergear a `main`, para reducir conflictos entre quienes trabajan en paralelo.
 5. **Variables sensibles** (claves de Supabase, credenciales OAuth) nunca se suben al repo — usar `.env` (incluido en `.gitignore`) y compartir credenciales por un canal seguro aparte.
 6. Cada colaborador debe tener acceso controlado al proyecto de Supabase (propio entorno de desarrollo o acceso compartido, según se decida) y a las variables de entorno necesarias para levantar el proyecto en local.
+
+---
+
+## 22. Integración de Razón de Cambio con la API de El Toque
+
+> 🆕 Sección agregada. `RazonCambioPage.tsx` sigue permitiendo cargar tasas manualmente, pero además puede sincronizar automáticamente la tasa informal USD/CUP publicada por El Toque (https://tasas.eltoque.com/docs/).
+
+### 22.1 Piezas involucradas
+
+- `supabase/functions/sync-exchange-rate/index.ts` — Edge Function (Deno) que llama a `GET https://tasas.eltoque.com/v1/trmi` con un token Bearer y hace upsert de la fila `exchange_rates` llamada **"Tasa Informal (El Toque)"**. No decide cuál tasa queda "activa" — eso lo sigue controlando un Super Admin desde la UI (regla RN-010, una sola tasa activa a la vez).
+- `supabase/migrations/2026-09-10_exchange_rate_cron.sql` — programa un job de `pg_cron` que invoca la función todos los días a las 08:00 hora de Cuba.
+- Botón **"Sincronizar con El Toque"** en `RazonCambioPage.tsx` (visible solo para quien puede gestionar catálogos) — invoca la misma función bajo demanda, autenticado con la sesión del usuario.
+
+### 22.2 Pendientes de definición (requieren acción directa, no solo código)
+
+- **Token de El Toque**: solicitarlo en https://tasas-token.eltoque.com/ (formulario propio de El Toque, gratuito). Nunca pegarlo en el código ni en el chat — se guarda como secreto de la función:
+  ```bash
+  npx supabase functions deploy sync-exchange-rate --no-verify-jwt
+  npx supabase secrets set ELTOQUE_API_TOKEN=<token>
+  npx supabase secrets set CRON_SECRET=<una cadena aleatoria larga>
+  ```
+- **Vault de Supabase**: guardar ese mismo `CRON_SECRET` en el Vault del proyecto (una sola vez, desde el SQL Editor del dashboard — no versionado):
+  ```sql
+  select vault.create_secret('<el-mismo-valor-de-CRON_SECRET>', 'cron_shared_secret');
+  ```
+- **Extensiones y cron job**: habilitar `pg_cron`/`pg_net` (Dashboard → Database → Extensions) y correr `supabase/migrations/2026-09-10_exchange_rate_cron.sql` reemplazando `<PROJECT_REF>` por el ref real del proyecto.
+- La respuesta 200 de `/v1/trmi` no tiene un schema publicado formalmente; la función soporta las formas conocidas (`{ tasas: { USD } }` o `{ usd }` / `{ USD }` en la raíz). Si El Toque cambia el formato, revisar `supabase/functions/sync-exchange-rate/index.ts`.

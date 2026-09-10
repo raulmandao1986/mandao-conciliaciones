@@ -51,6 +51,9 @@ export function RazonCambioPage() {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [rateIdToDelete, setRateIdToDelete] = useState<string | null>(null);
 
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+
   const loadRates = async () => {
     setLoading(true);
     const { data: rows, error } = await supabase
@@ -157,6 +160,25 @@ export function RazonCambioPage() {
     setDeleteConfirmOpen(true);
   };
 
+  // Llama a la Edge Function 'sync-exchange-rate' (supabase/functions/),
+  // que consulta la API de El Toque server-side (el token nunca llega al
+  // frontend) y actualiza la fila "Tasa Informal (El Toque)".
+  const handleSyncElToque = async () => {
+    setSyncing(true);
+    setSyncError(null);
+    try {
+      const { data, error } = await supabase.functions.invoke('sync-exchange-rate');
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      await loadRates();
+    } catch (err: any) {
+      console.error('Error sincronizando con El Toque:', err);
+      setSyncError(err?.message || 'No se pudo sincronizar con El Toque.');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const handleConfirmDelete = async () => {
     if (!rateIdToDelete) return;
     try {
@@ -195,12 +217,24 @@ export function RazonCambioPage() {
           </div>
         </div>
         {canWrite && (
-          <Button variant="brand" className="gap-2" onClick={handleNew}>
-            <Plus size={18} />
-            Nueva Tasa
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" className="gap-2" onClick={handleSyncElToque} disabled={syncing}>
+              <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
+              {syncing ? 'Sincronizando…' : 'Sincronizar con El Toque'}
+            </Button>
+            <Button variant="brand" className="gap-2" onClick={handleNew}>
+              <Plus size={18} />
+              Nueva Tasa
+            </Button>
+          </div>
         )}
       </div>
+
+      {syncError && (
+        <div className="text-sm text-[var(--color-danger)] bg-[var(--color-danger-bg)] p-3 rounded-[var(--radius-sm)]">
+          {syncError}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="md:col-span-1 bg-[var(--color-brand-active)] border border-[var(--color-brand)] p-6 rounded-[var(--radius-md)] flex flex-col justify-between">
