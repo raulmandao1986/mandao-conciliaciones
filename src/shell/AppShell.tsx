@@ -24,8 +24,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
-  RefreshCw,
-  Download
+  RefreshCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth, UserRole } from '../lib/auth';
@@ -377,17 +376,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className="flex items-center gap-2 sm:gap-3">
-          <a
-            href="/mandao-conciliaciones-source.zip"
-            download="mandao-conciliaciones-source.zip"
-            className="p-2 hover:bg-[var(--color-surface-3)] rounded-[var(--radius-sm)] text-teal-700 hover:text-teal-900 transition-all active:scale-95 flex items-center gap-1.5 border border-teal-200 shadow-sm bg-teal-50/60"
-            title="Descargar ZIP con todo el Código Fuente"
-          >
-            <Download size={16} className="text-teal-600" />
-            <span className="text-xs font-semibold hidden md:inline">Descargar Código (.zip)</span>
-          </a>
-
-          <button 
+          <button
             onClick={() => { setActiveDebugTab('instrucciones'); setIsDebugOpen(true); }}
             className="p-2 hover:bg-[var(--color-surface-3)] rounded-[var(--radius-sm)] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-all active:scale-95 flex items-center gap-1.5 border border-[var(--color-border)] shadow-sm bg-white"
             title="Instrucciones y Ajustes del Sistema"
