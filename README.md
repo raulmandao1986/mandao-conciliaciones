@@ -1,20 +1,47 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Mandao Conciliaciones
 
-# Run and deploy your AI Studio app
+Plataforma interna de gestión administrativa y financiera del ecosistema Mandao (React 19 + Vite + Supabase). Acceso restringido a cuentas `@mandao.app`.
 
-This contains everything you need to run your app locally.
+Documentación funcional completa (roles, módulos, reglas de negocio, esquema de base de datos, hosting): [`Instrucciones Conciliaciones Mandao.md`](./Instrucciones%20Conciliaciones%20Mandao.md).
 
-View your app in AI Studio: https://ai.studio/apps/ba59d5e3-e79b-42a2-8a15-00c65686e34e
+## Correr en local
 
-## Run Locally
+**Requisitos:** Node.js 20+.
 
-**Prerequisites:**  Node.js
+1. Instalar dependencias:
+   ```bash
+   npm install
+   ```
+2. Crear `.env.local` (a partir de `.env.example`) con:
+   ```
+   SUPABASE_URL=https://<tu-proyecto>.supabase.co
+   SUPABASE_ANON_KEY=<tu-anon-key>
+   ```
+3. Levantar el servidor de desarrollo:
+   ```bash
+   npm run dev
+   ```
 
+## Scripts
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+- `npm run dev` — servidor de desarrollo (Vite, puerto 3000)
+- `npm run build` — build de producción a `dist/`
+- `npm run lint` — type-check (`tsc --noEmit`)
+- `npm run preview` — sirve el build de `dist/` en local
+
+## Despliegue a producción (Google Cloud Run)
+
+Ver la sección 20 de [`Instrucciones Conciliaciones Mandao.md`](./Instrucciones%20Conciliaciones%20Mandao.md) para el detalle completo. Resumen rápido, con el `Dockerfile` de la raíz:
+
+```bash
+gcloud builds submit \
+  --tag gcr.io/<PROYECTO_GCP>/mandao-conciliaciones \
+  --substitutions=_SUPABASE_URL=<url>,_SUPABASE_ANON_KEY=<anon-key>
+
+gcloud run deploy mandao-conciliaciones \
+  --image gcr.io/<PROYECTO_GCP>/mandao-conciliaciones \
+  --region <region> \
+  --allow-unauthenticated
+```
+
+`SUPABASE_URL` / `SUPABASE_ANON_KEY` se incrustan en el bundle en tiempo de **build** (no de runtime), por eso van como build args/substitutions y no como variables de entorno del servicio de Cloud Run.

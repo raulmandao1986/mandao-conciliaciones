@@ -1358,15 +1358,36 @@ Donde la sección 4 indica **Firestore** como actor no humano ("Almacenamiento v
 
 ### 20.1 Opciones de despliegue para el frontend (React/Vite)
 
-- **Cloud Run** (recomendado): empaquetar el build de producción (`npm run build`) en un contenedor con un servidor estático liviano (nginx) y desplegarlo como servicio. Escala a cero, HTTPS incluido, fácil de actualizar en cada release.
-- **Cloud Storage + Cloud CDN/Load Balancer**: alternativa más económica para hosting puramente estático, sin contenedor.
+- **Cloud Run** (recomendado, elegido): empaquetar el build de producción (`npm run build`) en un contenedor con un servidor estático liviano (nginx) y desplegarlo como servicio. Escala a cero, HTTPS incluido, fácil de actualizar en cada release.
+- **Cloud Storage + Cloud CDN/Load Balancer**: alternativa más económica para hosting puramente estático, sin contenedor. Descartada por ahora a favor de Cloud Run.
 
-### 20.2 Pendientes de definición
+### 20.2 Artefactos de despliegue (ya en el repo)
 
-- Proyecto de Google Cloud a usar (puede ser el mismo donde está configurado el OAuth Client ID).
-- Dominio o subdominio de acceso para los usuarios finales.
-- Gestión de variables de entorno de producción (URL y anon key de Supabase, Client ID de Google OAuth) como secretos — **nunca** hardcodeadas en el código ni subidas al repositorio.
-- Pipeline de despliegue: manual al inicio (`gcloud run deploy`), automatizable después vía GitHub Actions.
+- `Dockerfile` (raíz del repo): build multi-stage — `node:20-alpine` compila con `npm run build`, y `nginx:1.27-alpine` sirve el resultado. `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `GEMINI_API_KEY` se pasan como `--build-arg` porque Vite los incrusta en el bundle en tiempo de **build**, no de runtime (ver `vite.config.ts`).
+- `nginx.conf` (raíz del repo): sirve `dist/` en el puerto `8080` (el que espera Cloud Run) con fallback de SPA (`try_files ... /index.html`) para que `react-router-dom` funcione en rutas directas.
+- `.dockerignore`: excluye `node_modules`, `.env*`, `.git`, etc. del contexto de build.
+
+Despliegue manual de referencia (ver también `README.md`):
+
+```bash
+gcloud builds submit \
+  --tag gcr.io/<PROYECTO_GCP>/mandao-conciliaciones
+
+gcloud run deploy mandao-conciliaciones \
+  --image gcr.io/<PROYECTO_GCP>/mandao-conciliaciones \
+  --region <region> \
+  --allow-unauthenticated
+```
+
+(`gcloud builds submit` con un `Dockerfile` que usa `ARG` requiere pasar los build args vía `--config` con un `cloudbuild.yaml`, o construir con `docker build --build-arg ...` y `docker push` si se prefiere hacerlo desde una máquina con Docker local.)
+
+### 20.3 Pendientes de definición (requieren una decisión/acción del equipo, no del código)
+
+- **Proyecto de Google Cloud**: se decidió crear un proyecto nuevo dedicado a producción (no reutilizar el proyecto de AI Studio `gen-lang-client-0443536572`). Falta crearlo y anotar aquí su ID.
+- **OAuth Client ID de Google**: reconfigurar en el proyecto nuevo, con pantalla de consentimiento tipo **"Interna"** (restringida a la organización `mandao.app`) — es la barrera real de acceso; el código ya trae una segunda capa de verificación de dominio (`src/lib/auth.tsx`, `ALLOWED_EMAIL_DOMAIN` en `src/lib/supabase.ts`).
+- **Dominio o subdominio** de acceso para los usuarios finales (ej. `conciliaciones.mandao.app`) — pendiente de elegir y mapear vía Cloud Run Domain Mappings + DNS.
+- **Gestión de secretos** en Cloud Build/Cloud Run (Secret Manager u otro mecanismo) para `SUPABASE_URL`, `SUPABASE_ANON_KEY` y el Client ID — nunca hardcodeados ni subidos al repositorio.
+- **Pipeline de despliegue**: manual al inicio (`gcloud run deploy`), automatizable después vía GitHub Actions.
 
 ---
 
