@@ -31,8 +31,14 @@ const ROLE_OPTIONS: UserRole[] = ['super_admin', 'supervisor', 'operador', 'visi
 // 'users' + 'roles', con permisos configurables por checklist). Ese modelo
 // ya no aplica — auth.tsx migró el sistema a 4 roles FIJOS (sección 19.3
 // del documento de instrucciones), definidos en profiles.role, sin tabla
-// de roles configurables. Esta página administra el rol de usuarios ya
-// registrados (vía Google OAuth); no crea usuarios nuevos.
+// de roles configurables.
+//
+// MODELO DE AUTORIZACIÓN (2026-09-10): autenticarse con Google @mandao.app
+// ya no da acceso por sí solo. Todo profile nuevo entra con active = false
+// ("pendiente de autorización") — App.tsx muestra una pantalla de espera
+// en vez del sistema hasta que un Super Admin lo autoriza aquí (asignando
+// rol y marcándolo Autorizado). "Nuevo Usuario" hace lo mismo por
+// adelantado, invitando a alguien que todavía no ha iniciado sesión.
 export function RolesUsuariosPage() {
   const { user: authUser } = useAuth();
   const canWrite = ROLE_CAN_MANAGE_CATALOGS(authUser?.role || 'visitante');
@@ -77,6 +83,8 @@ export function RolesUsuariosPage() {
   useEffect(() => {
     loadUsers();
   }, []);
+
+  const pendingCount = useMemo(() => users.filter(u => !u.activo).length, [users]);
 
   const filteredUsers = useMemo(() => {
     return users.filter(u =>
@@ -148,10 +156,12 @@ export function RolesUsuariosPage() {
       });
       if (otpError) throw otpError;
 
-      // El trigger ya creó (o ya existía) el profile — le fijamos el rol elegido.
+      // El trigger ya creó (con active = false) o ya existía el profile —
+      // como este alta la hace explícitamente un Super Admin, se autoriza
+      // de inmediato con el rol elegido en vez de dejarlo pendiente.
       const { error: updateError } = await supabase
         .from('profiles')
-        .update({ role: inviteRole, updated_at: new Date().toISOString() })
+        .update({ role: inviteRole, active: true, updated_at: new Date().toISOString() })
         .eq('email', email);
       if (updateError) throw updateError;
 
@@ -184,7 +194,8 @@ export function RolesUsuariosPage() {
           <div>
             <h1 className="text-xl font-bold text-[var(--color-text)]">Roles y Usuarios</h1>
             <p className="text-sm text-[var(--color-text-muted)] mt-1">
-              Administre el rol de cada usuario registrado. El sistema usa 4 roles fijos: Super Admin, Supervisor, Operador y Visitante.
+              Autenticarse con Google @mandao.app no da acceso por sí solo: solo quien esté registrado
+              aquí, con un rol asignado, ve el sistema. 4 roles fijos: Super Admin, Supervisor, Operador y Visitante.
             </p>
           </div>
         </div>
@@ -195,6 +206,15 @@ export function RolesUsuariosPage() {
           </Button>
         )}
       </div>
+
+      {pendingCount > 0 && (
+        <div className="flex items-center gap-2 text-sm text-[var(--color-warning)] bg-[var(--color-warning-bg)] p-3 rounded-[var(--radius-sm)]">
+          <ShieldCheck size={16} />
+          {pendingCount === 1
+            ? 'Hay 1 usuario pendiente de autorización.'
+            : `Hay ${pendingCount} usuarios pendientes de autorización.`}
+        </div>
+      )}
 
       <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)] shadow-sm overflow-hidden">
         <div className="p-4 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] flex items-center justify-between gap-4">
@@ -244,7 +264,7 @@ export function RolesUsuariosPage() {
             },
             {
               header: 'Estado',
-              accessor: (item) => <StatusBadge status={item.activo ? 'activo' : 'bloqueado'} />
+              accessor: (item) => <StatusBadge status={item.activo ? 'activo' : 'pendiente'} />
             },
             {
               header: 'Acciones',
@@ -315,7 +335,9 @@ export function RolesUsuariosPage() {
           </div>
 
           <div className="space-y-1.5">
-            <label className="text-xs font-bold text-[var(--color-text)] block mb-2">Estado</label>
+            <label className="text-xs font-bold text-[var(--color-text)] block mb-2">
+              Estado de Acceso
+            </label>
             <div className="flex gap-2">
               <button
                 type="button"
@@ -325,7 +347,7 @@ export function RolesUsuariosPage() {
                   formData.activo ? 'bg-teal-50 border-teal-500 text-teal-700' : 'border-[var(--color-border)] text-[var(--color-text-muted)] hover:bg-gray-50'
                 )}
               >
-                Activo
+                Autorizado
               </button>
               <button
                 type="button"
@@ -335,9 +357,12 @@ export function RolesUsuariosPage() {
                   !formData.activo ? 'bg-red-50 border-red-500 text-red-700' : 'border-[var(--color-border)] text-[var(--color-text-muted)] hover:bg-gray-50'
                 )}
               >
-                Bloqueado
+                Pendiente / Sin acceso
               </button>
             </div>
+            <p className="text-xs text-[var(--color-text-faint)] pt-1">
+              Solo "Autorizado" permite iniciar sesión en el sistema; el rol elegido arriba define qué ve.
+            </p>
           </div>
         </div>
       </SlideOver>
@@ -358,9 +383,10 @@ export function RolesUsuariosPage() {
       >
         <div className="space-y-6">
           <p className="text-sm text-[var(--color-text-muted)] leading-relaxed">
-            No existe un formulario de "crear usuario": las cuentas se autentican con Google, así que
-            esto le enviará un enlace de acceso a su correo y, en cuanto lo use, ya tendrá asignado el
-            rol que elijas aquí (en vez de entrar como Visitante por defecto).
+            No existe un formulario de "crear usuario": las cuentas se autentican con Google. Esto le
+            enviará un enlace de acceso a su correo y lo autoriza de una vez con el rol que elijas aquí —
+            de lo contrario, cualquiera que se autentique por su cuenta queda pendiente de aprobación
+            hasta que alguien lo autorice desde esta misma página.
           </p>
 
           <div className="space-y-1.5">

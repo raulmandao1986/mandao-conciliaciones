@@ -54,12 +54,19 @@ comment on table public.profiles is 'Extiende auth.users con el rol de negocio (
 -- expone ese esquema). Se copia aquí en el registro y queda disponible
 -- para lectura vía la política "read_own_profile" existente.
 
--- Trigger: crear profile automáticamente al registrar un usuario en Supabase Auth
+-- Trigger: crear profile automáticamente al registrar un usuario en Supabase Auth.
+-- MODELO DE AUTORIZACIÓN (agregado 2026-09-10): pertenecer al dominio
+-- @mandao.app permite AUTENTICARSE, pero no da acceso al sistema por sí
+-- solo. Todo profile nuevo entra con active = false ("pendiente de
+-- autorización"); un Super Admin debe encontrarlo en Roles y Usuarios,
+-- asignarle un rol real y activarlo. Antes de esto, la app muestra una
+-- pantalla de "pendiente de aprobación" en vez del sistema (ver
+-- src/lib/auth.tsx e Instrucciones Conciliaciones Mandao.md sección 19.3.
 create or replace function public.handle_new_user()
 returns trigger as $$
 begin
-  insert into public.profiles (id, full_name, email, role)
-  values (new.id, coalesce(new.raw_user_meta_data->>'full_name', new.email), new.email, 'visitante');
+  insert into public.profiles (id, full_name, email, role, active)
+  values (new.id, coalesce(new.raw_user_meta_data->>'full_name', new.email), new.email, 'visitante', false);
   return new;
 end;
 $$ language plpgsql security definer;
@@ -75,13 +82,18 @@ create trigger on_auth_user_created
 -- is_admin_or_supervisor() -> current_user_role() -> profiles...
 -- recursión infinita ("stack depth limit exceeded") que rompía
 -- CUALQUIER escritura en toda la base, para cualquier rol.
+-- AMPLIADO 2026-09-10: un usuario con active = false (pendiente de
+-- autorización, o desactivado por un Super Admin) no tiene rol efectivo
+-- para NINGUNA política — devolver NULL aquí hace que is_admin_or_supervisor()
+-- y can_execute_processes() (ambas construidas sobre esta función) nieguen
+-- automáticamente, sin tener que tocar cada política una por una.
 create or replace function public.current_user_role()
 returns public.user_role
 language sql stable
 security definer
 set search_path = public
 as $$
-  select role from public.profiles where id = auth.uid();
+  select role from public.profiles where id = auth.uid() and active = true;
 $$;
 
 create or replace function public.is_admin_or_supervisor()
@@ -89,6 +101,19 @@ returns boolean
 language sql stable
 as $$
   select public.current_user_role() in ('super_admin', 'supervisor');
+$$;
+
+-- Usado por las políticas de SELECT "read_all_authenticated": estas no
+-- pasaban por current_user_role() (solo chequeaban auth.role() =
+-- 'authenticated', es decir, "está logueado en Supabase", sin mirar
+-- profiles.active en absoluto) — por eso necesitan su propio helper.
+create or replace function public.is_active_user()
+returns boolean
+language sql stable
+security definer
+set search_path = public
+as $$
+  select coalesce((select active from public.profiles where id = auth.uid()), false);
 $$;
 
 create or replace function public.can_execute_processes()
@@ -433,17 +458,22 @@ alter table public.payment_methods enable row level security;
 alter table public.exchange_rates enable row level security;
 alter table public.businesses enable row level security;
 
--- Lectura: los 3 roles pueden leer (Visitante = solo lectura, según matriz de permisos)
-create policy "read_all_authenticated" on public.areas for select using (auth.role() = 'authenticated');
-create policy "read_all_authenticated" on public.dispatcher for select using (auth.role() = 'authenticated');
-create policy "read_all_authenticated" on public.dispatcher_verifications for select using (auth.role() = 'authenticated');
-create policy "read_all_authenticated" on public.dispatcher_incidents for select using (auth.role() = 'authenticated');
-create policy "read_all_authenticated" on public.dispatcher_changes for select using (auth.role() = 'authenticated');
-create policy "read_all_authenticated" on public.availabilities for select using (auth.role() = 'authenticated');
-create policy "read_all_authenticated" on public.availability_imports for select using (auth.role() = 'authenticated');
-create policy "read_all_authenticated" on public.availability_verifications for select using (auth.role() = 'authenticated');
-create policy "read_all_authenticated" on public.availability_incidents for select using (auth.role() = 'authenticated');
-create policy "read_all_authenticated" on public.messengers for select using (auth.role() = 'authenticated');
+-- Lectura: los 4 roles pueden leer (Visitante = solo lectura, según matriz de
+-- permisos) — PERO solo si profiles.active = true (public.is_active_user()).
+-- Antes de 2026-09-10 esto solo chequeaba auth.role() = 'authenticated', es
+-- decir "está logueado en Supabase", sin mirar si un Super Admin lo autorizó
+-- realmente — cualquier cuenta @mandao.app auto-registrada por el trigger
+-- ya leía todo el sistema como si fuera un Visitante legítimo.
+create policy "read_all_authenticated" on public.areas for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.dispatcher for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.dispatcher_verifications for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.dispatcher_incidents for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.dispatcher_changes for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.availabilities for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.availability_imports for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.availability_verifications for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.availability_incidents for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.messengers for select using (public.is_active_user());
 create policy "read_own_profile" on public.profiles for select using (auth.uid() = id or public.is_admin_or_supervisor());
 -- Edición de perfiles (cambiar rol/estado de otros usuarios): agregado
 -- 2026-09-08 — faltaba por completo, sin esto nadie (ni super_admin)
@@ -451,9 +481,9 @@ create policy "read_own_profile" on public.profiles for select using (auth.uid()
 create policy "manage_profiles_super_admin" on public.profiles
   for update using (public.current_user_role() = 'super_admin')
   with check (public.current_user_role() = 'super_admin');
-create policy "read_all_authenticated" on public.payment_methods for select using (auth.role() = 'authenticated');
-create policy "read_all_authenticated" on public.exchange_rates for select using (auth.role() = 'authenticated');
-create policy "read_all_authenticated" on public.businesses for select using (auth.role() = 'authenticated');
+create policy "read_all_authenticated" on public.payment_methods for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.exchange_rates for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.businesses for select using (public.is_active_user());
 
 -- Escritura de Verificaciones: Super Admin, Supervisor, Operador (Operador SÍ puede ejecutar verificaciones)
 create policy "insert_verification" on public.dispatcher_verifications

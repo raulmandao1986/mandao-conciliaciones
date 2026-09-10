@@ -1346,6 +1346,16 @@ La sección 4 de este documento agrupa "Super Admin" y "Supervisor" en una sola 
 
 Este esquema reemplaza el sistema anterior basado en patrones de email. La matriz de permisos de la sección 4 sigue siendo válida como referencia funcional; la diferencia es a nivel de almacenamiento (dos valores de rol con el mismo conjunto de permisos, en vez de uno).
 
+### 19.3.1 Modelo de autorización: autenticarse ≠ tener acceso (agregado 2026-09-10)
+
+Pertenecer al dominio `@mandao.app` (Google Workspace) permite **autenticarse**, pero no otorga acceso al sistema por sí solo:
+
+- Todo `profile` nuevo se crea con `active = false` ("pendiente de autorización") — el trigger `handle_new_user()` ya no lo activa automáticamente como antes.
+- Mientras `active = false`, la app muestra una pantalla de "Cuenta pendiente de aprobación" (`src/modules/auth/PendingApprovalPage.tsx`) en vez del sistema — la sesión de Supabase Auth es válida, pero no hay acceso funcional.
+- Un **Super Admin** debe encontrar a la persona en **Roles y Usuarios**, asignarle uno de los 4 roles y marcarla como **Autorizada** (`active = true`). También puede invitarla de antemano por correo con el botón "Nuevo Usuario" (sin que la persona haya iniciado sesión todavía), que la autoriza de inmediato con el rol elegido.
+- La barrera es real a nivel de base de datos, no solo de UI: `current_user_role()` devuelve `NULL` para un usuario inactivo (por lo que niega toda escritura), y las políticas de solo lectura usan `public.is_active_user()` en vez de solo comprobar "está logueado" (ver `supabase_schema.sql` y `supabase/migrations/2026-09-10_require_active_profile.sql`).
+- Antes de este cambio, cualquier cuenta `@mandao.app` que iniciara sesión ya podía **leer** todo el sistema como Visitante en cuanto Google la autenticaba — ese hueco quedó cerrado.
+
 ### 19.4 Actores del sistema (actualización de la sección 4)
 
 Donde la sección 4 indica **Firestore** como actor no humano ("Almacenamiento validado, búsquedas, historial"), léase ahora **Supabase (Postgres)**, cumpliendo la misma función.
