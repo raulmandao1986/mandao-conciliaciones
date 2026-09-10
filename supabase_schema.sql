@@ -39,6 +39,7 @@ create type public.user_role as enum ('super_admin', 'supervisor', 'operador', '
 create table public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   full_name text not null,
+  email text,
   role public.user_role not null default 'visitante',
   active boolean not null default true,
   created_at timestamptz not null default now(),
@@ -47,12 +48,18 @@ create table public.profiles (
 
 comment on table public.profiles is 'Extiende auth.users con el rol de negocio (Super Admin/Supervisor/Operador/Visitante) definido en la Constitución.';
 
+-- 'email' agregado 2026-09-08 — RolesUsuariosPage (reconstruida, ver
+-- sección 19.3 del documento de instrucciones) necesita listar usuarios
+-- con su email sin acceso a auth.users desde el cliente (PostgREST no
+-- expone ese esquema). Se copia aquí en el registro y queda disponible
+-- para lectura vía la política "read_own_profile" existente.
+
 -- Trigger: crear profile automáticamente al registrar un usuario en Supabase Auth
 create or replace function public.handle_new_user()
 returns trigger as $$
 begin
-  insert into public.profiles (id, full_name, role)
-  values (new.id, coalesce(new.raw_user_meta_data->>'full_name', new.email), 'visitante');
+  insert into public.profiles (id, full_name, email, role)
+  values (new.id, coalesce(new.raw_user_meta_data->>'full_name', new.email), new.email, 'visitante');
   return new;
 end;
 $$ language plpgsql security definer;
@@ -315,6 +322,26 @@ create table public.messengers (
   active boolean not null default true
 );
 
+-- AMPLIADO 2026-09-08 — GestionMensajerosPage.tsx.bak (Firestore 'messengers')
+-- usa esta misma tabla con muchos más campos: se agregan por ALTER en vez
+-- de rehacer el CREATE, para no romper el uso mínimo que ya tenía
+-- Disponibilidad. 'area' se traduce a area_id (FK a public.areas) en vez
+-- de la lista de provincias hardcodeada que tenía el código original —
+-- unifica con la misma tabla que ya usan Verificación/Revisión.
+alter table public.messengers
+  add column ci text,
+  add column phone text,
+  add column fiscal_card text,
+  add column fiscal_account text,
+  add column payment_method text,
+  add column backpack_type text not null default 'Grande',
+  add column start_date date,
+  add column end_date date,
+  add column area_id uuid references public.areas(area_id),
+  add column comments text,
+  add column created_at timestamptz not null default now(),
+  add column updated_at timestamptz not null default now();
+
 -- Índice para acelerar coincidencia difusa (RN-005) usada en Dispatcher
 create index idx_messengers_name_trgm on public.messengers using gin (name gin_trgm_ops);
 
@@ -356,6 +383,38 @@ create table public.exchange_rates (
 );
 
 -- =====================================================================
+-- MÓDULO GESTIÓN — NEGOCIOS (agregado 2026-09-08)
+-- =====================================================================
+-- Traducción directa de la colección Firestore 'businesses'
+-- (GestionNegociosPage.tsx.bak). Las cuentas bancarias/pasarelas
+-- (CUP, Personal, Cheque, Zelle, Tropipay, Transferencia Internacional)
+-- se guardan como jsonb — igual que en Firestore, son sub-objetos de
+-- forma variable según el método de pago elegido, no relaciones propias.
+-- 'area' se traduce a area_id (FK a public.areas), igual que Mensajeros.
+create table public.businesses (
+  business_id uuid primary key default gen_random_uuid(),
+  name text not null,
+  payment_method text,
+  active boolean not null default true,
+  area_id uuid references public.areas(area_id),
+  contact_name text,
+  phone text,
+  email text,
+  contract_name text,
+  tax_id text,
+  address text,
+  external_url text,
+  cup_account jsonb,
+  personal_account jsonb,
+  check_account jsonb,
+  exterior_zelle jsonb,
+  exterior_tropipay jsonb,
+  exterior_transfer jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- =====================================================================
 -- RLS — Row Level Security alineado a los 3 roles del sistema
 -- =====================================================================
 alter table public.areas enable row level security;
@@ -372,6 +431,7 @@ alter table public.messengers enable row level security;
 alter table public.profiles enable row level security;
 alter table public.payment_methods enable row level security;
 alter table public.exchange_rates enable row level security;
+alter table public.businesses enable row level security;
 
 -- Lectura: los 3 roles pueden leer (Visitante = solo lectura, según matriz de permisos)
 create policy "read_all_authenticated" on public.areas for select using (auth.role() = 'authenticated');
@@ -385,8 +445,15 @@ create policy "read_all_authenticated" on public.availability_verifications for 
 create policy "read_all_authenticated" on public.availability_incidents for select using (auth.role() = 'authenticated');
 create policy "read_all_authenticated" on public.messengers for select using (auth.role() = 'authenticated');
 create policy "read_own_profile" on public.profiles for select using (auth.uid() = id or public.is_admin_or_supervisor());
+-- Edición de perfiles (cambiar rol/estado de otros usuarios): agregado
+-- 2026-09-08 — faltaba por completo, sin esto nadie (ni super_admin)
+-- podía actualizar el perfil de otro usuario desde RolesUsuariosPage.
+create policy "manage_profiles_super_admin" on public.profiles
+  for update using (public.current_user_role() = 'super_admin')
+  with check (public.current_user_role() = 'super_admin');
 create policy "read_all_authenticated" on public.payment_methods for select using (auth.role() = 'authenticated');
 create policy "read_all_authenticated" on public.exchange_rates for select using (auth.role() = 'authenticated');
+create policy "read_all_authenticated" on public.businesses for select using (auth.role() = 'authenticated');
 
 -- Escritura de Verificaciones: Super Admin, Supervisor, Operador (Operador SÍ puede ejecutar verificaciones)
 create policy "insert_verification" on public.dispatcher_verifications
@@ -414,6 +481,12 @@ create policy "insert_changes" on public.dispatcher_changes
 -- Audit logs: cualquier usuario autenticado con permiso de ejecución puede insertar su propio log
 create policy "insert_own_audit_log" on public.audit_logs
   for insert with check (auth.uid() = user_id);
+-- Lectura de Logs de Auditoría: agregado 2026-09-08 — faltaba por completo
+-- una política de SELECT (con RLS activado y sin política, Postgres deniega
+-- todo select por defecto, incluso a super_admin). Visible a Super
+-- Admin/Supervisor, igual que el resto de "Configuraciones" (sección 4).
+create policy "read_audit_logs_admin_supervisor" on public.audit_logs
+  for select using (public.is_admin_or_supervisor());
 
 -- Edición/eliminación manual en Revisión: solo Super Admin/Supervisor
 -- (agregado en v3 — sin estas políticas, Postgres deniega UPDATE/DELETE
@@ -443,6 +516,9 @@ create policy "manage_payment_methods" on public.payment_methods
   for all using (public.current_user_role() = 'super_admin')
   with check (public.current_user_role() = 'super_admin');
 create policy "manage_exchange_rates" on public.exchange_rates
+  for all using (public.current_user_role() = 'super_admin')
+  with check (public.current_user_role() = 'super_admin');
+create policy "manage_businesses" on public.businesses
   for all using (public.current_user_role() = 'super_admin')
   with check (public.current_user_role() = 'super_admin');
 

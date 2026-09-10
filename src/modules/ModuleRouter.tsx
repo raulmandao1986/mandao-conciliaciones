@@ -7,8 +7,6 @@ import { DisponibilidadRevisionPage } from './disponibilidad/DisponibilidadRevis
 import { StatusBadge } from '../design-system/primitives/StatusBadge';
 import { Package } from 'lucide-react';
 
-import { useAuth } from '../lib/auth';
-
 // Módulos fuera de alcance de esta fase de migración (decisión #3 del
 // plan): todavía usan Firestore/'../../lib/firebase' internamente, por
 // lo que no compilan/ejecutan hasta que se reconstruyan desde cero en
@@ -31,20 +29,17 @@ const LogsAuditoriaPage = lazy(() => import('./gestion/LogsAuditoriaPage').then(
 interface ModuleRouterProps {
   activeTab: string;
   userRole?: string;
-  permissions?: string[];
 }
 
 export function ModuleRouter({ activeTab }: ModuleRouterProps) {
-  const { user } = useAuth();
-  const permissions: string[] = user?.role === 'super_admin' ? ['all'] : [];
   return (
     <Suspense fallback={<div className="py-20 text-center text-sm text-[var(--color-text-muted)]">Cargando módulo…</div>}>
-      {renderModule(activeTab, permissions)}
+      {renderModule(activeTab)}
     </Suspense>
   );
 }
 
-function renderModule(activeTab: string, permissions: string[]) {
+function renderModule(activeTab: string) {
   switch (activeTab) {
     case 'dashboard':
     case 'dashboard-negocio':
@@ -75,11 +70,11 @@ function renderModule(activeTab: string, permissions: string[]) {
     case 'planificacion-pagos-mensajero':
       return <PlanificacionPagosPage />;
     case 'gestion-negocios':
-      return <GestionNegociosPage permissions={permissions} />;
+      return <GestionNegociosPage />;
     case 'gestion-mensajeros':
-      return <GestionMensajerosPage permissions={permissions} />;
+      return <GestionMensajerosPage />;
     case 'roles-usuarios':
-      return <RolesUsuariosPage permissions={permissions} />;
+      return <RolesUsuariosPage />;
     case 'areas':
       return <AreasPage />;
     case 'metodos-pago':
@@ -92,7 +87,7 @@ function renderModule(activeTab: string, permissions: string[]) {
     case 'razon-cambio':
       return <RazonCambioPage />;
     case 'config-logs':
-      return <LogsAuditoriaPage permissions={permissions} />;
+      return <LogsAuditoriaPage />;
     default:
       return (
         <div className="flex flex-col items-center justify-center py-20 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)]">
