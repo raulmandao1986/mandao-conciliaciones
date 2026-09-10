@@ -1,23 +1,128 @@
-import { TrendingUp, AlertCircle, CheckCircle2, Clock } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { AlertCircle, Store, Truck, Users, Activity, Loader2 } from 'lucide-react';
 import { motion } from 'motion/react';
+import { supabase } from '../../lib/supabase';
+import { formatDatetime, formatQty } from '../../lib/formatters';
+
+interface DashboardStats {
+  dispatcherOrdersThisMonth: number;
+  dispatcherIncidentsTotal: number;
+  activeBusinesses: number;
+  activeMessengers: number;
+}
+
+interface AuditLogEntry {
+  log_id: string;
+  module: string;
+  action: string;
+  occurred_at: string;
+}
+
+function currentMonthRange() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), 1);
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  const toISODate = (d: Date) => d.toISOString().split('T')[0];
+  return { start: toISODate(start), end: toISODate(end) };
+}
 
 export function Dashboard() {
+  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [recentLogs, setRecentLogs] = useState<AuditLogEntry[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      const { start, end } = currentMonthRange();
+
+      const [ordersRes, incidentsRes, businessesRes, messengersRes, logsRes] = await Promise.all([
+        supabase
+          .from('dispatcher')
+          .select('order_pk', { count: 'exact', head: true })
+          .gte('delivery_date', start)
+          .lt('delivery_date', end),
+        supabase
+          .from('dispatcher_incidents')
+          .select('incident_id', { count: 'exact', head: true }),
+        supabase
+          .from('businesses')
+          .select('business_id', { count: 'exact', head: true })
+          .eq('active', true),
+        supabase
+          .from('messengers')
+          .select('messenger_id', { count: 'exact', head: true })
+          .eq('active', true),
+        supabase
+          .from('audit_logs')
+          .select('log_id, module, action, occurred_at')
+          .order('occurred_at', { ascending: false })
+          .limit(6),
+      ]);
+
+      if (cancelled) return;
+
+      setStats({
+        dispatcherOrdersThisMonth: ordersRes.count ?? 0,
+        dispatcherIncidentsTotal: incidentsRes.count ?? 0,
+        activeBusinesses: businessesRes.count ?? 0,
+        activeMessengers: messengersRes.count ?? 0,
+      });
+      setRecentLogs(logsRes.data ?? []);
+      setIsLoading(false);
+    };
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const kpis = [
+    {
+      label: 'Órdenes Dispatcher (mes)',
+      value: stats ? formatQty(stats.dispatcherOrdersThisMonth) : '—',
+      icon: Truck,
+      color: 'text-[var(--color-info)]',
+      bg: 'bg-[var(--color-info-bg)]',
+    },
+    {
+      label: 'Incidencias Dispatcher',
+      value: stats ? formatQty(stats.dispatcherIncidentsTotal) : '—',
+      icon: AlertCircle,
+      color: 'text-[var(--color-danger)]',
+      bg: 'bg-[var(--color-danger-bg)]',
+    },
+    {
+      label: 'Negocios Activos',
+      value: stats ? formatQty(stats.activeBusinesses) : '—',
+      icon: Store,
+      color: 'text-[var(--color-success)]',
+      bg: 'bg-[var(--color-success-bg)]',
+    },
+    {
+      label: 'Mensajeros Activos',
+      value: stats ? formatQty(stats.activeMessengers) : '—',
+      icon: Users,
+      color: 'text-[var(--color-warning)]',
+      bg: 'bg-[var(--color-warning-bg)]',
+    },
+  ];
+
   return (
     <div className="space-y-8">
       {/* Page Header */}
       <div>
         <h1 className="text-xl font-bold text-[var(--color-text)]">Dashboard Operativo</h1>
-        <p className="text-sm text-[var(--color-text-muted)] mt-1">Resumen general de conciliaciones y estados de cuenta.</p>
+        <p className="text-sm text-[var(--color-text-muted)] mt-1">
+          Resumen general de Dispatcher, Disponibilidad y catálogos activos.
+        </p>
       </div>
 
       {/* KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        {[
-          { label: 'Pendientes', value: '$12,450.00', icon: Clock, color: 'text-[var(--color-warning)]', bg: 'bg-[var(--color-warning-bg)]' },
-          { label: 'Conciliados', value: '$84,200.00', icon: CheckCircle2, color: 'text-[var(--color-success)]', bg: 'bg-[var(--color-success-bg)]' },
-          { label: 'Discrepancias', value: '4', icon: AlertCircle, color: 'text-[var(--color-danger)]', bg: 'bg-[var(--color-danger-bg)]' },
-          { label: 'Efectividad', value: '98.2%', icon: TrendingUp, color: 'text-[var(--color-info)]', bg: 'bg-[var(--color-info-bg)]' },
-        ].map((kpi, i) => (
+        {kpis.map((kpi, i) => (
           <motion.div
             key={kpi.label}
             initial={{ opacity: 0, y: 10 }}
@@ -28,87 +133,58 @@ export function Dashboard() {
             <div className="flex items-start justify-between">
               <div>
                 <p className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wider">{kpi.label}</p>
-                <p className="text-2xl font-bold text-[var(--color-text)] mt-1 tabular-nums">{kpi.value}</p>
+                <p className="text-2xl font-bold text-[var(--color-text)] mt-1 tabular-nums">
+                  {isLoading ? <Loader2 className="w-5 h-5 animate-spin text-[var(--color-text-faint)]" /> : kpi.value}
+                </p>
               </div>
               <div className={`p-2.5 rounded-[var(--radius-sm)] ${kpi.bg}`}>
                 <kpi.icon className={`w-5 h-5 ${kpi.color}`} />
               </div>
             </div>
-            <div className="mt-4 flex items-center gap-1.5 font-medium text-xs text-[var(--color-success)]">
-              <TrendingUp size={12} />
-              <span>+12.5% vs mes anterior</span>
-            </div>
           </motion.div>
         ))}
       </div>
 
-      {/* Recent Activity / Empty State Pattern Demo */}
+      {/* Recent Activity */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)] shadow-sm overflow-hidden">
+        <div className="lg:col-span-3 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)] shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-[var(--color-border)] flex items-center justify-between">
-            <h2 className="font-semibold text-[var(--color-text)]">Últimas Conciliaciones</h2>
-            <button className="text-sm font-medium text-[var(--color-primary)] hover:text-[var(--color-primary-hover)]">Ver todas</button>
+            <h2 className="font-semibold text-[var(--color-text)]">Actividad Reciente</h2>
           </div>
-          <div className="p-12 flex flex-col items-center justify-center text-center">
-            <div className="w-16 h-16 rounded-full bg-[var(--color-surface-2)] flex items-center justify-center mb-4">
-              <GitMerge className="w-8 h-8 text-[var(--color-text-faint)]" />
-            </div>
-            <h3 className="text-base font-semibold text-[var(--color-text)]">Sin movimientos recientes</h3>
-            <p className="text-sm text-[var(--color-text-muted)] mt-1 max-w-xs">
-              No se han detectado nuevos movimientos bancarios para conciliar en las últimas 24 horas.
-            </p>
-            <button className="mt-6 h-10 px-5 bg-[var(--color-brand)] text-[var(--color-brand-ink)] font-semibold rounded-[var(--radius-sm)] hover:bg-[var(--color-brand-dark)] transition-colors inline-flex items-center gap-2">
-              <TrendingUp size={18} />
-              Sincronizar ahora
-            </button>
-          </div>
-        </div>
 
-        <div className="space-y-6">
-          <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)] shadow-sm p-5">
-            <h2 className="font-semibold text-[var(--color-text)] mb-4">Estado de Sistemas</h2>
-            <div className="space-y-4">
-              {[
-                { name: 'Mandao Finance', status: 'online' },
-                { name: 'Inventario', status: 'online' },
-              ].map((sys) => (
-                <div key={sys.name} className="flex items-center justify-between">
-                  <span className="text-sm text-[var(--color-text-muted)]">{sys.name}</span>
-                  <div className="flex items-center gap-2">
-                    <span className={`text-[10px] font-bold uppercase tracking-wider ${sys.status === 'online' ? 'text-[var(--color-success)]' : 'text-[var(--color-warning)]'}`}>
-                      {sys.status}
-                    </span>
-                    <div className={`w-2 h-2 rounded-full ${sys.status === 'online' ? 'bg-[var(--color-success)]' : 'bg-[var(--color-warning)]'}`} />
-                  </div>
-                </div>
-              ))}
+          {isLoading ? (
+            <div className="p-12 flex items-center justify-center">
+              <Loader2 className="w-6 h-6 animate-spin text-[var(--color-text-faint)]" />
             </div>
-          </div>
+          ) : recentLogs.length === 0 ? (
+            <div className="p-12 flex flex-col items-center justify-center text-center">
+              <div className="w-16 h-16 rounded-full bg-[var(--color-surface-2)] flex items-center justify-center mb-4">
+                <Activity className="w-8 h-8 text-[var(--color-text-faint)]" />
+              </div>
+              <h3 className="text-base font-semibold text-[var(--color-text)]">Sin actividad reciente</h3>
+              <p className="text-sm text-[var(--color-text-muted)] mt-1 max-w-xs">
+                No hay registros en el log de auditoría todavía, o tu rol no tiene permiso para verlos
+                (solo Super Admin y Supervisor).
+              </p>
+            </div>
+          ) : (
+            <ul className="divide-y divide-[var(--color-border)]">
+              {recentLogs.map((log) => (
+                <li key={log.log_id} className="px-6 py-3 flex items-center justify-between text-sm">
+                  <div className="flex items-center gap-3">
+                    <Activity size={16} className="text-[var(--color-text-faint)]" />
+                    <span className="font-medium text-[var(--color-text)]">{log.module}</span>
+                    <span className="text-[var(--color-text-muted)]">{log.action}</span>
+                  </div>
+                  <span className="text-xs text-[var(--color-text-faint)] tabular-nums">
+                    {formatDatetime(log.occurred_at)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </div>
     </div>
-  );
-}
-
-function GitMerge(props: any) {
-  return (
-    <svg
-      {...props}
-      xmlns="http://www.w3.org/2000/svg"
-      width="24"
-      height="24"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <circle cx="18" cy="18" r="3" />
-      <circle cx="6" cy="6" r="3" />
-      <path d="M6 9v12" />
-      <path d="M21 3v12" />
-      <path d="M21 3c0 2.2-1.8 4-4 4h-1c-2.2 0-4 1.8-4 4v10" />
-    </svg>
   );
 }
