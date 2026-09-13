@@ -1529,6 +1529,14 @@ export function VerificationPage() {
                     ))
                   )}
                 </select>
+                {selectedAreaId && !spreadsheetId.trim() && (
+                  <p className="text-xs text-[var(--color-danger)] flex items-center gap-1.5 pt-1">
+                    <AlertCircle size={12} className="shrink-0" />
+                    Esta Área no tiene un ID de Google Sheet configurado (campo "ID Documento Google Sheet"
+                    en Configuración → Áreas). El botón "Verificar Dispatcher" permanecerá deshabilitado
+                    hasta que lo completes ahí.
+                  </p>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-4">
