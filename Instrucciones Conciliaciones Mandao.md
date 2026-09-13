@@ -1,4 +1,4 @@
-# Mandao Conciliaciones — Instrucciones Específicas del Sistema
+113KJkGl4_49RFB9vIca4UnzJ4Tg7IhTwOlkuHuMe7E0# Mandao Conciliaciones — Instrucciones Específicas del Sistema
 
 > **Sistema externo independiente** que forma parte del ecosistema Mandao.  
 > Este documento extiende y complementa las reglas establecidas en el **Marco Fundamental — Reglas No Negociables** (`CONSTITUCION`). Todo lo definido aquí es específico del sistema **Mandao Conciliaciones** y debe respetarse sin excepción al generar código para este sistema.  
@@ -19,7 +19,7 @@
 9. [Módulo Dashboard](#9-módulo-dashboard) ⏳
 10. [Reglas de negocio — catálogo completo](#10-reglas-de-negocio--catálogo-completo)
 11. [Estados del sistema Conciliaciones](#11-estados-del-sistema-conciliaciones)
-12. [Diseño de base de datos Firestore](#12-diseño-de-base-de-datos-firestore)
+12. [Diseño de base de datos Supabase (Postgres)](#12-diseño-de-base-de-datos-supabase-postgres)
 13. [Riesgos operativos conocidos](#13-riesgos-operativos-conocidos)
 14. [Navegación y estructura de archivos](#14-navegación-y-estructura-de-archivos)
 15. [Reglas verificables exclusivas de Conciliaciones](#15-reglas-verificables-exclusivas-de-conciliaciones)
@@ -39,7 +39,7 @@
 - **Dot identificador** en launchers y links de retorno: `#2563eb` (azul)
 - **Propósito**: Automatizar el proceso de conciliación de órdenes del servicio de Delivery (Mensajería) de Mandao, reemplazando el trabajo manual que se realizaba en hojas de cálculo Google Sheets
 - **Usuarios destino**: Departamento de Finanzas de Mandao Finance
-- **Contexto de negocio**: Mandao opera un servicio de mensajería/delivery. Las órdenes son registradas en un Google Sheet llamado "Dispatcher" y deben ser verificadas, importadas a Firestore, conciliadas por Negocio y por Mensajero, facturadas y planificadas para pago
+- **Contexto de negocio**: Mandao opera un servicio de mensajería/delivery. Las órdenes son registradas en un Google Sheet llamado "Dispatcher" y deben ser verificadas, importadas a Supabase (Postgres), conciliadas por Negocio y por Mensajero, facturadas y planificadas para pago
 - **Color activo de nav**: `--color-brand-active` (#FFF8C5) — igual que todos los sistemas del ecosistema Mandao. El dot azul solo aplica en launchers y en el link de retorno a Finance, **nunca** en el marcador de ítem activo del sidebar
 
 ```ts
@@ -130,7 +130,7 @@ Google Sheet Dispatcher
     Enviar Mail                           ↓
         ↓                         Habilitar Importación
        Fin                                ↓
-                              Importar a Firestore
+                          Importar a Supabase (Postgres)
                                           ↓
                                     Revisión Dispatcher
                                           ↓
@@ -217,7 +217,7 @@ El sistema tiene **3 roles de usuario** con matrices de acceso diferenciadas. El
 
 | Actor | Rol |
 |---|---|
-| **Firestore** | Almacenamiento validado, búsquedas, historial |
+| **Supabase (Postgres)** | Almacenamiento validado, búsquedas, historial |
 | **Google Sheets Dispatcher** | Fuente externa de datos (Orders + Cambios) |
 
 ---
@@ -257,7 +257,7 @@ src/modules/dispatcher/
 ### 5.1 Submódulo Verificación
 
 #### Descripción
-Valida la consistencia de la información contenida en el Google Sheet del Dispatcher antes de importarla a Firestore.
+Valida la consistencia de la información contenida en el Google Sheet del Dispatcher antes de importarla a Supabase (Postgres).
 
 #### Precondiciones
 - Usuario autenticado con Rol `Super Admin` o `Supervisor`
@@ -334,7 +334,7 @@ Sistema lee Google Sheet del Área
 ### 5.2 Submódulo Importación
 
 #### Descripción
-Guarda en Firestore la información validada del Google Sheet Dispatcher. Solo puede ejecutarse cuando la verificación es correcta.
+Guarda en Supabase (Postgres) la información validada del Google Sheet Dispatcher. Solo puede ejecutarse cuando la verificación es correcta.
 
 #### Precondiciones — todas deben cumplirse
 - Usuario autenticado con Rol `Super Admin` o `Supervisor`
@@ -350,11 +350,15 @@ Sistema valida resultado de verificación (RN-007)
         ↓
 Sistema verifica no-duplicidad (RN-009)
         ↓
-Sistema guarda registros en colección Dispatcher
+Sistema guarda registros en la tabla public.dispatcher (Supabase)
         ↓
-Sistema genera registro en Dispatcher_Imports
+Sistema marca imported_by / import_completed_at en el registro
+correspondiente de public.dispatcher_verifications (no existe una
+tabla de "imports" separada para Dispatcher — a diferencia de
+Disponibilidad, la propia verificación funciona también como el
+registro de auditoría de la importación)
         ↓
-Sistema registra log en AuditLogs (usuario, fecha, hora, área, resultado)
+Sistema registra log en public.audit_logs (usuario, fecha, hora, área, resultado)
         ↓
 Sistema genera PDF del resultado
         ↓
@@ -365,7 +369,7 @@ Fin — estado actualizado en pantalla
 
 #### Salida
 
-- Datos almacenados en Firestore (colección `Dispatcher`)
+- Datos almacenados en Supabase (tabla `public.dispatcher`)
 - Registro de log con trazabilidad completa (RN-008)
 
 #### UI/UX
@@ -379,11 +383,11 @@ Fin — estado actualizado en pantalla
 ### 5.3 Submódulo Revisión
 
 #### Descripción
-Compara los datos almacenados en Firestore contra el Dispatcher (Google Sheet) para detectar diferencias entre ambas fuentes.
+Compara los datos almacenados en Supabase (Postgres) contra el Dispatcher (Google Sheet) para detectar diferencias entre ambas fuentes.
 
 #### Precondiciones
 - Usuario autenticado con Rol `Super Admin`, `Supervisor` u `Operador`
-- Datos previamente importados a Firestore
+- Datos previamente importados a Supabase (Postgres)
 
 #### Entradas del proceso
 
@@ -398,7 +402,7 @@ Compara los datos almacenados en Firestore contra el Dispatcher (Google Sheet) p
 ```
 Usuario selecciona filtros (fechas + área)
         ↓
-Sistema consulta Firestore (registros importados)
+Sistema consulta Supabase (tabla public.dispatcher, registros importados)
         ↓
 Sistema consulta Google Sheet Dispatcher
         ↓
@@ -408,10 +412,10 @@ Sistema muestra diferencias detectadas
 ```
 
 #### Salida
-- Listado de diferencias con indicación de campo, valor en Firestore y valor en Dispatcher
+- Listado de diferencias con indicación de campo, valor en Supabase y valor en Dispatcher
 
 #### UI/UX
-- Vista en tabla con columnas: Orden ID | Campo | Valor Firestore | Valor Dispatcher | Diferencia
+- Vista en tabla con columnas: Orden ID | Campo | Valor Supabase | Valor Dispatcher | Diferencia
 - Tabla con los 6 elementos de anatomía obligatoria
 - Filtros disponibles: por campo con diferencia, por tipo de diferencia
 
@@ -497,7 +501,7 @@ Si existe **al menos una incidencia crítica**, la Importación está **completa
 
 ### RN-007 — Importación Solo con Verificación Correcta
 
-La Importación solo puede ejecutarse cuando el estado de la Verificación activa es `Correcta`. Esta validación debe hacerse **en el backend** (regla de Firestore o función de servidor), no solo en el UI.
+La Importación solo puede ejecutarse cuando el estado de la Verificación activa es `Correcta`. Esta validación debe hacerse **en el backend** (política RLS de Supabase o función de servidor), no solo en el UI.
 
 ### RN-008 — Trazabilidad Obligatoria
 
@@ -565,126 +569,254 @@ Una orden **no puede importarse más de una vez** para la misma Área y fecha op
 
 ---
 
-## 12. Diseño de base de datos Firestore
+## 12. Diseño de base de datos Supabase (Postgres)
 
-El agente AI no debe crear colecciones adicionales a las aquí documentadas.
+> 🔄 Sección reescrita 2026-09-13. **La base de datos con la que se trabaja es Supabase (Postgres)** — Firestore ya no existe en este sistema. Esta sección documenta el esquema REAL y vigente, tal como vive en `supabase_schema.sql` (raíz del repo), que es la única fuente de verdad — cualquier tabla nueva se define primero ahí (con sus políticas RLS) y luego se refleja aquí. El agente AI no debe crear tablas adicionales a las aquí documentadas sin actualizar ambos archivos.
 
-> **Alcance actual**: solo las colecciones del Dispatcher deben implementarse en esta fase. Las colecciones de Negocios, Mensajeros y Configuración están documentadas para referencia futura.
+> **Alcance actual**: las 15 tablas de esta sección ya están migradas y en uso — Dispatcher, Disponibilidad y los catálogos de Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría). El módulo financiero (Conciliación, Facturación, Cuentas por Cobrar/Pagar, Planificación de Pagos) sigue sin tabla propia — ver "Tablas pendientes" al final de esta sección.
 
-### Colecciones activas — Fase actual ✅
+### Tablas activas — Fase actual ✅
 
-#### Colección `Dispatcher`
-
-Copia exacta de la hoja Orders del Google Sheet.
+**1. `public.profiles`** — usuarios y roles (extiende `auth.users` de Supabase Auth)
 
 | Campo | Tipo |
 |---|---|
-| `deliveryDate` | Timestamp |
-| `orderDate` | Timestamp |
-| `paymentType` | string |
-| `customer` | string |
-| `customerNumber` | string |
-| `driver` | string |
-| `store` | string |
-| `orderId` | string |
-| `productAmount` | number |
-| `storeOffer` | number |
-| `processingFee` | number |
-| `storeAdminCharge` | number |
-| `deliveryCharge` | number |
-| `extraDeliveryCharge` | number |
-| `driverAdminCharge` | number |
-| `complementaryDelivery` | string / number |
-| `tax` | number |
-| `promocode` | string |
-| `area` | string |
+| `id` | uuid (PK, FK a `auth.users`) |
+| `full_name` | text |
+| `email` | text |
+| `role` | enum `user_role`: `super_admin` / `supervisor` / `operador` / `visitante` |
+| `active` | boolean — si `false`, cuenta pendiente de autorización (ver sección 19.3.1) |
+| `created_at` / `updated_at` | timestamptz |
 
-#### Colección `Dispatcher_Verifications`
+**2. `public.areas`**
 
 | Campo | Tipo |
 |---|---|
-| `verificationId` | string |
-| `area` | string |
-| `startDate` | Timestamp |
-| `endDate` | Timestamp |
-| `verificationDate` | Timestamp |
-| `userId` | string |
-| `status` | `correcta` / `con_incidencias` |
-| `totalOrders` | number |
-| `totalChanges` | number |
-| `totalIncidents` | number |
-
-#### Colección `Dispatcher_Incidents`
-
-| Campo | Tipo |
-|---|---|
-| `incidentId` | string |
-| `verificationId` | string |
-| `orderId` | string |
-| `severity` | `critica` / `advertencia` / `informativa` |
-| `ruleCode` | string (RN-001, RN-002, etc.) |
-| `description` | string |
-| `status` | string |
-
-#### Colección `Dispatcher_Imports`
-
-| Campo | Tipo |
-|---|---|
-| `importId` | string |
-| `verificationId` | string |
-| `importedBy` | string (userId) |
-| `importDate` | Timestamp |
-| `recordsImported` | number |
-
-#### Colección `Areas`
-
-| Campo | Tipo |
-|---|---|
-| `areaId` | string |
-| `name` | string |
-| `province` | string |
-| `sheetDocumentId` | string |
-| `description` | string |
+| `area_id` | uuid (PK) |
+| `name` | text |
+| `province` | text |
+| `sheet_document_id` | text — ID del Google Sheet del Dispatcher, obligatorio |
+| `description` | text |
 | `active` | boolean |
+| `created_at` | timestamptz |
 
-#### Colección `AuditLogs`
-
-| Campo | Tipo |
-|---|---|
-| `logId` | string |
-| `module` | string |
-| `action` | string |
-| `user` | string |
-| `date` | Timestamp |
-| `details` | map |
-
-#### Colección `EmailGroups`
+**3. `public.audit_logs`** — trazabilidad obligatoria (RN-008)
 
 | Campo | Tipo |
 |---|---|
-| `groupId` | string |
-| `name` | string |
-| `emails` | string[] |
+| `log_id` | uuid (PK) |
+| `module` | text |
+| `action` | text |
+| `user_id` | uuid (FK a `auth.users`) |
+| `occurred_at` | timestamptz |
+| `details` | jsonb |
 
-#### Colección `EmailTemplates`
+**4. `public.dispatcher`** — copia de la hoja Orders del Google Sheet
 
 | Campo | Tipo |
 |---|---|
-| `templateId` | string |
-| `name` | string |
-| `subject` | string |
-| `body` | string |
+| `order_pk` | uuid (PK) |
+| `delivery_date` / `order_date` | date |
+| `payment_type` | text |
+| `customer` / `customer_number` | text |
+| `driver` | text |
+| `store` | text |
+| `order_id` | text |
+| `product_amount` / `store_offer` / `processing_fee` / `store_admin_charge` / `delivery_charge` / `extra_delivery_charge` / `driver_admin_charge` / `tax` | numeric(12,2) |
+| `complementary_delivery` | text |
+| `promocode` | text |
+| `area_id` | uuid (FK a `areas`) |
+| `verification_id` | uuid (FK a `dispatcher_verifications`) |
+| `created_at` | timestamptz |
 
-### Colecciones pendientes — Fase posterior ⏳
+Índice único `(order_id, area_id, delivery_date)` → aplica RN-009 (no duplicar importación).
 
-> Las siguientes colecciones están documentadas para referencia pero **no deben crearse** hasta que el módulo correspondiente esté en fase activa.
+**5. `public.dispatcher_verifications`**
 
-| Colección | Módulo | Estado |
+| Campo | Tipo |
+|---|---|
+| `verification_id` | uuid (PK) |
+| `area_id` | uuid (FK) |
+| `start_date` / `end_date` | date |
+| `verification_date` | timestamptz |
+| `user_id` | uuid (FK) |
+| `status` | `correcta` / `con_incidencias` |
+| `total_orders` / `total_changes` / `total_incidents` | int |
+| `imported_by` | uuid (FK) |
+| `import_completed_at` | timestamptz |
+
+> No existe una tabla "imports" separada para Dispatcher: este mismo registro de verificación funciona también como el registro de auditoría de la importación (a diferencia de Disponibilidad, que sí tiene `availability_imports`).
+
+**6. `public.dispatcher_incidents`**
+
+| Campo | Tipo |
+|---|---|
+| `incident_id` | uuid (PK) |
+| `verification_id` | uuid (FK, cascade) |
+| `order_id` | text |
+| `severity` | `critica` / `advertencia` / `informativa` |
+| `rule_code` | text (`RN-001`, `RN-002`, ...) |
+| `description` | text |
+| `status` | text |
+
+**7. `public.dispatcher_changes`** — copia de la fila completa de la pestaña "Cambios" del Sheet
+
+| Campo | Tipo |
+|---|---|
+| `change_id` | uuid (PK) |
+| `verification_id` | uuid (FK, cascade) |
+| `order_id` | text |
+| `store` / `driver` / `payment_type` | text |
+| `product_amount` / `delivery_charge` | numeric(12,2) |
+| `detail` | text |
+| `change_date` | date |
+| `created_at` | timestamptz |
+
+**8. `public.availabilities`** — copia de la hoja Disponibilidades del Google Sheet
+
+| Campo | Tipo | Origen (columna Google Sheet) |
 |---|---|---|
-| `Stores` | Negocios | ⏳ fase posterior |
-| `Drivers` | Mensajeros | ⏳ fase posterior |
-| `PaymentMethods` | Configuración | ⏳ fase posterior |
-| `ExchangeRates` | Configuración | ⏳ fase posterior |
+| `availability_id` | uuid (PK) | generado por el sistema |
+| `ts` | timestamptz | `Timestamp` |
+| `email_address` | text | `Email Address` |
+| `order_id` | text | `No. Orden` |
+| `availability_date` | date | `Fecha de la disponibilidad` |
+| `reason` | text | `Motivo` |
+| `requested_by` | text | `Area o persona que solicta la transportacion` (typo intencional en la fuente, no corregir) |
+| `messenger_name` | text | `Mensajero` |
+| `amount_to_pay` | numeric(12,2) | `Monto a pagar` |
+| `province` | text | `Provincias` |
+| `comment` | text | `Comentario` |
+| `area_id` | uuid (FK a `areas`) | Área seleccionada en el sistema |
+| `import_id` | uuid (FK a `availability_imports`) | — |
+
+**9. `public.availability_imports`**
+
+| Campo | Tipo |
+|---|---|
+| `import_id` | uuid (PK) |
+| `area_id` | uuid (FK) |
+| `start_date` / `end_date` | date |
+| `imported_by` | uuid (FK) |
+| `import_date` | timestamptz |
+| `records_imported` | int |
+
+Índice único `(area_id, start_date, end_date)` → aplica RN-013.
+
+**10. `public.availability_verifications`**
+
+| Campo | Tipo |
+|---|---|
+| `verification_id` | uuid (PK) |
+| `area_id` | uuid (FK) |
+| `start_date` / `end_date` | date |
+| `verification_date` | timestamptz |
+| `user_id` | uuid (FK) |
+| `status` | `correcta` / `con_incidencias` |
+| `total_records` / `total_incidents` | int |
+
+**11. `public.availability_incidents`**
+
+| Campo | Tipo |
+|---|---|
+| `incident_id` | uuid (PK) |
+| `verification_id` | uuid (FK, cascade) |
+| `row_number` | int |
+| `messenger_name` | text |
+| `availability_date` | date |
+| `severity` | `critica` |
+| `rule_code` | text (`RN-012`, `RN-014`) |
+| `description` | text |
+
+**12. `public.messengers`** — catálogo (usado por RN-012 de Disponibilidad, RN-005 de Dispatcher, y por Gestión de Mensajeros)
+
+| Campo | Tipo |
+|---|---|
+| `messenger_id` | uuid (PK) |
+| `name` | text |
+| `active` | boolean |
+| `ci` / `phone` / `fiscal_card` / `fiscal_account` | text |
+| `payment_method` | text |
+| `backpack_type` | text (default `'Grande'`) |
+| `start_date` / `end_date` | date |
+| `area_id` | uuid (FK a `areas`) |
+| `comments` | text |
+| `created_at` / `updated_at` | timestamptz |
+
+Índice GIN trigram en `name` para acelerar la coincidencia difusa (RN-005).
+
+**13. `public.payment_methods`**
+
+| Campo | Tipo |
+|---|---|
+| `payment_method_id` | uuid (PK) |
+| `name` / `description` | text |
+| `applies_to_businesses` / `applies_to_messengers` / `applies_to_orders` | boolean |
+| `active` | boolean |
+| `created_at` / `updated_at` | timestamptz |
+
+**14. `public.exchange_rates`**
+
+| Campo | Tipo |
+|---|---|
+| `exchange_rate_id` | uuid (PK) |
+| `name` | text |
+| `rate_cup` | numeric(12,2) |
+| `description` | text |
+| `active` | boolean |
+| `created_at` / `updated_at` | timestamptz |
+
+RN-010 (una sola tasa activa a la vez) se aplica en la UI (`RazonCambioPage.tsx`), no como constraint de base de datos. Puede sincronizarse automáticamente con la API de El Toque (ver sección 22).
+
+**15. `public.businesses`**
+
+| Campo | Tipo |
+|---|---|
+| `business_id` | uuid (PK) |
+| `name` | text |
+| `payment_method` | text |
+| `active` | boolean |
+| `area_id` | uuid (FK a `areas`) |
+| `contact_name` / `phone` / `email` / `contract_name` / `tax_id` / `address` / `external_url` | text |
+| `cup_account` / `personal_account` / `check_account` / `exterior_zelle` / `exterior_tropipay` / `exterior_transfer` | jsonb — sub-objeto de forma variable según el método de pago elegido |
+| `created_at` / `updated_at` | timestamptz |
+
+### Funciones auxiliares (equivalente a las "reglas de seguridad" que tenía Firestore)
+
+| Función | Uso |
+|---|---|
+| `current_user_role()` | Rol del usuario autenticado actual — devuelve `NULL` si `active = false` |
+| `is_admin_or_supervisor()` | `super_admin` o `supervisor` |
+| `can_execute_processes()` | `super_admin`, `supervisor` u `operador` (puede ejecutar Verificaciones) |
+| `is_active_user()` | Usado por las políticas de solo lectura — ¿el perfil está autorizado? |
+| `normalize_fuzzy(text)` | RN-005 — coincidencia difusa (Dispatcher) |
+| `normalize_exact(text)` | RN-012 — coincidencia exacta con trim (Disponibilidad) |
+
+### Row Level Security (RLS) — resumen
+
+Todas las tablas tienen RLS activo. Resumen por tipo de política:
+
+- **Lectura** (`areas`, `dispatcher*`, `availability*`, `messengers`, `payment_methods`, `exchange_rates`, `businesses`): requiere `is_active_user()` — solo usuarios autorizados (sección 19.3.1) pueden leer, sin importar el rol (Visitante incluido).
+- **`profiles`**: cada usuario lee su propio registro (o cualquier `super_admin`/`supervisor` lee todos); solo `super_admin` puede editar el rol/estado de otro usuario.
+- **`audit_logs`**: cualquier usuario con permiso de ejecución inserta su propio log; solo `super_admin`/`supervisor` lo leen.
+- **Verificaciones e incidencias** (`dispatcher_verifications`, `availability_verifications`, `dispatcher_incidents`, `availability_incidents`, `dispatcher_changes`): insertar requiere `can_execute_processes()`.
+- **Importaciones** (`dispatcher`, `availabilities`, `availability_imports`): insertar requiere `is_admin_or_supervisor()`.
+- **Edición/eliminación manual** en `dispatcher` y `availabilities` (Revisión): requiere `is_admin_or_supervisor()`.
+- **Catálogos** (`areas`, `messengers`, `payment_methods`, `exchange_rates`, `businesses`): CRUD completo (`for all`) solo `super_admin`.
+
+### Tablas pendientes — módulo financiero sin diseñar ⏳
+
+> A diferencia de la versión anterior de este documento (que listaba `Stores`/`Drivers`/`PaymentMethods`/`ExchangeRates` como pendientes — las 4 ya están implementadas arriba, como `businesses`, `messengers`, `payment_methods` y `exchange_rates`), lo que realmente queda sin construir es el **módulo financiero**: Conciliación, Facturación, Cuentas por Cobrar, Cuentas por Pagar y Planificación de Pagos.
+
+| Módulo | Estado |
+|---|---|
+| Conciliación | ⏳ solo UI con `MOCK_DATA`, sin tabla |
+| Facturación | ⏳ solo UI con `MOCK_DATA`, sin tabla |
+| Cuentas por Cobrar | ⏳ solo UI con `MOCK_DATA`, sin tabla |
+| Cuentas por Pagar | ⏳ solo UI con `MOCK_DATA`, sin tabla |
+| Planificación de Pagos | ⏳ solo UI con `MOCK_DATA`, sin tabla |
+
+Ninguna de estas páginas se relaciona hoy con `dispatcher`, `businesses` o `messengers`, y no hay reglas de negocio documentadas para calcular comisiones desde las órdenes, el desglose Efectivo/Transferencia/Saldo Mandao, ni impuestos. Diseñar ese esquema requiere primero esas reglas de negocio — pospuesto explícitamente hasta contar con ellas (decisión 2026-09-10).
 
 ---
 
@@ -699,7 +831,7 @@ El sistema debe manejar estos riesgos de forma explícita. El agente AI debe ten
 | R-003 | Columnas modificadas | Validar estructura de columnas antes de procesar |
 | R-004 | Duplicidad de órdenes | RN-009: bloquear re-importación |
 | R-005 | Órdenes con cambios no reflejados | RN-001: validar hoja Cambios |
-| R-006 | Importación duplicada | Verificar existencia previa en Firestore por área y fecha |
+| R-006 | Importación duplicada | Verificar existencia previa en Supabase (Postgres) por área y fecha |
 | R-007 | Nombres escritos de forma diferente | RN-005: coincidencia difusa |
 | R-008 | Errores monetarios | Validar tipos numéricos, RN-004 para campos en cero |
 
@@ -724,7 +856,8 @@ src/
     AppShell.tsx
   hooks/
   lib/
-    firebase/
+    supabase.ts          ← cliente Supabase, signInWithGoogle, logAuditEvent
+    auth.tsx             ← AuthProvider/useAuth (roles, sesión)
     formatters/          ← importados desde @mandao/design-system
     permissions/
       index.ts           ← permisos por rol y módulo
@@ -814,7 +947,7 @@ Estas reglas son adicionales a las de la Constitución y aplican **solo** a este
 
 ### Trazabilidad
 
-- ❌ Ejecutar una importación sin registrar el log completo en AuditLogs (RN-008)
+- ❌ Ejecutar una importación sin registrar el log completo en `public.audit_logs` (RN-008)
 - ✅ Toda acción ejecutiva (verificar, importar) debe registrar usuario, fecha y hora
 
 ---
@@ -826,9 +959,9 @@ Estos patrones están **expresamente prohibidos** en este sistema, en adición a
 - ❌ Mostrar el botón "Importar" cuando la verificación tiene incidencias críticas
 - ❌ Navegar a otra página para mostrar el resultado de la Verificación — el resultado va en la misma vista
 - ❌ Procesar montos monetarios sin usar el formatter `formatCurrency`
-- ❌ Crear colecciones en Firestore que no estén documentadas en la sección 12
+- ❌ Crear tablas en Supabase que no estén documentadas en la sección 12
 - ❌ Omitir el campo `area` en cualquier registro del Dispatcher — es identificador clave
-- ❌ Construir la lógica de permisos solo en el UI — debe estar también en reglas de Firestore o funciones de servidor
+- ❌ Construir la lógica de permisos solo en el UI — debe estar también en políticas RLS de Supabase o funciones de servidor
 - ❌ Usar campos de texto libre para Área donde debe haber un selector
 - ❌ Implementar cualquier módulo marcado como ⏳ en este documento
 
@@ -846,7 +979,7 @@ Este documento está diseñado para crecer. Al agregar nuevos módulos al sistem
 - [ ] Registrar la ruta en `router.tsx`
 - [ ] Definir los permisos en `src/lib/permissions/index.ts`
 - [ ] Documentar los nuevos estados en `src/lib/statusMaps/conciliaciones.ts` y activarlos en la sección 11
-- [ ] Mover las colecciones Firestore del módulo de "pendientes" a "activas" en la sección 12
+- [ ] Mover las tablas de Supabase del módulo de "pendientes" a "activas" en la sección 12 (crear las tablas reales en `supabase_schema.sql`, con sus políticas RLS)
 - [ ] Activar las Reglas de Negocio del módulo en la sección 10 (quitar la nota ⏳)
 - [ ] Implementar el `EmptyState` del módulo con ícono Lucide relevante
 - [ ] Implementar los estados de loading (skeleton) y error
@@ -876,7 +1009,7 @@ Cuando se agreguen especificaciones de un nuevo módulo a este documento, seguir
 
 ### Estados específicos del módulo (si aplica)
 
-### Colecciones Firestore del módulo (si aplica)
+### Tablas de Supabase del módulo (si aplica)
 ```
 
 ---
@@ -893,7 +1026,7 @@ Cuando se agreguen especificaciones de un nuevo módulo a este documento, seguir
 
 Gestiona el proceso de verificación e importación de los registros de disponibilidad de Mensajeros registrados en la hoja **Disponibilidades** del Google Sheet del Dispatcher. Permite validar que los mensajeros reportados en la hoja existan en la Base de Datos antes de importar la información, y luego consultar los registros importados mediante filtros.
 
-> **Relación con el módulo Dispatcher**: comparte el mismo documento Google Sheet del Área, pero opera sobre una hoja diferente (`Disponibilidades`). El selector de Área/Dispatcher es el mismo mecanismo ya definido en el módulo Dispatcher (sección 5), reutilizando el campo `sheetDocumentId` de la colección `Areas`.
+> **Relación con el módulo Dispatcher**: comparte el mismo documento Google Sheet del Área, pero opera sobre una hoja diferente (`Disponibilidades`). El selector de Área/Dispatcher es el mismo mecanismo ya definido en el módulo Dispatcher (sección 5), reutilizando el campo `sheet_document_id` de la tabla `public.areas` (Supabase).
 
 ### Estructura de carpetas del módulo
 
@@ -925,7 +1058,7 @@ src/modules/disponibilidad/
 
 #### Descripción
 
-Valida que los nombres de Mensajeros registrados en la hoja **Disponibilidades** del Google Sheet existan exactamente en la colección `messengers` de Firestore, dentro del rango de fechas seleccionado por el campo `Fecha de la disponibilidad`.
+Valida que los nombres de Mensajeros registrados en la hoja **Disponibilidades** del Google Sheet existan exactamente en la tabla `public.messengers` de Supabase (Postgres), dentro del rango de fechas seleccionado por el campo `Fecha de la disponibilidad`.
 
 #### Precondiciones
 
@@ -938,7 +1071,7 @@ Valida que los nombres de Mensajeros registrados en la hoja **Disponibilidades**
 
 | Campo | Tipo | Requerido |
 |---|---|---|
-| Área / Dispatcher | Selector (desde colección `Areas` activas) | ✅ |
+| Área / Dispatcher | Selector (desde tabla `public.areas`, registros activos) | ✅ |
 | Fecha Inicial | DatePicker (filtra por `Fecha de la disponibilidad`) | ✅ |
 | Fecha Final | DatePicker (filtra por `Fecha de la disponibilidad`) | ✅ |
 
@@ -984,7 +1117,7 @@ Sistema localiza la hoja "Disponibilidades"
                               de cada fila filtrada
                                         ↓
                               Para cada nombre en "Mensajero":
-                              Buscar en colección "messengers"
+                              Buscar en tabla public.messengers
                               coincidencia EXACTA (RN-012)
                                         ↓
                     ┌───────────────────────────────────┐
@@ -1002,11 +1135,11 @@ Sistema localiza la hoja "Disponibilidades"
 
 #### Regla de validación de nombres — RN-012
 
-La comparación entre el nombre en la columna `Mensajero` de la hoja y el campo correspondiente en la colección `messengers` de Firestore debe ser **exacta**, respetando:
+La comparación entre el nombre en la columna `Mensajero` de la hoja y el campo `name` correspondiente en la tabla `public.messengers` de Supabase debe ser **exacta**, respetando:
 
 - Mayúsculas y minúsculas — `Juan Perez` ≠ `juan perez`
 - Tildes y caracteres diacríticos — `José` ≠ `Jose`
-- Espacios en blanco al inicio y al final — `" Juan Perez"` ≠ `"Juan Perez"` (el sistema debe hacer **trim** al leer la hoja y comparar contra el valor limpio registrado en Firestore)
+- Espacios en blanco al inicio y al final — `" Juan Perez"` ≠ `"Juan Perez"` (el sistema debe hacer **trim** al leer la hoja y comparar contra el valor limpio registrado en Supabase)
 - Espacios dobles internos — `"Juan  Perez"` ≠ `"Juan Perez"`
 
 > **Diferencia clave con RN-005**: el módulo Dispatcher usa coincidencia difusa (fuzzy). El módulo Disponibilidad usa coincidencia **exacta** con trim. Ambas reglas coexisten en el sistema pero aplican a módulos distintos. El agente AI no debe aplicar RN-005 en este módulo bajo ninguna circunstancia.
@@ -1053,7 +1186,7 @@ Cuando se detectan nombres no encontrados, la tabla de incidencias debe mostrar:
 
 #### Descripción
 
-Guarda en Firestore los registros de la hoja **Disponibilidades** del Google Sheet validados previamente. Solo puede ejecutarse cuando la verificación es correcta.
+Guarda en Supabase (Postgres) los registros de la hoja **Disponibilidades** del Google Sheet validados previamente. Solo puede ejecutarse cuando la verificación es correcta.
 
 #### Precondiciones — todas deben cumplirse
 
@@ -1070,11 +1203,11 @@ Sistema valida resultado de verificación
         ↓
 Sistema verifica no-duplicidad por Área y rango de fechas (RN-013)
         ↓
-Sistema guarda registros en colección "Availabilities"
+Sistema guarda registros en la tabla public.availabilities (Supabase)
         ↓
-Sistema genera registro en "Availability_Imports"
+Sistema genera registro en public.availability_imports
         ↓
-Sistema registra log en AuditLogs (usuario, fecha, hora, área, resultado)
+Sistema registra log en public.audit_logs (usuario, fecha, hora, área, resultado)
         ↓
 Toast de éxito — botón "Importar" queda deshabilitado
         ↓
@@ -1083,9 +1216,9 @@ Fin — estado actualizado en pantalla
 
 #### Salida
 
-- Datos almacenados en Firestore (colección `Availabilities`)
-- Registro de importación en colección `Availability_Imports`
-- Log de trazabilidad en `AuditLogs`
+- Datos almacenados en Supabase (tabla `public.availabilities`)
+- Registro de importación en `public.availability_imports`
+- Log de trazabilidad en `public.audit_logs`
 
 #### UI/UX
 
@@ -1099,19 +1232,19 @@ Fin — estado actualizado en pantalla
 
 #### Descripción
 
-Muestra los registros de disponibilidad importados en Firestore, con filtros para consultar y analizar la información.
+Muestra los registros de disponibilidad importados en Supabase (Postgres), con filtros para consultar y analizar la información.
 
 #### Precondiciones
 
 - Usuario autenticado con Rol `Super Admin`, `Supervisor` u `Operador`
-- Datos previamente importados a Firestore en la colección `Availabilities`
+- Datos previamente importados a Supabase en la tabla `public.availabilities`
 
 #### Entradas / Filtros del proceso
 
 | Campo | Tipo | Requerido |
 |---|---|---|
-| Fecha Inicial | DatePicker (filtra por `availabilityDate`) | ✅ |
-| Fecha Final | DatePicker (filtra por `availabilityDate`) | ✅ |
+| Fecha Inicial | DatePicker (filtra por `availability_date`) | ✅ |
+| Fecha Final | DatePicker (filtra por `availability_date`) | ✅ |
 | Área | Selector | ✅ |
 | Mensajero | Selector o búsqueda (opcional) | ❌ |
 | Motivo | Selector (opcional) | ❌ |
@@ -1121,7 +1254,7 @@ Muestra los registros de disponibilidad importados en Firestore, con filtros par
 ```
 Usuario selecciona filtros
         ↓
-Sistema consulta colección "Availabilities" en Firestore
+Sistema consulta la tabla public.availabilities en Supabase
 con los filtros aplicados
         ↓
 Sistema muestra resultados en tabla
@@ -1133,24 +1266,24 @@ Sistema muestra resultados en tabla
 
 #### Columnas de la tabla de resultados
 
-| Columna | Campo Firestore | Formatter |
+| Columna | Campo en `public.availabilities` (Supabase) | Formatter |
 |---|---|---|
-| Fecha | `availabilityDate` | `formatDate` |
-| Mensajero | `messengerName` | — |
+| Fecha | `availability_date` | `formatDate` |
+| Mensajero | `messenger_name` | — |
 | Motivo | `reason` | — |
-| Solicitado por | `requestedBy` | — |
-| Monto a pagar | `amountToPay` | `formatCurrency` |
+| Solicitado por | `requested_by` | — |
+| Monto a pagar | `amount_to_pay` | `formatCurrency` |
 | Provincia | `province` | — |
 | Comentario | `comment` | — |
-| No. Orden | `orderId` | — |
-| Área | `area` | — |
+| No. Orden | `order_id` | — |
+| Área | `area_id` (resuelto contra `public.areas.name`) | — |
 
 #### UI/UX
 
 - Tabla con los 6 elementos de anatomía obligatoria (sección 9 de la Constitución)
 - Estado vacío con ícono Lucide `CalendarOff` y mensaje descriptivo cuando no hay registros para los filtros seleccionados
 - Filtros opcionales (Mensajero, Motivo) se muestran en un panel colapsable o como chips sobre la tabla — **nunca** en modal ni slide-over
-- El campo `amountToPay` usa siempre el formatter `formatCurrency` y clase `tabular-nums`
+- El campo `amount_to_pay` usa siempre el formatter `formatCurrency` y clase `tabular-nums`
 
 ---
 
@@ -1162,12 +1295,12 @@ La validación de nombres de Mensajeros en este módulo es **estricta y exacta**
 
 1. Leer el valor de la columna `Mensajero` de la hoja
 2. Aplicar **trim** (eliminar espacios al inicio y al final)
-3. Buscar el valor resultante en la colección `messengers` de Firestore con coincidencia exacta, respetando mayúsculas, minúsculas y tildes
+3. Buscar el valor resultante en la tabla `public.messengers` de Supabase con coincidencia exacta, respetando mayúsculas, minúsculas y tildes
 4. Si no hay coincidencia exacta → incidencia crítica para esa fila
 
 #### RN-013 — Control de Duplicados en Disponibilidad
 
-Un conjunto de registros de disponibilidad **no puede importarse más de una vez** para la misma Área y rango de fechas. Si ya existe un registro importado para esa combinación en `Availability_Imports`, el sistema debe bloquear la importación y mostrar un error descriptivo.
+Un conjunto de registros de disponibilidad **no puede importarse más de una vez** para la misma Área y rango de fechas. Si ya existe un registro importado para esa combinación en `public.availability_imports`, el sistema debe bloquear la importación y mostrar un error descriptivo.
 
 #### RN-014 — Celda Mensajero Vacía
 
@@ -1197,66 +1330,14 @@ Todos los estados usan los tokens semánticos de la Constitución. Nunca crear e
 
 ---
 
-### 18.6 Colecciones Firestore del módulo Disponibilidad
+### 18.6 Tablas de Supabase del módulo Disponibilidad
 
-#### Colección `Availabilities`
+> El detalle completo de columnas y tipos vive en la sección 12 (Diseño de base de datos Supabase), que es la fuente de verdad única del esquema — aquí solo se listan para referencia rápida, para no mantener dos copias de la misma información.
 
-Copia exacta de las filas de la hoja Disponibilidades del Google Sheet, filtradas por el rango de fechas importado.
-
-| Campo | Tipo | Origen (columna Google Sheet) |
-|---|---|---|
-| `availabilityId` | string | generado por el sistema |
-| `timestamp` | Timestamp | `Timestamp` |
-| `emailAddress` | string | `Email Address` |
-| `orderId` | string | `No. Orden` |
-| `availabilityDate` | Timestamp | `Fecha de la disponibilidad` |
-| `reason` | string | `Motivo` |
-| `requestedBy` | string | `Area o persona que solicta la transportacion` |
-| `messengerName` | string | `Mensajero` |
-| `amountToPay` | number | `Monto a pagar` |
-| `province` | string | `Provincias` |
-| `comment` | string | `Comentario` |
-| `area` | string | valor del Área seleccionada en el sistema |
-| `importId` | string | referencia a `Availability_Imports` |
-
-#### Colección `Availability_Imports`
-
-| Campo | Tipo |
-|---|---|
-| `importId` | string |
-| `area` | string |
-| `startDate` | Timestamp |
-| `endDate` | Timestamp |
-| `importedBy` | string (userId) |
-| `importDate` | Timestamp |
-| `recordsImported` | number |
-
-#### Colección `Availability_Verifications`
-
-| Campo | Tipo |
-|---|---|
-| `verificationId` | string |
-| `area` | string |
-| `startDate` | Timestamp |
-| `endDate` | Timestamp |
-| `verificationDate` | Timestamp |
-| `userId` | string |
-| `status` | `correcta` / `con_incidencias` |
-| `totalRecords` | number |
-| `totalIncidents` | number |
-
-#### Colección `Availability_Incidents`
-
-| Campo | Tipo |
-|---|---|
-| `incidentId` | string |
-| `verificationId` | string |
-| `rowNumber` | number |
-| `messengerName` | string |
-| `availabilityDate` | Timestamp |
-| `severity` | `critica` |
-| `ruleCode` | string (`RN-012`, `RN-014`) |
-| `description` | string |
+- `public.availabilities` — copia de las filas de la hoja Disponibilidades del Google Sheet, filtradas por el rango de fechas importado. Incluye `import_id` como FK a `availability_imports`.
+- `public.availability_imports` — un registro por cada importación ejecutada (área + rango de fechas + quién y cuándo).
+- `public.availability_verifications` — un registro por cada verificación ejecutada (`status`, totales de registros e incidencias).
+- `public.availability_incidents` — incidencias críticas detectadas en una verificación (mensajero no encontrado, celda vacía), con FK a `availability_verifications`.
 
 ---
 
@@ -1300,8 +1381,8 @@ export const navConfig = {
 | R-009 | Hoja `Disponibilidades` no encontrada en el documento | Detener proceso, mostrar error descriptivo con código R-009 |
 | R-010 | Columna `Mensajero` con celdas vacías | RN-014: incidencia crítica por fila, bloquear importación |
 | R-011 | Nombre de Mensajero con espacios sobrantes | RN-012: aplicar trim antes de comparar |
-| R-012 | Importación duplicada de disponibilidades | RN-013: verificar existencia en `Availability_Imports` por área y rango |
-| R-013 | Colección `messengers` vacía o inaccesible | Detener verificación y mostrar error descriptivo indicando que no hay mensajeros registrados en la Base de Datos |
+| R-012 | Importación duplicada de disponibilidades | RN-013: verificar existencia en `public.availability_imports` por área y rango |
+| R-013 | Tabla `public.messengers` vacía o inaccesible | Detener verificación y mostrar error descriptivo indicando que no hay mensajeros registrados en la Base de Datos |
 
 ---
 
@@ -1312,23 +1393,22 @@ export const navConfig = {
 - ❌ Navegar a otra página para mostrar el resultado de la Verificación — el resultado va en la misma vista
 - ❌ Mostrar el botón "Importar Disponibilidades" a usuarios con Rol `Operador` o `Visitante`
 - ❌ Importar una fila con la columna `Mensajero` vacía o solo con espacios (RN-014)
-- ❌ Omitir el campo `area` en los registros guardados en `Availabilities`
+- ❌ Omitir el campo `area_id` en los registros guardados en `public.availabilities`
 - ❌ Leer la columna fuente corrigiendo el error tipográfico (`solicta`) — debe leerse exactamente como está en el Google Sheet
-- ❌ Procesar el campo `amountToPay` sin convertirlo a `number` y sin usar `formatCurrency` para mostrarlo
+- ❌ Procesar el campo `amount_to_pay` sin convertirlo a `number` y sin usar `formatCurrency` para mostrarlo
 
 ---
 
 ## 19. Backend y persistencia de datos — Migración a Supabase
 
-> 🆕 Sección agregada. Documenta la migración del backend de Firebase (Auth + Firestore) a Supabase (Auth + Postgres). El resto del documento (secciones 1–18) conserva referencias a "Firestore" en la descripción de colecciones y flujos por ser el diseño de datos original; funcionalmente, esas colecciones ahora viven como **tablas de Postgres en Supabase**, gobernadas por Row Level Security en vez de reglas de seguridad de Firestore. La traducción formal colección→tabla vive en `supabase_schema.sql`, en la raíz del repo, que es la fuente de verdad del esquema actual.
+> 🆕 Sección agregada. Documenta la migración del backend de Firebase (Auth + Firestore) a Supabase (Auth + Postgres). **Actualización 2026-09-13**: las secciones 1–18 ya se corrigieron para hablar de Supabase (Postgres) directamente — Firestore no existe más en este sistema, y la sección 12 documenta el esquema real completo. La fuente de verdad formal del esquema es `supabase_schema.sql`, en la raíz del repo.
 
 ### 19.1 Estado de la migración
 
-- Esquema completo definido y validado en `supabase_schema.sql`: **12 tablas**, con políticas **RLS** activas en todas ellas, más funciones auxiliares (helper functions).
-- Se retiraron del esquema las tablas `email_groups` y `email_templates` (correspondientes a las colecciones `EmailGroups`/`EmailTemplates` documentadas en la sección 12 de este documento como legado de Firestore).
-- Pendiente: reemplazar componentes que aún importan la ruta eliminada `src/lib/firebase` (ej. `RolesUsuariosPage.tsx`) por componentes placeholder mientras se completa su migración.
-- Diferidas para trabajo con Claude Code y pruebas en navegador en vivo: `VerificationPage.tsx`, `RevisionPage.tsx`, `DisponibilidadVerificationPage.tsx`, `DisponibilidadRevisionPage.tsx`.
-- Módulos aún no construidos (Gestión, Conciliación, Facturación) se desarrollarán directamente sobre Supabase, sin pasar por Firebase.
+- Esquema completo definido y validado en `supabase_schema.sql`: **15 tablas** (detalle completo en la sección 12), con políticas **RLS** activas en todas ellas, más funciones auxiliares (helper functions).
+- Se retiraron del esquema las tablas `email_groups` y `email_templates` (correspondientes a las colecciones `EmailGroups`/`EmailTemplates` que documentaba la versión anterior de este documento, basada en Firestore — nunca tuvieron uso real en el código).
+- Ya migrados y en uso real sobre Supabase: Auth, Dispatcher (Verificación/Revisión), Disponibilidad (Verificación/Revisión), y todo Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría). Ningún archivo del código activo importa ya `src/lib/firebase` (esa ruta no existe).
+- Pendiente de diseñar (sin tabla propia todavía): Conciliación, Facturación, Cuentas por Cobrar, Cuentas por Pagar y Planificación de Pagos — ver "Tablas pendientes" al final de la sección 12.
 
 ### 19.2 Autenticación
 
@@ -1358,7 +1438,7 @@ Pertenecer al dominio `@mandao.app` (Google Workspace) permite **autenticarse**,
 
 ### 19.4 Actores del sistema (actualización de la sección 4)
 
-Donde la sección 4 indica **Firestore** como actor no humano ("Almacenamiento validado, búsquedas, historial"), léase ahora **Supabase (Postgres)**, cumpliendo la misma función.
+> Resuelto 2026-09-13: la sección 4 ya lista directamente **Supabase (Postgres)** como actor no humano — esta subsección queda solo como registro histórico del cambio (antes decía "Firestore").
 
 ---
 
