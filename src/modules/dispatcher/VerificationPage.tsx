@@ -133,6 +133,22 @@ function formatDateToYYYYMMDD(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+// El body de error de Google (JSON: { error: { code, message, status } })
+// trae el motivo real (API deshabilitada, scope insuficiente, sin acceso al
+// documento, etc.) — res.statusText casi siempre viene vacío para fetch(),
+// así que sin esto el usuario solo ve "(403)" sin ninguna pista de la causa.
+async function extractGoogleApiError(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    const msg = body?.error?.message;
+    const status = body?.error?.status;
+    if (msg) return status ? `${msg} [${status}]` : msg;
+  } catch {
+    // body no era JSON o ya se consumió — se usa el fallback genérico
+  }
+  return res.statusText || `HTTP ${res.status}`;
+}
+
 function normalizeDateStr(dateStr: string): string {
   const parsed = parseDateString(dateStr);
   return parsed ? formatDateToYYYYMMDD(parsed) : '';
@@ -502,7 +518,8 @@ export function VerificationPage() {
           await handleConnectGoogle();
           throw new Error("Sesión de Google expirada. Serás redirigido para reconectar — vuelve a pulsar Verificar al regresar.");
         } else {
-          throw new Error(`Google Sheets API Error: ${metaRes.statusText} (${metaRes.status}). Asegúrate de que el ID del documento sea correcto y tengas permisos de acceso.`);
+          const detail = await extractGoogleApiError(metaRes);
+          throw new Error(`Google Sheets API Error (${metaRes.status}): ${detail}`);
         }
       }
 
@@ -540,7 +557,8 @@ export function VerificationPage() {
           await handleConnectGoogle();
           throw new Error("Sesión de Google expirada. Serás redirigido para reconectar — vuelve a pulsar Verificar al regresar.");
         } else {
-          throw new Error(`Google API Error: ${batchRes.statusText} (${batchRes.status})`);
+          const detail = await extractGoogleApiError(batchRes);
+          throw new Error(`Google Sheets API Error (${batchRes.status}): ${detail}`);
         }
       }
 
