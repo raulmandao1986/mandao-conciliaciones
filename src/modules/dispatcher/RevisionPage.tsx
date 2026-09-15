@@ -161,6 +161,23 @@ function buildHeaderMap(headers: string[]): Record<string, number> {
   return map;
 }
 
+// El body de error de Google (JSON: { error: { code, message, status } })
+// trae el motivo real (API deshabilitada, scope insuficiente, sin acceso al
+// documento, etc.) — res.statusText casi siempre viene vacío para fetch(),
+// así que sin esto el usuario solo ve el código HTTP sin ninguna pista de
+// la causa. Ver la nota equivalente en VerificationPage.tsx.
+async function extractGoogleApiError(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    const msg = body?.error?.message;
+    const status = body?.error?.status;
+    if (msg) return status ? `${msg} [${status}]` : msg;
+  } catch {
+    // body no era JSON o ya se consumió — se usa el fallback genérico
+  }
+  return res.statusText || `HTTP ${res.status}`;
+}
+
 function normalizeDateStr(ds: string): string | null {
   if (!ds) return null;
   const clean = String(ds).trim();
@@ -712,7 +729,8 @@ export function RevisionPage() {
           await handleConnectGoogle();
           throw new Error("Sesión de Google expirada. Serás redirigido para reconectar — vuelve a pulsar Detectar Cambios al regresar.");
         } else {
-          throw new Error(`Google Sheets API devolvió código ${metaRes.status}: ${metaRes.statusText}`);
+          const detail = await extractGoogleApiError(metaRes);
+          throw new Error(`Google Sheets API Error (${metaRes.status}): ${detail}`);
         }
       }
 
@@ -736,7 +754,8 @@ export function RevisionPage() {
           await handleConnectGoogle();
           throw new Error("Sesión de Google expirada. Serás redirigido para reconectar — vuelve a pulsar Detectar Cambios al regresar.");
         } else {
-          throw new Error(`Fallo al descargar valores de la pestaña: ${res.statusText}`);
+          const detail = await extractGoogleApiError(res);
+          throw new Error(`Fallo al descargar valores de la pestaña (${res.status}): ${detail}`);
         }
       }
 
@@ -1311,6 +1330,13 @@ export function RevisionPage() {
                 <option key={a.id} value={a.id}>{a.nombre} ({a.provincia})</option>
               ))}
             </select>
+            {selectedAreaId && !spreadsheetId.trim() && (
+              <p className="text-[10px] text-[var(--color-danger)] flex items-center gap-1 pt-0.5">
+                <AlertCircle size={11} className="shrink-0" />
+                Esta Área no tiene ID de Google Sheet — completa "ID Documento Google Sheet" en
+                Configuración → Áreas para poder usar "Detectar Cambios".
+              </p>
+            )}
           </div>
 
           <div className="space-y-1.5">
