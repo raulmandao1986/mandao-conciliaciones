@@ -1587,7 +1587,6 @@ export function RevisionPage() {
           <div className="flex flex-col">
             <div className="p-4 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-green-500 animate-ping shrink-0" />
                 <h3 className="text-xs font-black uppercase text-slate-500 tracking-wider">
                   Listado de diferencias de Auditoría ({filteredDiscrepancies.length} discrepancias encontradas)
                 </h3>
@@ -1640,7 +1639,6 @@ export function RevisionPage() {
             {canWrite && selectedDiscrepancyIds.length > 0 && (
               <div className="p-3 bg-amber-50/80 border-b border-amber-200 flex items-center justify-between px-6 animate-fade-in">
                 <div className="flex items-center gap-2 text-xs font-bold text-amber-900">
-                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping shrink-0" />
                   Se han seleccionado <span className="font-black text-[var(--color-primary)] underline">{selectedDiscrepancyIds.length}</span> discrepancias de auditoría.
                 </div>
                 <div className="flex items-center gap-2">
