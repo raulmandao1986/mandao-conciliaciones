@@ -31,18 +31,6 @@ import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
 import { motion, AnimatePresence } from 'motion/react';
 
-// Catálogo de métodos de pago de mensajeros usado para validar RN-005.
-// Ver nota equivalente en VerificationPage.tsx — el módulo de Gestión
-// (donde vivirá la tabla editable) todavía no existe en Supabase.
-const DEFAULT_MESSENGER_PAYMENT_METHODS = [
-  { nombre: 'Efectivo' },
-  { nombre: 'Transferencia' },
-  { nombre: 'Transferencia-Efectivo' },
-  { nombre: 'Transferencia-Especial' },
-  { nombre: 'Transferencia-Exterior' },
-  { nombre: 'Transferencia-Saldo' }
-];
-
 interface OrderRecord {
   id: string;
   deliveryDate: string;
@@ -500,10 +488,25 @@ export function RevisionPage() {
       })));
     };
 
+    // Métodos de pago válidos para Órdenes — tabla real payment_methods
+    // (Configuración → Métodos de Pago), no el catálogo fijo que tenía el
+    // código antes (ver nota equivalente en VerificationPage.tsx).
+    const loadOrderPaymentMethods = async () => {
+      const { data: rows, error } = await supabase
+        .from('payment_methods')
+        .select('name')
+        .eq('active', true)
+        .eq('applies_to_orders', true);
+      if (error) {
+        console.error('Error loading payment_methods:', error.message);
+        return;
+      }
+      setRegisteredPaymentMethods((rows || []).map(m => ({ nombre: m.name })));
+    };
+
     loadAreas();
     loadOrders();
-    // Métodos de pago de mensajeros: catálogo fijo (ver nota arriba, no hay tabla en Supabase todavía)
-    setRegisteredPaymentMethods(DEFAULT_MESSENGER_PAYMENT_METHODS);
+    loadOrderPaymentMethods();
   }, []);
 
   const addComparisonLog = (lvl: 'info' | 'success' | 'warn' | 'error', msg: string) => {

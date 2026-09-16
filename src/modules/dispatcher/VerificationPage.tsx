@@ -27,19 +27,6 @@ import { motion, AnimatePresence } from 'motion/react';
 import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
 
-// Catálogo de métodos de pago de mensajeros usado para validar RN-005.
-// Se mantiene fijo en código porque el módulo de Gestión (donde vivirá
-// la tabla editable de Métodos de Pago) todavía no se ha construido en
-// Supabase (fuera de alcance de esta fase, ver PLAN_MIGRACION.md).
-const DEFAULT_MESSENGER_PAYMENT_METHODS = [
-  { nombre: 'Efectivo' },
-  { nombre: 'Transferencia' },
-  { nombre: 'Transferencia-Efectivo' },
-  { nombre: 'Transferencia-Especial' },
-  { nombre: 'Transferencia-Exterior' },
-  { nombre: 'Transferencia-Saldo' }
-];
-
 // Persistencia local (por navegador) de los correos de notificación.
 // Firestore tenía un doc global 'settings/dispatcher_config'; Supabase
 // todavía no tiene una tabla de configuración (fuera de alcance —
@@ -348,6 +335,7 @@ export function VerificationPage() {
   const [googleToken, setGoogleToken] = useState<string | null>(() => sessionStorage.getItem('google_access_token'));
   const [areas, setAreas] = useState<any[]>([]);
   const [selectedAreaId, setSelectedAreaId] = useState<string>('');
+  const [orderPaymentMethods, setOrderPaymentMethods] = useState<{ nombre: string }[]>([]);
 
   const [formData, setFormData] = useState({
     fechaInicio: new Date().toISOString().split('T')[0],
@@ -371,6 +359,25 @@ export function VerificationPage() {
       estado: a.active ? 'activo' : 'inactivo'
     }));
     setAreas(records);
+  };
+
+  // Catálogo real de Métodos de Pago válidos para Órdenes (RN-005), tal
+  // como se administra en Configuración → Métodos de Pago. Antes esto
+  // era una lista fija en el código ("métodos de pago de mensajeros")
+  // que no tenía relación con la tabla real payment_methods — por eso
+  // la Verificación generaba incidencias falsas contra valores que el
+  // usuario sí tenía registrados, solo que en otro catálogo.
+  const loadOrderPaymentMethods = async () => {
+    const { data, error } = await supabase
+      .from('payment_methods')
+      .select('name')
+      .eq('active', true)
+      .eq('applies_to_orders', true);
+    if (error) {
+      console.warn("Error loading payment_methods:", error.message);
+      return;
+    }
+    setOrderPaymentMethods((data || []).map(m => ({ nombre: m.name })));
   };
 
   const loadHistory = async () => {
@@ -402,6 +409,7 @@ export function VerificationPage() {
 
     loadHistory();
     loadAreas();
+    loadOrderPaymentMethods();
   }, []);
 
   const handleAreaChange = (areaId: string) => {
@@ -501,8 +509,8 @@ export function VerificationPage() {
     setResult(null);
 
     try {
-      addLog('info', `Usando catálogo de Métodos de Pago de Mensajeros (${DEFAULT_MESSENGER_PAYMENT_METHODS.length} métodos activos).`);
-      const activeMessengerMethods: any[] = DEFAULT_MESSENGER_PAYMENT_METHODS;
+      addLog('info', `Usando catálogo de Métodos de Pago para Órdenes (${orderPaymentMethods.length} métodos activos, desde Configuración → Métodos de Pago).`);
+      const activeMessengerMethods: any[] = orderPaymentMethods;
 
       addLog('info', `Paso 1: Conectando con Google Sheets API v4. Consultando metadatos para el Spreadsheet ID: ...${spreadsheetId.slice(-8)}`);
       // 1. Fetch metadata first to get exact sheet titles
