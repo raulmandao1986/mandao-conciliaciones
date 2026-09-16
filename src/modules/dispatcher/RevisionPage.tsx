@@ -75,6 +75,24 @@ function stringsFuzzyEqual(s1: any, s2: any): boolean {
   return fuzzyNormalizedString(s1) === fuzzyNormalizedString(s2);
 }
 
+// El Order ID por sí solo NO es único: el mismo No. Orden puede repetirse en
+// negocios distintos (por eso RN-009 solo bloquea duplicados con MISMO Order
+// ID + MISMO Negocio, ver la regla equivalente en VerificationPage.tsx).
+// Comparar/indexar registros solo por Order ID cruzaría negocios distintos —
+// orderKey() es la clave compuesta (Order ID + Store) usada en todo el
+// análisis de Revisión (matching BD↔Sheet, Set de eliminados, mapa de
+// discrepancias, y las columnas "Estado Externo" de tabla y PDF).
+function orderKey(o: { orderId?: string; store?: string; negocio?: string }): string {
+  return `${String(o.orderId || '').trim().toLowerCase()}::${String(o.store || o.negocio || '').trim().toLowerCase()}`;
+}
+
+function sameOrder(
+  a: { orderId?: string; store?: string; negocio?: string },
+  b: { orderId?: string; store?: string; negocio?: string }
+): boolean {
+  return orderKey(a) === orderKey(b);
+}
+
 // Google Sheets Parsing helpers
 function parseCellNumber(val: any): number {
   if (val === undefined || val === null) return 0;
@@ -826,16 +844,14 @@ export function RevisionPage() {
       console.log("Paso 2: Iniciando comparación BD vs Google Sheets...");
 
       compareDbOrders.forEach(dbOrder => {
-        const match = filteredSheetOrders.find(sheetOrder => {
-          return String(sheetOrder.orderId || '').trim().toLowerCase() === String(dbOrder.orderId || '').trim().toLowerCase();
-        });
+        const match = filteredSheetOrders.find(sheetOrder => sameOrder(sheetOrder, dbOrder));
 
         if (!match) {
-          deletedInSheets.add(dbOrder.orderId);
+          deletedInSheets.add(orderKey(dbOrder));
           const diffStr = `Registro presente en BD pero ausente en Documento Dispatcher (Fecha: ${dbOrder.deliveryDate || 'N/A'})`;
           
           discrepanciesList.push({
-            id: `${dbOrder.orderId}-inexistente`,
+            id: `${dbOrder.id}-inexistente`,
             orderId: dbOrder.orderId,
             campo: 'Existencia en Dispatcher',
             valorBD: 'Registrada',
@@ -858,7 +874,7 @@ export function RevisionPage() {
               const diffStr = `Sheets: $${parsedSheet.toFixed(2)} vs BD: $${parsedDb.toFixed(2)}`;
               
               discrepanciesList.push({
-                id: `${dbOrder.orderId}-${label}`,
+                id: `${dbOrder.id}-${label}`,
                 orderId: dbOrder.orderId,
                 campo: label,
                 valorBD: `$${parsedDb.toFixed(2)}`,
@@ -883,7 +899,7 @@ export function RevisionPage() {
               const diffStr = `Sheets: "${cleanSheet || 'Vacío'}" vs BD: "${cleanDb || 'Vacío'}"`;
 
               discrepanciesList.push({
-                id: `${dbOrder.orderId}-${label}`,
+                id: `${dbOrder.id}-${label}`,
                 orderId: dbOrder.orderId,
                 campo: label,
                 valorBD: cleanDb || 'Vacío',
@@ -919,7 +935,7 @@ export function RevisionPage() {
           compareString('Promocode', match.promocode, dbOrder.promocode);
 
           if (diffs.length > 0) {
-            discrepancies[dbOrder.orderId] = diffs;
+            discrepancies[orderKey(dbOrder)] = diffs;
             addComparisonLog('warn', `ALERTA: Discrepancias detectadas en Orden ID: ${dbOrder.orderId}: \n  * ${diffs.join('\n  * ')}`);
           }
         }
@@ -928,12 +944,12 @@ export function RevisionPage() {
       // B. Scan if there are new orders in Sheets not residing in the dispatcher DB
       console.log("Paso 3: Escaneando órdenes nuevas en Google Sheets...");
       filteredSheetOrders.forEach(sheetOrder => {
-        const match = compareDbOrders.find(dbOrder => String(dbOrder.orderId || '').trim().toLowerCase() === String(sheetOrder.orderId || '').trim().toLowerCase());
+        const match = compareDbOrders.find(dbOrder => sameOrder(sheetOrder, dbOrder));
         if (!match && sheetOrder.orderId) {
           newInSheets.push(sheetOrder);
           
           discrepanciesList.push({
-            id: `${sheetOrder.orderId}-solo_sheets`,
+            id: `${sheetOrder.orderId}-${sheetOrder.store || sheetOrder.negocio || ''}-solo_sheets`,
             orderId: sheetOrder.orderId,
             campo: 'Existencia en Dispatcher',
             valorBD: 'Ausente',
@@ -1161,9 +1177,9 @@ export function RevisionPage() {
         const tableRows = filteredData.map(item => {
           let extStatus = 'Consistente (BD)';
           if (externalComparison) {
-            if (externalComparison.deletedInSheets.has(item.orderId)) {
+            if (externalComparison.deletedInSheets.has(orderKey(item))) {
               extStatus = 'Eliminado en Dispatcher';
-            } else if (externalComparison.discrepancies[item.orderId]) {
+            } else if (externalComparison.discrepancies[orderKey(item)]) {
               extStatus = 'Con Discrepancia';
             } else {
               extStatus = 'Consistente';
@@ -1836,8 +1852,8 @@ export function RevisionPage() {
                 </tr>
               ) : (
                 paginatedData.map((item) => {
-                  const isDeleted = externalComparison?.deletedInSheets.has(item.orderId);
-                  const isDiscrepante = externalComparison?.discrepancies[item.orderId];
+                  const isDeleted = externalComparison?.deletedInSheets.has(orderKey(item));
+                  const isDiscrepante = externalComparison?.discrepancies[orderKey(item)];
                   const hasDifferencesStr = isDiscrepante ? isDiscrepante.join(' | ') : '';
 
                   return (
