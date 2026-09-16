@@ -39,13 +39,22 @@ interface VerificationResult {
   orders: any[];
   cambios: any[];
   disponibilidades: any[];
-  incidences: { 
-    type: 'mismatch' | 'data_error'; 
-    severity?: 'critica' | 'advertencia' | 'informativa'; 
-    ruleCode?: string; 
-    detail: string; 
-    id: string; 
-    record: any; 
+  incidences: {
+    type: 'mismatch' | 'data_error';
+    severity?: 'critica' | 'advertencia' | 'informativa';
+    ruleCode?: string;
+    detail: string;
+    id: string;
+    record: any;
+  }[];
+  // Cambios detectados en la hoja "Cambios" contra su orden coincidente en
+  // "Orders" (RN-001). A diferencia de las incidencias de arriba, esto NO
+  // es un error a corregir en el Sheet: es información legítima (la orden
+  // fue modificada) que requiere confirmación explícita antes de habilitar
+  // "Importar a la BD" — no cuenta para el bloqueo de RN-006.
+  cambiosDetectados: {
+    orderId: string;
+    diffs: { campo: string; valorOrders: string; valorCambios: string }[];
   }[];
 }
 
@@ -293,6 +302,9 @@ export function VerificationPage() {
   const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [result, setResult] = useState<VerificationResult | null>(null);
+  // Confirmación explícita por Orden ID de cada cambio detectado (Cambios vs
+  // Orders) — debe estar todo marcado antes de habilitar "Importar a la BD".
+  const [confirmedChanges, setConfirmedChanges] = useState<Record<string, boolean>>({});
   const [showIncidenceDetails, setShowIncidenceDetails] = useState<any | null>(null);
   const [history, setHistory] = useState<any[]>([]);
   const [showHistory, setShowHistory] = useState(false);
@@ -691,7 +703,23 @@ export function VerificationPage() {
 
       const cleanStr = (s: string) => (s || '').trim().toLowerCase();
 
+      // Incidencias reales de Cambios (bloquean RN-006): solo la fila
+      // "huérfana" — un cambio que no se pudo ubicar en Orders es un
+      // problema de datos genuino, no una diferencia esperada.
       const cambiosIncidences: any[] = [];
+      // Cambios detectados en órdenes que SÍ se encontraron en Orders: no
+      // son un error a corregir, es la razón de ser de la hoja "Cambios"
+      // (la orden fue modificada). Se agrupan por Orden ID y requieren
+      // confirmación explícita del usuario antes de poder importar — no
+      // cuentan para el bloqueo de RN-006.
+      const cambiosDetectadosMap: Record<string, { orderId: string; diffs: { campo: string; valorOrders: string; valorCambios: string }[] }> = {};
+
+      const addCambioDetectado = (orderId: string, campo: string, valorOrders: string, valorCambios: string) => {
+        if (!cambiosDetectadosMap[orderId]) {
+          cambiosDetectadosMap[orderId] = { orderId, diffs: [] };
+        }
+        cambiosDetectadosMap[orderId].diffs.push({ campo, valorOrders, valorCambios });
+      };
 
       if (filteredCambios.length > 0) {
         filteredCambios.forEach(c => {
@@ -733,45 +761,30 @@ export function VerificationPage() {
               }
             });
           } else {
-            // Verify fields:
+            // Verify fields — cualquier diferencia aquí es un "cambio
+            // detectado" a confirmar, NO una incidencia crítica bloqueante.
             // 1. Tipo de Pago en Cambios vs Payment Type en Orders
             if (cleanStr(c.tipoPago) !== cleanStr(matchingOrder.paymentType)) {
-              cambiosIncidences.push({
-                type: 'data_error' as const,
-                severity: 'critica' as const,
-                ruleCode: 'RN-001',
-                detail: `[Fila Orders: ${matchingOrder.sheetRow}, Fila Cambios: ${c.sheetRow}] Discrepancia en Orden "${c.orden}": "Tipo de pago" en Cambios es "${c.tipoPago || 'Vacío'}" pero en Orders "Payment Type" es "${matchingOrder.paymentType || 'Vacío'}".`,
-                id: c.orden,
-                record: matchingOrder
-              });
+              addLog('info', `Cambio detectado en Orden "${c.orden}": Tipo de pago "${matchingOrder.paymentType || 'Vacío'}" (Orders) → "${c.tipoPago || 'Vacío'}" (Cambios).`);
+              addCambioDetectado(c.orden, 'Tipo de Pago', matchingOrder.paymentType || 'Vacío', c.tipoPago || 'Vacío');
             }
 
             // 2. Monto de producto en Cambios vs Product Amount en Orders
             if (Math.abs(c.montoProducto - matchingOrder.productAmount) > 0.01) {
-              cambiosIncidences.push({
-                type: 'data_error' as const,
-                severity: 'critica' as const,
-                ruleCode: 'RN-001',
-                detail: `[Fila Orders: ${matchingOrder.sheetRow}, Fila Cambios: ${c.sheetRow}] Discrepancia en Orden "${c.orden}": "Monto de producto" en Cambios es $${c.montoProducto.toFixed(2)} pero "Product Amount" en Orders es $${matchingOrder.productAmount.toFixed(2)}.`,
-                id: c.orden,
-                record: matchingOrder
-              });
+              addLog('info', `Cambio detectado en Orden "${c.orden}": Monto de producto $${matchingOrder.productAmount.toFixed(2)} (Orders) → $${c.montoProducto.toFixed(2)} (Cambios).`);
+              addCambioDetectado(c.orden, 'Monto de Producto', `$${matchingOrder.productAmount.toFixed(2)}`, `$${c.montoProducto.toFixed(2)}`);
             }
 
             // 3. Monto de delivery en Cambios vs Delivery Charge en Orders
             if (Math.abs(c.montoDelivery - matchingOrder.deliveryCharge) > 0.01) {
-              cambiosIncidences.push({
-                type: 'data_error' as const,
-                severity: 'critica' as const,
-                ruleCode: 'RN-001',
-                detail: `[Fila Orders: ${matchingOrder.sheetRow}, Fila Cambios: ${c.sheetRow}] Discrepancia en Orden "${c.orden}": "Monto de delivery" en Cambios es $${c.montoDelivery.toFixed(2)} pero "Delivery Charge" en Orders es $${matchingOrder.deliveryCharge.toFixed(2)}.`,
-                id: c.orden,
-                record: matchingOrder
-              });
+              addLog('info', `Cambio detectado en Orden "${c.orden}": Monto de delivery $${matchingOrder.deliveryCharge.toFixed(2)} (Orders) → $${c.montoDelivery.toFixed(2)} (Cambios).`);
+              addCambioDetectado(c.orden, 'Monto de Delivery', `$${matchingOrder.deliveryCharge.toFixed(2)}`, `$${c.montoDelivery.toFixed(2)}`);
             }
           }
         });
       }
+
+      const cambiosDetectados = Object.values(cambiosDetectadosMap);
 
       // Lógica 2: Inconsistencias de datos en Orders
       const dataIncidences = filteredOrders.flatMap(o => {
@@ -888,18 +901,25 @@ export function VerificationPage() {
       });
 
       const totalIncidences = [...cambiosIncidences, ...dataIncidences];
-      
-      if (totalIncidences.length === 0) {
+
+      if (totalIncidences.length === 0 && cambiosDetectados.length === 0) {
         addLog('success', '¡Verificación exitosa sin discrepancias! Los datos cumplen el 100% de las invariantes de Mandao.');
       } else {
-        addLog('error', `Verificación finalizada con un total de ${totalIncidences.length} incidencias registradas.`);
+        if (totalIncidences.length > 0) {
+          addLog('error', `Verificación finalizada con un total de ${totalIncidences.length} incidencias registradas.`);
+        }
+        if (cambiosDetectados.length > 0) {
+          addLog('warn', `${cambiosDetectados.length} órdenes con cambios detectados en la hoja "Cambios" — deben confirmarse antes de importar.`);
+        }
       }
 
+      setConfirmedChanges({});
       setResult({
         orders: filteredOrders,
         cambios: filteredCambios,
         disponibilidades: filteredDisps,
-        incidences: totalIncidences
+        incidences: totalIncidences,
+        cambiosDetectados
       });
 
       try {
@@ -1628,6 +1648,7 @@ export function VerificationPage() {
                       disabled={
                         importing ||
                         result.incidences.filter((i: any) => i.severity === 'critica').length > 0 ||
+                        result.cambiosDetectados.some(c => !confirmedChanges[c.orderId]) ||
                         (
                           result.orders.length === 0 &&
                           result.cambios.length === 0 &&
@@ -1638,6 +1659,12 @@ export function VerificationPage() {
                       {importing ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
                       Importar a la BD
                     </Button>
+                    {result.incidences.filter((i: any) => i.severity === 'critica').length === 0 &&
+                      result.cambiosDetectados.some(c => !confirmedChanges[c.orderId]) && (
+                      <p className="text-[11px] text-indigo-700 font-semibold mt-2 text-center">
+                        Confirma todos los "Cambios Detectados" arriba para habilitar la importación.
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <div className="pt-2 border-t border-[var(--color-border)]">
@@ -1714,6 +1741,65 @@ export function VerificationPage() {
                     description="Incidencias detectadas."
                   />
                 </div>
+
+                {result!.cambiosDetectados.length > 0 && (
+                  <div className="bg-[var(--color-surface)] rounded-[var(--radius-lg)] border border-indigo-200 shadow-sm overflow-hidden p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-2 pb-3 border-b border-[var(--color-border)]">
+                      <div>
+                        <h3 className="text-sm font-bold text-[var(--color-text)] flex items-center gap-2">
+                          <FileSearch size={16} className="text-indigo-600" />
+                          Cambios Detectados — requieren confirmación
+                        </h3>
+                        <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
+                          Estas órdenes fueron modificadas según la hoja "Cambios". No son errores — confirma cada una para habilitar "Importar a la BD".
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const allConfirmed = result!.cambiosDetectados.every(c => confirmedChanges[c.orderId]);
+                          const next: Record<string, boolean> = {};
+                          result!.cambiosDetectados.forEach(c => { next[c.orderId] = !allConfirmed; });
+                          setConfirmedChanges(next);
+                        }}
+                        className="text-xs font-bold text-indigo-600 hover:underline shrink-0"
+                      >
+                        {result!.cambiosDetectados.every(c => confirmedChanges[c.orderId]) ? 'Desmarcar todo' : 'Confirmar todo'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                      {result!.cambiosDetectados.map(c => (
+                        <label
+                          key={c.orderId}
+                          className={cn(
+                            "flex items-start gap-3 p-3 rounded-[var(--radius-sm)] border cursor-pointer transition-colors",
+                            confirmedChanges[c.orderId]
+                              ? "bg-emerald-50 border-emerald-200"
+                              : "bg-indigo-50/50 border-indigo-200"
+                          )}
+                        >
+                          <input
+                            type="checkbox"
+                            className="mt-0.5 shrink-0"
+                            checked={!!confirmedChanges[c.orderId]}
+                            onChange={(e) => setConfirmedChanges(prev => ({ ...prev, [c.orderId]: e.target.checked }))}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-bold text-[var(--color-text)]">Orden {c.orderId}</p>
+                            <ul className="mt-1 space-y-0.5">
+                              {c.diffs.map((d, idx) => (
+                                <li key={idx} className="text-xs text-[var(--color-text-muted)]">
+                                  <span className="font-semibold">{d.campo}:</span> {d.valorOrders} → {d.valorCambios}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                  <div className="bg-[var(--color-surface)] rounded-[var(--radius-lg)] border border-[var(--color-border)] shadow-sm overflow-hidden flex flex-col space-y-4 p-4">
                     {/* Header */}

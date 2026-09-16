@@ -327,6 +327,7 @@ Sistema lee Google Sheet del Área
 - El resultado de la verificación se muestra **en la misma página**, debajo del panel de parámetros, sin navegar a otra vista
 - Si hay incidencias, se muestra una tabla con todos los elementos de la anatomía obligatoria de tablas (sección 9 de la Constitución)
 - El botón "Importar" **solo es visible** cuando el estado de verificación es `Correcta` y el usuario tiene rol `Super Admin` o `Supervisor`
+- Si hay órdenes con cambios detectados (RN-001), se muestra un panel aparte "Cambios Detectados" con un checkbox por Orden ID — el botón "Importar" permanece deshabilitado hasta que todos estén confirmados (agregado 2026-09-16)
 - El botón "Exportar PDF" y "Enviar por Correo" son accesibles para `Super Admin`, `Supervisor` y `Operador`
 
 ---
@@ -459,6 +460,20 @@ Si existe un registro en la hoja Cambios, debe coincidir con la hoja Orders en:
 - `Store` = `Negocio`
 - `Area` = `Provincia`
 
+Estos 4 campos son la **clave de coincidencia**: si no se encuentra una orden en
+Orders con estos 4 valores, es una incidencia **crítica** (huérfana) y bloquea
+la importación (RN-006) — indica un problema real de datos.
+
+Una vez encontrada la orden coincidente, los campos de valor (`Tipo de Pago`,
+`Monto de Producto`, `Monto de Delivery`) **pueden diferir** entre Cambios y
+Orders — de hecho, esa es la razón de ser de la hoja Cambios: documentar que
+esa orden fue modificada. Estas diferencias **no son una incidencia crítica**
+y no bloquean por sí solas la importación (agregado 2026-09-16, corrige una
+interpretación anterior que las trataba como error RN-001 bloqueante). En vez
+de eso, el sistema las muestra agrupadas por Orden ID en un panel de "Cambios
+Detectados" que el usuario debe **confirmar explícitamente** (checkbox por
+orden) antes de que el botón "Importar a la BD" se habilite.
+
 ### RN-002 — Validación Mandao Express
 
 Si `Store = "Mandao Express"`, los siguientes campos **pueden estar vacíos** sin generar incidencia:
@@ -495,9 +510,21 @@ Al comparar Negocios, Mensajeros y Métodos de Pago, el sistema debe ignorar:
 - `CAFÉ HABANA` = `Cafe Habana`
 - `Habana` ≈ `Havana` (similitud fuzzy)
 
+El catálogo de Métodos de Pago contra el que se valida el `Payment Type` de
+cada orden es la tabla real `public.payment_methods` (Configuración → Métodos
+de Pago), filtrada por `active = true` y `applies_to_orders = true` —
+corregido 2026-09-16: antes se validaba contra una lista fija en el código
+que no tenía relación con lo que el usuario administraba en Supabase, y
+generaba incidencias críticas falsas en casi cualquier orden.
+
 ### RN-006 — Bloqueo de Importación
 
 Si existe **al menos una incidencia crítica**, la Importación está **completamente bloqueada**. El botón de importación no debe aparecer ni estar habilitado bajo ninguna circunstancia.
+
+> Los "Cambios Detectados" entre Cambios y Orders (RN-001, campos de valor) NO
+> cuentan como incidencia crítica para este bloqueo — requieren su propia
+> confirmación explícita (ver RN-001), pero no impiden que el botón de
+> Importar exista o se habilite una vez confirmados.
 
 ### RN-007 — Importación Solo con Verificación Correcta
 
