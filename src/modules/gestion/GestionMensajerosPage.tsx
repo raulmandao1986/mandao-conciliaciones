@@ -20,12 +20,14 @@ import {
   Calendar,
   MessageSquare,
   IdCard,
-  Loader2
+  Loader2,
+  FileSpreadsheet
 } from 'lucide-react';
 import { SlideOver } from '../../design-system/primitives/SlideOver';
 import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
+import { BulkImportModal } from './components/BulkImportModal';
 
 interface AreaOption {
   id: string;
@@ -64,6 +66,7 @@ export function GestionMensajerosPage() {
   const [viasPago, setViasPago] = useState<string[]>([]);
   const [areas, setAreas] = useState<AreaOption[]>([]);
   const [saving, setSaving] = useState(false);
+  const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);
 
   const loadPaymentMethods = async () => {
     const { data: rows, error } = await supabase
@@ -291,10 +294,16 @@ export function GestionMensajerosPage() {
           </div>
         </div>
         {canWrite && (
-          <Button variant="brand" className="gap-2" onClick={handleNew}>
-            <Plus size={18} />
-            Nuevo Mensajero
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" className="gap-2" onClick={() => setIsBulkImportOpen(true)}>
+              <FileSpreadsheet size={16} />
+              Importación Masiva
+            </Button>
+            <Button variant="brand" className="gap-2" onClick={handleNew}>
+              <Plus size={18} />
+              Nuevo Mensajero
+            </Button>
+          </div>
         )}
       </div>
 
@@ -744,6 +753,14 @@ export function GestionMensajerosPage() {
           setMessengerIdToDelete(null);
         }}
         isDanger={true}
+      />
+
+      <BulkImportModal
+        isOpen={isBulkImportOpen}
+        onClose={() => setIsBulkImportOpen(false)}
+        entityType="messengers"
+        areas={areas}
+        onImported={loadMessengers}
       />
     </div>
   );

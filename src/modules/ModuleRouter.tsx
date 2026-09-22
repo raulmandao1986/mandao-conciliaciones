@@ -25,6 +25,7 @@ const AreasPage = lazy(() => import('./gestion/AreasPage').then(m => ({ default:
 const MetodosPagoPage = lazy(() => import('./gestion/MetodosPagoPage').then(m => ({ default: m.MetodosPagoPage })));
 const RazonCambioPage = lazy(() => import('./gestion/RazonCambioPage').then(m => ({ default: m.RazonCambioPage })));
 const LogsAuditoriaPage = lazy(() => import('./gestion/LogsAuditoriaPage').then(m => ({ default: m.LogsAuditoriaPage })));
+const DocumentosImportacionPage = lazy(() => import('./gestion/DocumentosImportacionPage').then(m => ({ default: m.DocumentosImportacionPage })));
 
 interface ModuleRouterProps {
   activeTab: string;
@@ -88,6 +89,8 @@ function renderModule(activeTab: string) {
       return <RazonCambioPage />;
     case 'config-logs':
       return <LogsAuditoriaPage />;
+    case 'documentos-importacion':
+      return <DocumentosImportacionPage />;
     default:
       return (
         <div className="flex flex-col items-center justify-center py-20 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)]">

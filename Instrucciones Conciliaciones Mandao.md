@@ -1,4 +1,4 @@
-113KJkGl4_49RFB9vIca4UnzJ4Tg7IhTwOlkuHuMe7E0# Mandao Conciliaciones — Instrucciones Específicas del Sistema
+# Mandao Conciliaciones — Instrucciones Específicas del Sistema
 
 > **Sistema externo independiente** que forma parte del ecosistema Mandao.  
 > Este documento extiende y complementa las reglas establecidas en el **Marco Fundamental — Reglas No Negociables** (`CONSTITUCION`). Todo lo definido aquí es específico del sistema **Mandao Conciliaciones** y debe respetarse sin excepción al generar código para este sistema.  
@@ -600,7 +600,7 @@ Una orden **no puede importarse más de una vez** para la misma Área y fecha op
 
 > 🔄 Sección reescrita 2026-09-13. **La base de datos con la que se trabaja es Supabase (Postgres)** — Firestore ya no existe en este sistema. Esta sección documenta el esquema REAL y vigente, tal como vive en `supabase_schema.sql` (raíz del repo), que es la única fuente de verdad — cualquier tabla nueva se define primero ahí (con sus políticas RLS) y luego se refleja aquí. El agente AI no debe crear tablas adicionales a las aquí documentadas sin actualizar ambos archivos.
 
-> **Alcance actual**: las 15 tablas de esta sección ya están migradas y en uso — Dispatcher, Disponibilidad y los catálogos de Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría). El módulo financiero (Conciliación, Facturación, Cuentas por Cobrar/Pagar, Planificación de Pagos) sigue sin tabla propia — ver "Tablas pendientes" al final de esta sección.
+> **Alcance actual**: las 16 tablas de esta sección ya están migradas y en uso — Dispatcher, Disponibilidad y los catálogos de Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría, Documentos de Importación). El módulo financiero (Conciliación, Facturación, Cuentas por Cobrar/Pagar, Planificación de Pagos) sigue sin tabla propia — ver "Tablas pendientes" al final de esta sección.
 
 ### Tablas activas — Fase actual ✅
 
@@ -807,6 +807,19 @@ RN-010 (una sola tasa activa a la vez) se aplica en la UI (`RazonCambioPage.tsx`
 | `contact_name` / `phone` / `email` / `contract_name` / `tax_id` / `address` / `external_url` | text |
 | `cup_account` / `personal_account` / `check_account` / `exterior_zelle` / `exterior_tropipay` / `exterior_transfer` | jsonb — sub-objeto de forma variable según el método de pago elegido |
 | `created_at` / `updated_at` | timestamptz |
+
+**16. `public.import_sources`** — Documentos de Importación (agregado 2026-09-22)
+
+| Campo | Tipo |
+|---|---|
+| `import_source_id` | uuid (PK) |
+| `entity_type` | `businesses` / `messengers` |
+| `name` | text — nombre de referencia |
+| `sheet_document_id` | text — ID del Google Sheet de origen |
+| `active` | boolean |
+| `created_at` / `updated_at` | timestamptz |
+
+Catálogo de IDs de Google Sheet para la Importación Masiva de Gestión de Negocios/Mensajeros (Configuración → Documentos de Importación). No guarda datos importados — al ejecutar la importación se listan las pestañas reales del documento vía la API de Google Sheets y se elige cuál contiene los datos (por defecto, la que coincide con "Data Negocios"/"Data Mensajeros").
 
 ### Funciones auxiliares (equivalente a las "reglas de seguridad" que tenía Firestore)
 
@@ -1432,7 +1445,7 @@ export const navConfig = {
 
 ### 19.1 Estado de la migración
 
-- Esquema completo definido y validado en `supabase_schema.sql`: **15 tablas** (detalle completo en la sección 12), con políticas **RLS** activas en todas ellas, más funciones auxiliares (helper functions).
+- Esquema completo definido y validado en `supabase_schema.sql`: **16 tablas** (detalle completo en la sección 12), con políticas **RLS** activas en todas ellas, más funciones auxiliares (helper functions).
 - Se retiraron del esquema las tablas `email_groups` y `email_templates` (correspondientes a las colecciones `EmailGroups`/`EmailTemplates` que documentaba la versión anterior de este documento, basada en Firestore — nunca tuvieron uso real en el código).
 - Ya migrados y en uso real sobre Supabase: Auth, Dispatcher (Verificación/Revisión), Disponibilidad (Verificación/Revisión), y todo Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría). Ningún archivo del código activo importa ya `src/lib/firebase` (esa ruta no existe).
 - Pendiente de diseñar (sin tabla propia todavía): Conciliación, Facturación, Cuentas por Cobrar, Cuentas por Pagar y Planificación de Pagos — ver "Tablas pendientes" al final de la sección 12.

@@ -24,7 +24,8 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
-  RefreshCw
+  RefreshCw,
+  FileSpreadsheet
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth, UserRole } from '../lib/auth';
@@ -109,6 +110,7 @@ const NAV_SECTIONS: NavSection[] = [
         ]
       },
       { id: 'razon-cambio', label: 'Razón de Cambio', icon: DollarSign },
+      { id: 'documentos-importacion', label: 'Documentos de Importación', icon: FileSpreadsheet },
       { id: 'config-logs', label: 'Log', icon: FileText },
     ]
   }

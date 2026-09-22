@@ -440,6 +440,25 @@ create table public.businesses (
 );
 
 -- =====================================================================
+-- MÓDULO GESTIÓN — DOCUMENTOS DE IMPORTACIÓN (agregado 2026-09-22)
+-- =====================================================================
+-- Catálogo de IDs de Google Sheet registrados para la Importación Masiva
+-- de Gestión de Negocios/Mensajeros (Configuración → Documentos de
+-- Importación). No guarda datos importados — solo el ID del documento
+-- de origen; la hoja/pestaña a importar se elige en el momento de
+-- ejecutar la importación, listando las pestañas reales del documento
+-- vía la API de Google Sheets.
+create table public.import_sources (
+  import_source_id uuid primary key default gen_random_uuid(),
+  entity_type text not null check (entity_type in ('businesses', 'messengers')),
+  name text not null,
+  sheet_document_id text not null,
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- =====================================================================
 -- RLS — Row Level Security alineado a los 3 roles del sistema
 -- =====================================================================
 alter table public.areas enable row level security;
@@ -457,6 +476,7 @@ alter table public.profiles enable row level security;
 alter table public.payment_methods enable row level security;
 alter table public.exchange_rates enable row level security;
 alter table public.businesses enable row level security;
+alter table public.import_sources enable row level security;
 
 -- Lectura: los 4 roles pueden leer (Visitante = solo lectura, según matriz de
 -- permisos) — PERO solo si profiles.active = true (public.is_active_user()).
@@ -484,6 +504,7 @@ create policy "manage_profiles_super_admin" on public.profiles
 create policy "read_all_authenticated" on public.payment_methods for select using (public.is_active_user());
 create policy "read_all_authenticated" on public.exchange_rates for select using (public.is_active_user());
 create policy "read_all_authenticated" on public.businesses for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.import_sources for select using (public.is_active_user());
 
 -- Escritura de Verificaciones: Super Admin, Supervisor, Operador (Operador SÍ puede ejecutar verificaciones)
 create policy "insert_verification" on public.dispatcher_verifications
@@ -549,6 +570,9 @@ create policy "manage_exchange_rates" on public.exchange_rates
   for all using (public.current_user_role() = 'super_admin')
   with check (public.current_user_role() = 'super_admin');
 create policy "manage_businesses" on public.businesses
+  for all using (public.current_user_role() = 'super_admin')
+  with check (public.current_user_role() = 'super_admin');
+create policy "manage_import_sources" on public.import_sources
   for all using (public.current_user_role() = 'super_admin')
   with check (public.current_user_role() = 'super_admin');
 

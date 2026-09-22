@@ -33,6 +33,7 @@ import { SlideOver } from '../../design-system/primitives/SlideOver';
 import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
+import { BulkImportModal } from './components/BulkImportModal';
 
 const BANCOS = ['BANMET', 'BPA', 'BANDEC'];
 const FALLBACK_METODOS_PAGO = ['Transferencia', 'Transferencia-Exterior', 'Transferencia-Especial', 'Transferencia-Efectivo', 'Transferencia-Saldo'];
@@ -113,6 +114,7 @@ export function GestionNegociosPage() {
   const [metodosPago, setMetodosPago] = useState<string[]>([]);
   const [areas, setAreas] = useState<AreaOption[]>([]);
   const [saving, setSaving] = useState(false);
+  const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);
 
   const loadPaymentMethods = async () => {
     const { data: rows, error } = await supabase
@@ -546,6 +548,13 @@ export function GestionNegociosPage() {
               </div>
             )}
           </div>
+
+          {canWrite && (
+            <Button variant="outline" className="gap-2" onClick={() => setIsBulkImportOpen(true)}>
+              <FileSpreadsheet size={16} />
+              Importación Masiva
+            </Button>
+          )}
 
           {canWrite && (
             <Button variant="brand" className="gap-2" onClick={handleNew}>
@@ -1557,6 +1566,14 @@ export function GestionNegociosPage() {
           setBusinessIdToDelete(null);
         }}
         isDanger={true}
+      />
+
+      <BulkImportModal
+        isOpen={isBulkImportOpen}
+        onClose={() => setIsBulkImportOpen(false)}
+        entityType="businesses"
+        areas={areas}
+        onImported={loadBusinesses}
       />
     </div>
   );
