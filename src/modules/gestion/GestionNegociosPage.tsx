@@ -41,6 +41,7 @@ const FALLBACK_METODOS_PAGO = ['Transferencia', 'Transferencia-Exterior', 'Trans
 interface AreaOption {
   id: string;
   nombre: string;
+  provincia: string;
 }
 
 interface CuentaBancaria {
@@ -134,14 +135,14 @@ export function GestionNegociosPage() {
   const loadAreas = async () => {
     const { data: rows, error } = await supabase
       .from('areas')
-      .select('area_id, name')
+      .select('area_id, name, province')
       .order('name', { ascending: true });
     if (error) {
       console.error('Error fetching areas:', error.message);
       setAreas([]);
       return;
     }
-    setAreas((rows || []).map((a: any) => ({ id: a.area_id, nombre: a.name })));
+    setAreas((rows || []).map((a: any) => ({ id: a.area_id, nombre: a.name, provincia: a.province || '' })));
   };
 
   const loadBusinesses = async () => {

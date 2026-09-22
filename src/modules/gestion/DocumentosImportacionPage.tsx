@@ -170,7 +170,7 @@ export function DocumentosImportacionPage() {
             <FileSpreadsheet className="w-6 h-6 text-brand-ink" />
           </div>
           <div>
-            <h1 className="text-xl font-bold text-[var(--color-text)]">Documentos de Importación</h1>
+            <h1 className="text-xl font-bold text-[var(--color-text)]">Data</h1>
             <p className="text-sm text-[var(--color-text-muted)] mt-1">
               Registre los IDs de los Google Sheet de origen para la Importación Masiva de Negocios y Mensajeros.
             </p>

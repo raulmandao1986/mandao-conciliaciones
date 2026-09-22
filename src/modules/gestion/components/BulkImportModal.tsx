@@ -17,6 +17,7 @@ interface ImportSourceOption {
 interface AreaOption {
   id: string;
   nombre: string;
+  provincia: string;
 }
 
 interface PreviewRow {
@@ -53,6 +54,32 @@ function normalizeName(s: string): string {
 
 function isBloqueado(val: any): boolean {
   return String(val ?? '').trim().toLowerCase() === 'true';
+}
+
+// La columna "Area"/"Provincia" del Sheet trae nombres reales de
+// provincia (ej. "Santa Clara", "Matanzas"), no necesariamente el mismo
+// texto que public.areas.name — pero el resto del sistema (ver
+// handleAreaChange en VerificationPage.tsx) ya agrupa cualquier área en
+// 3 categorías por su columna "province": Habana / Holguin / Provincias
+// (todo lo que no sea Habana ni Holguín). Se replica ese mismo criterio
+// aquí: primero intenta un match exacto por nombre (cubre el caso en que
+// el Sheet ya trae "La Habana"/"Holguin"/"Provincias" tal cual), y si no
+// hay match, cae a la categoría por provincia.
+function resolveArea(raw: string, areas: AreaOption[]): string | null {
+  const normalized = normalizeName(raw);
+  if (!normalized) return null;
+
+  const exact = areas.find(a => normalizeName(a.nombre) === normalized);
+  if (exact) return exact.id;
+
+  const lower = normalized;
+  let targetProvince: string;
+  if (lower.includes('habana')) targetProvince = 'Habana';
+  else if (lower.includes('holgu')) targetProvince = 'Holguin';
+  else targetProvince = 'Provincias';
+
+  const byProvince = areas.find(a => a.provincia === targetProvince);
+  return byProvince ? byProvince.id : null;
 }
 
 // Acepta DD/MM/YYYY, D/M/YYYY o YYYY-MM-DD; cualquier otra cosa -> null
@@ -219,7 +246,6 @@ export function BulkImportModal({ isOpen, onClose, entityType, areas, onImported
         throw new Error(`La pestaña "${selectedTab}" está vacía o no tiene filas de datos.`);
       }
       const headerMap = buildHeaderMap(rows[0]);
-      const areaLookup = new Map(areas.map(a => [normalizeName(a.nombre), a.id]));
 
       // Existentes: para decidir insert vs update por nombre (evita duplicar
       // si la importación se corre más de una vez sobre el mismo catálogo).
@@ -237,7 +263,7 @@ export function BulkImportModal({ isOpen, onClose, entityType, areas, onImported
       for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
         const areaRaw = getCell(row, headerMap, ['area', 'provincia', 'zona']);
-        const areaId = areaRaw ? (areaLookup.get(normalizeName(areaRaw)) || null) : null;
+        const areaId = areaRaw ? resolveArea(areaRaw, areas) : null;
         const bloqueado = getCell(row, headerMap, ['bloqueado', 'blocked']);
 
         if (entityType === 'businesses') {
@@ -396,13 +422,13 @@ export function BulkImportModal({ isOpen, onClose, entityType, areas, onImported
         {step === 'source' && (
           <div className="space-y-4">
             <p className="text-sm text-[var(--color-text-muted)]">
-              Elige el documento de Google Sheet registrado en <strong>Configuración → Documentos de Importación</strong> que contiene el catálogo de {ENTITY_LABELS[entityType].toLowerCase()}.
+              Elige el documento de Google Sheet registrado en <strong>Configuración → Data</strong> que contiene el catálogo de {ENTITY_LABELS[entityType].toLowerCase()}.
             </p>
             {loadingSources ? (
               <div className="flex items-center justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[var(--color-primary)]" /></div>
             ) : sources.length === 0 ? (
               <div className="p-4 rounded-[var(--radius-sm)] bg-[var(--color-surface-2)] border border-[var(--color-border)] text-xs text-[var(--color-text-muted)]">
-                No hay documentos activos registrados para {ENTITY_LABELS[entityType]}. Ve a <strong>Configuración → Documentos de Importación</strong> para registrar uno.
+                No hay documentos activos registrados para {ENTITY_LABELS[entityType]}. Ve a <strong>Configuración → Data</strong> para registrar uno.
               </div>
             ) : (
               <div className="space-y-1.5">

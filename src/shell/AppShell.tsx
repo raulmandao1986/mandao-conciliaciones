@@ -110,7 +110,7 @@ const NAV_SECTIONS: NavSection[] = [
         ]
       },
       { id: 'razon-cambio', label: 'Razón de Cambio', icon: DollarSign },
-      { id: 'documentos-importacion', label: 'Documentos de Importación', icon: FileSpreadsheet },
+      { id: 'documentos-importacion', label: 'Data', icon: FileSpreadsheet },
       { id: 'config-logs', label: 'Log', icon: FileText },
     ]
   }

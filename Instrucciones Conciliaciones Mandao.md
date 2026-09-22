@@ -600,7 +600,7 @@ Una orden **no puede importarse más de una vez** para la misma Área y fecha op
 
 > 🔄 Sección reescrita 2026-09-13. **La base de datos con la que se trabaja es Supabase (Postgres)** — Firestore ya no existe en este sistema. Esta sección documenta el esquema REAL y vigente, tal como vive en `supabase_schema.sql` (raíz del repo), que es la única fuente de verdad — cualquier tabla nueva se define primero ahí (con sus políticas RLS) y luego se refleja aquí. El agente AI no debe crear tablas adicionales a las aquí documentadas sin actualizar ambos archivos.
 
-> **Alcance actual**: las 16 tablas de esta sección ya están migradas y en uso — Dispatcher, Disponibilidad y los catálogos de Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría, Documentos de Importación). El módulo financiero (Conciliación, Facturación, Cuentas por Cobrar/Pagar, Planificación de Pagos) sigue sin tabla propia — ver "Tablas pendientes" al final de esta sección.
+> **Alcance actual**: las 16 tablas de esta sección ya están migradas y en uso — Dispatcher, Disponibilidad y los catálogos de Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría, Data). El módulo financiero (Conciliación, Facturación, Cuentas por Cobrar/Pagar, Planificación de Pagos) sigue sin tabla propia — ver "Tablas pendientes" al final de esta sección.
 
 ### Tablas activas — Fase actual ✅
 
@@ -808,7 +808,7 @@ RN-010 (una sola tasa activa a la vez) se aplica en la UI (`RazonCambioPage.tsx`
 | `cup_account` / `personal_account` / `check_account` / `exterior_zelle` / `exterior_tropipay` / `exterior_transfer` | jsonb — sub-objeto de forma variable según el método de pago elegido |
 | `created_at` / `updated_at` | timestamptz |
 
-**16. `public.import_sources`** — Documentos de Importación (agregado 2026-09-22)
+**16. `public.import_sources`** — Data (agregado 2026-09-22)
 
 | Campo | Tipo |
 |---|---|
@@ -819,7 +819,7 @@ RN-010 (una sola tasa activa a la vez) se aplica en la UI (`RazonCambioPage.tsx`
 | `active` | boolean |
 | `created_at` / `updated_at` | timestamptz |
 
-Catálogo de IDs de Google Sheet para la Importación Masiva de Gestión de Negocios/Mensajeros (Configuración → Documentos de Importación). No guarda datos importados — al ejecutar la importación se listan las pestañas reales del documento vía la API de Google Sheets y se elige cuál contiene los datos (por defecto, la que coincide con "Data Negocios"/"Data Mensajeros").
+Catálogo de IDs de Google Sheet para la Importación Masiva de Gestión de Negocios/Mensajeros (Configuración → Data). No guarda datos importados — al ejecutar la importación se listan las pestañas reales del documento vía la API de Google Sheets y se elige cuál contiene los datos (por defecto, la que coincide con "Data Negocios"/"Data Mensajeros").
 
 ### Funciones auxiliares (equivalente a las "reglas de seguridad" que tenía Firestore)
 
