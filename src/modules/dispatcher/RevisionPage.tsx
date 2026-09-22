@@ -478,7 +478,7 @@ export function RevisionPage() {
       storeAdminCharge: Number(r.store_admin_charge) || 0,
       extraDeliveryCharge: Number(r.extra_delivery_charge) || 0,
       driverAdminCharge: Number(r.driver_admin_charge) || 0,
-      complementaryDelivery: r.complementary_delivery,
+      complementaryDelivery: Number(r.complementary_delivery) || 0,
       tax: Number(r.tax) || 0,
       promocode: r.promocode || ''
     })) as OrderRecord[];
