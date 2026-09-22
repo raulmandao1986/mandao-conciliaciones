@@ -21,7 +21,9 @@ import {
   MessageSquare,
   IdCard,
   Loader2,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Download,
+  Printer
 } from 'lucide-react';
 import { SlideOver } from '../../design-system/primitives/SlideOver';
 import { cn } from '../../lib/utils';
@@ -68,6 +70,7 @@ export function GestionMensajerosPage() {
   const [areas, setAreas] = useState<AreaOption[]>([]);
   const [saving, setSaving] = useState(false);
   const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
 
   const loadPaymentMethods = async () => {
     const { data: rows, error } = await supabase
@@ -166,21 +169,135 @@ export function GestionMensajerosPage() {
   const [messengerIdToDelete, setMessengerIdToDelete] = useState<string | null>(null);
 
   const filteredData = useMemo(() => {
-    return data.filter(item => {
-      // Solo muestra visiblemente los mensajeros que tienen estado Activo
-      // (igual que el código original — el filtro "Estado" de abajo no
-      // afecta esta restricción base, es una particularidad heredada).
-      if (item.estado !== 'activo') return false;
+    // Igual que en GestionNegociosPage: con una búsqueda de texto activa se
+    // ignora el filtro "Activo" por defecto (para poder encontrar un
+    // bloqueado por nombre/CI/teléfono sin tener que cambiar el filtro).
+    const hasSearchQuery = !!(filters.nombre.trim() || filters.ci.trim() || filters.telefono.trim());
 
+    return data.filter(item => {
       const matchArea = !filters.areaId || item.areaId === filters.areaId;
       const matchNombre = !filters.nombre || item.nombre.toLowerCase().includes(filters.nombre.toLowerCase());
       const matchCI = !filters.ci || (item.ci || '').includes(filters.ci);
       const matchTelefono = !filters.telefono || (item.telefono || '').includes(filters.telefono);
       const matchMochila = !filters.tipoMochila || item.tipoMochila === filters.tipoMochila;
       const matchVia = !filters.viaPago || item.viaPago === filters.viaPago;
-      return matchArea && matchNombre && matchCI && matchTelefono && matchMochila && matchVia;
+      if (!(matchArea && matchNombre && matchCI && matchTelefono && matchMochila && matchVia)) return false;
+
+      if (filters.estado === 'activo') {
+        if (!hasSearchQuery && item.estado === 'bloqueado') return false;
+      } else if (filters.estado === 'bloqueado') {
+        if (item.estado !== 'bloqueado') return false;
+      }
+
+      return true;
     });
   }, [data, filters]);
+
+  const handleExportExcel = () => {
+    setShowExportMenu(false);
+    const headers = ['Nombre', 'CI', 'Teléfono', 'Tarjeta Fiscal', 'Cuenta Fiscal', 'Vía de Pago', 'Tipo de Mochila', 'Fecha Alta', 'Fecha Baja', 'Estado', 'Área', 'Comentarios'];
+    const rows = filteredData.map(item => [
+      `"${(item.nombre || '').replace(/"/g, '""')}"`,
+      `"${(item.ci || '').replace(/"/g, '""')}"`,
+      `"${(item.telefono || '').replace(/"/g, '""')}"`,
+      `"${(item.tarjetaFiscal || '').replace(/"/g, '""')}"`,
+      `"${(item.cuentaFiscal || '').replace(/"/g, '""')}"`,
+      `"${(item.viaPago || '').replace(/"/g, '""')}"`,
+      `"${(item.tipoMochila || '').replace(/"/g, '""')}"`,
+      `"${(item.fechaAlta || '').replace(/"/g, '""')}"`,
+      `"${(item.fechaBaja || '').replace(/"/g, '""')}"`,
+      `"${(item.estado || 'activo').replace(/"/g, '""')}"`,
+      `"${(item.areaNombre || '').replace(/"/g, '""')}"`,
+      `"${(item.comentarios || '').replace(/"/g, '""')}"`
+    ]);
+
+    const csvContent = '﻿' + [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `listado_mensajeros_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Export to PDF
+  const handleExportPDF = () => {
+    setShowExportMenu(false);
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Listado de Mensajeros - Mandao Conciliaciones</title>
+          <style>
+            body { font-family: system-ui, -apple-system, sans-serif; padding: 24px; color: #0f172a; }
+            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #e2e8f0; padding-bottom: 12px; margin-bottom: 16px; }
+            h1 { font-size: 20px; margin: 0; color: #0f172a; }
+            p.subtitle { font-size: 11px; color: #64748b; margin: 4px 0 0 0; }
+            table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 12px; }
+            th { background-color: #f8fafc; text-align: left; padding: 8px 10px; border-bottom: 2px solid #cbd5e1; font-weight: bold; color: #475569; text-transform: uppercase; font-size: 9px; }
+            td { padding: 8px 10px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+            tr:nth-child(even) { background-color: #f8fafc; }
+            .badge { padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 9px; text-transform: uppercase; display: inline-block; }
+            .badge-activo { background: #dcfce7; color: #15803d; }
+            .badge-bloqueado { background: #fee2e2; color: #b91c1c; }
+            .footer { margin-top: 24px; font-size: 10px; color: #94a3b8; text-align: right; border-top: 1px solid #e2e8f0; padding-top: 12px; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <div>
+              <h1>Mandao Conciliaciones - Listado de Mensajeros</h1>
+              <p class="subtitle">Reporte oficial generado el ${new Date().toLocaleString('es-ES')} | Registros exportados: ${filteredData.length}</p>
+            </div>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Nombre</th>
+                <th>CI</th>
+                <th>Teléfono</th>
+                <th>Vía de Pago</th>
+                <th>Mochila</th>
+                <th>Fecha Alta</th>
+                <th>Fecha Baja</th>
+                <th>Estado</th>
+                <th>Área</th>
+                <th>Comentarios</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filteredData.map(item => `
+                <tr>
+                  <td><strong>${item.nombre || '-'}</strong></td>
+                  <td>${item.ci || '-'}</td>
+                  <td>${item.telefono || '-'}</td>
+                  <td>${item.viaPago || '-'}</td>
+                  <td>${item.tipoMochila || '-'}</td>
+                  <td>${item.fechaAlta || '-'}</td>
+                  <td>${item.fechaBaja || '-'}</td>
+                  <td><span class="badge ${item.estado === 'bloqueado' ? 'badge-bloqueado' : 'badge-activo'}">${(item.estado || 'activo')}</span></td>
+                  <td>${item.areaNombre || '-'}</td>
+                  <td>${item.comentarios || '-'}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+          <div class="footer">Sistema de Conciliaciones Mandao Finance — Confidencial</div>
+          <script>
+            window.onload = function() { window.print(); }
+          </script>
+        </body>
+      </html>
+    `;
+
+    printWindow.document.write(html);
+    printWindow.document.close();
+  };
 
   const handleEdit = (messenger: MessengerRecord) => {
     setSelectedMessenger(messenger);
@@ -294,18 +411,51 @@ export function GestionMensajerosPage() {
             <p className="text-sm text-[var(--color-text-muted)] mt-1">Control de flota, vinculación de mensajeros y configuración de pagos.</p>
           </div>
         </div>
-        {canWrite && (
-          <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <Button
+              variant="outline"
+              className="gap-2"
+              onClick={() => setShowExportMenu(!showExportMenu)}
+            >
+              <Download size={16} />
+              Exportar
+            </Button>
+
+            {showExportMenu && (
+              <div className="absolute right-0 mt-2 w-48 bg-white border border-[var(--color-border)] rounded-lg shadow-lg z-30 py-1">
+                <button
+                  onClick={handleExportExcel}
+                  className="w-full px-4 py-2 text-left text-xs font-semibold text-[var(--color-text)] hover:bg-[var(--color-surface-2)] flex items-center gap-2"
+                >
+                  <FileSpreadsheet size={15} className="text-emerald-600" />
+                  Exportar a Excel (.csv)
+                </button>
+                <button
+                  onClick={handleExportPDF}
+                  className="w-full px-4 py-2 text-left text-xs font-semibold text-[var(--color-text)] hover:bg-[var(--color-surface-2)] flex items-center gap-2"
+                >
+                  <Printer size={15} className="text-blue-600" />
+                  Exportar a PDF
+                </button>
+              </div>
+            )}
+          </div>
+
+          {canWrite && (
             <Button variant="outline" className="gap-2" onClick={() => setIsBulkImportOpen(true)}>
               <FileSpreadsheet size={16} />
               Importación Masiva
             </Button>
+          )}
+
+          {canWrite && (
             <Button variant="brand" className="gap-2" onClick={handleNew}>
               <Plus size={18} />
               Nuevo Mensajero
             </Button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {/* Filters Toolbar */}
