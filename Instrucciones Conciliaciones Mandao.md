@@ -4,7 +4,7 @@
 > Este documento extiende y complementa las reglas establecidas en el **Marco Fundamental — Reglas No Negociables** (`CONSTITUCION`). Todo lo definido aquí es específico del sistema **Mandao Conciliaciones** y debe respetarse sin excepción al generar código para este sistema.  
 > El agente AI debe leer **primero** la Constitución general y **luego** este documento antes de generar cualquier componente, vista, lógica o estructura.
 >
-> Para el estado del proyecto (qué está hecho, qué falta y quién debe resolver cada pendiente), ver `PLAN_TRABAJO.md` en la raíz del repo.
+> Para el estado del proyecto (qué está hecho, qué falta y quién debe resolver cada pendiente), ver la sección 11 de `PLAN_MIGRACION.md` en la raíz del repo.
 
 ---
 

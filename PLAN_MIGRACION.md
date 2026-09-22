@@ -4,6 +4,8 @@
 **Versión 2** — 12 de agosto de 2026
 **Cambios sobre la v1**: incorpora tus 4 decisiones sobre roles, permisos de Google, alcance de módulos y RLS, más los hallazgos de revisar el código real exportado (`mandao-conciliaciones.zip`).
 
+> **Actualizado por última vez: 2026-09-22** (ver sección 10 en adelante). Las secciones 1–9 son la bitácora histórica de la migración inicial (agosto 2026) y se dejan tal cual quedaron entonces, como registro de las decisiones tomadas en su momento.
+
 ---
 
 ## 0. Decisiones ya confirmadas (no requieren más discusión)
@@ -244,3 +246,68 @@ Al leer el código real completo (no solo los nombres de colección) se encontra
 - Ejecutar `supabase_schema_patch_v3.sql` contra la base real (no se ejecutó automáticamente — requiere el SQL Editor de Supabase).
 - `src/lib/seed.ts` sigue sin migrar (pregunta abierta de la sección 8, punto 2).
 - Probar el flujo completo en el navegador (login Google, Verificar, Importar, Revisión, edición/borrado) — esta sesión solo verificó con `tsc --noEmit`, no corrió la app.
+
+---
+
+## 10. Estabilización, Gestión completa, y nuevas funcionalidades (10–22 de septiembre de 2026)
+
+Con el proyecto ya corriendo en el navegador (login real con `@mandao.app`), esta fase se dedicó a: terminar lo que quedaba de Gestión, cerrar huecos de seguridad reales encontrados probando en vivo, corregir varios bugs de Dispatcher que solo aparecían con datos reales, construir la sincronización con El Toque, y dejar preparado (no publicado aún) el hosting en la nube.
+
+### 10.1 `src/lib/seed.ts` — resuelto
+Se eliminó por completo (era código muerto: seguía importando `firebase/firestore`, nadie lo importaba desde ningún otro archivo). Con esto, el proyecto compila y builda 100% limpio sin ninguna referencia a Firebase.
+
+### 10.2 Módulo Gestión — completado
+Áreas, Métodos de Pago, Razón de Cambio, Negocios, Mensajeros, Roles y Usuarios, Logs de Auditoría: los 7 catálogos migrados y en uso real sobre Supabase (antes solo Áreas estaba hecha). Se agregó también la tabla `businesses` (antes no existía) y se extendió `messengers` con los campos completos que traía el Firestore original (`ci`, `phone`, `fiscal_card`, `fiscal_account`, `payment_method`, `backpack_type`, `start_date`, `end_date`, `area_id`, `comments`).
+
+### 10.3 Modelo de autorización explícita (hueco de seguridad real)
+Se encontró, probando en vivo, que cualquier cuenta `@mandao.app` que iniciara sesión quedaba automáticamente registrada como `visitante` **activo** — es decir, ya podía leer todo el sistema en cuanto Google la autenticaba, sin que ningún Super Admin la hubiera autorizado. Se corrigió a nivel de base de datos, no solo de UI:
+- Todo `profile` nuevo entra con `active = false` ("pendiente de autorización").
+- Mientras `active = false`, la app muestra una pantalla de espera en vez del sistema.
+- Un Super Admin lo autoriza y le asigna rol desde **Roles y Usuarios** (que ahora también permite invitar a alguien por correo antes de que inicie sesión — botón "Nuevo Usuario", vía `signInWithOtp`, sin necesitar la Service Role Key en el frontend).
+- `current_user_role()` devuelve `NULL` para un usuario inactivo (niega toda escritura automáticamente), y se agregó `is_active_user()` para que las políticas de solo lectura dejen de aceptar "cualquiera que esté logueado" como suficiente.
+
+De paso se reforzó la restricción de dominio `@mandao.app` (antes era solo un texto decorativo en el login, sin verificación real) y se eliminó un botón que exponía la descarga pública de todo el código fuente sin necesidad de login.
+
+### 10.4 Correcciones en Dispatcher (Verificación / Revisión)
+Varios bugs que solo se manifestaban con datos y Sheets reales:
+- **RN-005 con catálogo equivocado**: `Payment Type` se validaba contra una lista fija en el código ("métodos de pago de mensajeros"), no contra la tabla real `payment_methods` — generaba incidencias críticas falsas en casi cualquier orden y bloqueaba la importación. Corregido para usar `payment_methods` filtrado por `applies_to_orders = true`.
+- **RN-001 mal interpretada**: las diferencias entre una orden y su fila coincidente en "Cambios" (Tipo de Pago, Monto de Producto, Monto de Delivery) se trataban como incidencia crítica bloqueante — pero esas diferencias son precisamente la razón de ser de la hoja Cambios (la orden fue modificada a propósito), no un error de datos. Ahora se muestran en un panel "Cambios Detectados" con confirmación explícita por Orden ID; solo una fila huérfana (sin orden coincidente) sigue bloqueando.
+- **Revisión emparejaba solo por Order ID**: el mismo No. Orden puede repetirse en negocios distintos (por diseño, RN-009 solo bloquea duplicado si coincide Order ID *y* Negocio) — comparar solo por Order ID cruzaba órdenes de negocios distintos, con riesgo real de sincronizar/eliminar el registro equivocado. Corregido a Order ID + Negocio.
+- Crash (pantalla en blanco) al expandir el detalle de una orden en Revisión: `complementary_delivery` es `text` en la base de datos (puede venir como string o número desde el Sheet) pero se usaba directamente en un `.toFixed()`.
+- Los errores de la API de Google Sheets solo mostraban el código HTTP (`res.statusText` casi siempre viene vacío) — se agregó lectura del body de error real, lo que permitió detectar y resolver un 403 por la API de Sheets deshabilitada en el proyecto de Google Cloud.
+- Aviso visual cuando un Área no tiene ID de Google Sheet configurado (antes el botón de Verificar/Detectar Cambios quedaba deshabilitado sin ninguna explicación).
+
+### 10.5 "Data" — Importación Masiva de Negocios y Mensajeros
+Nueva funcionalidad, no existía en ninguna versión anterior: un submenú en Configuración llamado **Data** con un CRUD (`import_sources`) para registrar los IDs de Google Sheet de origen, y un botón "Importación Masiva" en Negocios/Mensajeros que:
+1. Lista las pestañas reales del documento vía la API de Google Sheets (no asume el nombre de la pestaña).
+2. Parsea las filas con el mismo mapeo de columnas que traían los CSV de siembra originales del proyecto.
+3. Hace upsert por nombre (no duplica si se corre más de una vez).
+4. Resuelve el Área: primero por coincidencia exacta de nombre, y si no hay, por categoría de provincia (Habana / Holguín / Provincias), igual que ya hacía el Dispatcher — necesario porque la columna "Área" del Sheet trae nombres reales de provincia, no siempre el mismo texto que `areas.name`.
+
+De paso se corrigió el filtro "Estado" de Mensajeros (estaba hardcodeado a solo mostrar activos, el select no hacía nada) y se agregó el botón "Exportar" (Excel/PDF) a Mensajeros, que ya existía en Negocios.
+
+### 10.6 Integración con El Toque (Razón de Cambio)
+Nueva Edge Function `supabase/functions/sync-exchange-rate` que sincroniza la tasa USD/CUP con la API real de El Toque (`tasas.eltoque.com`), con botón manual en `RazonCambioPage.tsx` y un job de `pg_cron` diario preparado (`supabase/migrations/2026-09-10_exchange_rate_cron.sql`). Pendiente de activar (ver sección 11).
+
+### 10.7 Hosting — preparado, no publicado
+Se agregaron `Dockerfile` + `nginx.conf` (Cloud Run), y `netlify.toml` + `vercel.json` como alternativas listas para conectar por Git. Ninguno se ha publicado todavía — ver bloqueos en la sección 11.
+
+---
+
+## 11. Estado actual y pendientes (2026-09-22)
+
+El sistema corre en local con Supabase real. Dispatcher, Disponibilidad y Gestión (los 7 catálogos + Data) están migrados, probados en vivo, y sin bugs conocidos pendientes de esta ronda. El **módulo financiero** (Conciliación, Facturación, Cuentas por Cobrar/Pagar, Planificación de Pagos) sigue igual que en la decisión #3 original: no implementado, sin ninguna tabla, solo UI con `MOCK_DATA` — deliberadamente pospuesto hasta definir las reglas de negocio reales (cálculo de comisiones desde las órdenes, desglose Efectivo/Transferencia/Saldo Mandao, impuestos).
+
+Pendientes que **requieren una acción tuya** (no son tareas de código):
+
+| Pendiente | Bloqueado en |
+|---|---|
+| Hosting en Google Cloud (Cloud Run) | Crear/vincular una cuenta de facturación de GCP (requiere tarjeta) |
+| Hosting en Netlify | Cuenta suspendida al registrarse — pendiente que soporte de Netlify la revise |
+| Hosting en Vercel | Alternativa lista, solo falta conectar el repo desde tu cuenta |
+| Sincronización automática con El Toque | Pedir el token en `tasas-token.eltoque.com` + desplegar la Edge Function + correr la migración de `pg_cron` contra el proyecto real |
+| Protección real de la rama `main` | GitHub Free no permite branch protection en repos privados — requiere GitHub Pro o mover el repo a una organización |
+| Invitar al segundo desarrollador | Pendiente de que lo invites desde GitHub → Settings → Collaborators |
+| Módulo financiero (Conciliación/Facturación/CxC/CxP/Planificación) | Definir juntos las reglas de negocio antes de diseñar el esquema |
+
+Nada de lo anterior bloquea empezar a diseñar el módulo de **Conciliación** — son pendientes de infraestructura/cuentas externas, no del código de Dispatcher/Disponibilidad/Gestión.
