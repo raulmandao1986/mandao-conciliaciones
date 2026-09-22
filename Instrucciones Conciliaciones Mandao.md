@@ -3,6 +3,8 @@
 > **Sistema externo independiente** que forma parte del ecosistema Mandao.  
 > Este documento extiende y complementa las reglas establecidas en el **Marco Fundamental — Reglas No Negociables** (`CONSTITUCION`). Todo lo definido aquí es específico del sistema **Mandao Conciliaciones** y debe respetarse sin excepción al generar código para este sistema.  
 > El agente AI debe leer **primero** la Constitución general y **luego** este documento antes de generar cualquier componente, vista, lógica o estructura.
+>
+> Para el estado del proyecto (qué está hecho, qué falta y quién debe resolver cada pendiente), ver `PLAN_TRABAJO.md` en la raíz del repo.
 
 ---
 
@@ -820,6 +822,8 @@ RN-010 (una sola tasa activa a la vez) se aplica en la UI (`RazonCambioPage.tsx`
 | `created_at` / `updated_at` | timestamptz |
 
 Catálogo de IDs de Google Sheet para la Importación Masiva de Gestión de Negocios/Mensajeros (Configuración → Data). No guarda datos importados — al ejecutar la importación se listan las pestañas reales del documento vía la API de Google Sheets y se elige cuál contiene los datos (por defecto, la que coincide con "Data Negocios"/"Data Mensajeros").
+
+> **Resolución de Área (agregado 2026-09-22)**: la columna "Área"/"Provincia" de la hoja trae nombres reales de provincia (ej. "Santa Clara"), que no necesariamente coinciden con `areas.name`. `BulkImportModal.tsx` primero intenta un match exacto de nombre y, si no hay, categoriza por provincia (Habana / Holguín / Provincias — todo lo que no sea Habana ni Holguín) usando `areas.province`, igual que ya hace `VerificationPage.tsx` para el Dispatcher. Como la importación hace upsert por nombre, reimportar corrige retroactivamente los registros que hubieran quedado con `area_id` nulo.
 
 ### Funciones auxiliares (equivalente a las "reglas de seguridad" que tenía Firestore)
 
