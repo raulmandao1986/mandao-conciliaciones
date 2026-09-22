@@ -828,7 +828,7 @@ export function VerificationPage() {
                 type: 'data_error',
                 severity: 'advertencia',
                 ruleCode: 'RN-005',
-                detail: `[Fila: ${o.sheetRow}] El "Payment Type" "${o.paymentType}" coincide con el método de mensajeros "${fuzzyMatch.nombre}", pero tiene diferencias menores de tilde o formato. Se aconseja registrarlo exactamente igual.`,
+                detail: `[Fila: ${o.sheetRow}] El "Payment Type" "${o.paymentType}" coincide con el método de pago "${fuzzyMatch.nombre}", pero tiene diferencias menores de tilde o formato. Se aconseja registrarlo exactamente igual.`,
                 id: o.orden,
                 record: o
               });
@@ -838,7 +838,7 @@ export function VerificationPage() {
                 type: 'data_error',
                 severity: 'critica',
                 ruleCode: 'RN-005',
-                detail: `[Fila: ${o.sheetRow}] El "Payment Type" "${o.paymentType}" no coincide con ningún método de pago de mensajeros registrado (${allowedNames || 'no hay métodos de pago de mensajeros activos'}).`,
+                detail: `[Fila: ${o.sheetRow}] El "Payment Type" "${o.paymentType}" no coincide con ningún método de pago de ordenes registrado (${allowedNames || 'no hay métodos de pago de ordenes activos'}).`,
                 id: o.orden,
                 record: o
               });
