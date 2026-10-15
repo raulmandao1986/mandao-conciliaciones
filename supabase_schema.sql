@@ -65,8 +65,20 @@ comment on table public.profiles is 'Extiende auth.users con el rol de negocio (
 create or replace function public.handle_new_user()
 returns trigger as $$
 begin
-  insert into public.profiles (id, full_name, email, role, active)
-  values (new.id, coalesce(new.raw_user_meta_data->>'full_name', new.email), new.email, 'visitante', false);
+  -- access_role_id: asigna el Rol de Acceso de sistema "Visitante" (ver
+  -- sección "MÓDULO GESTIÓN — ROLES DE ACCESO" más abajo en este archivo)
+  -- para que el perfil nazca siempre con uno asignado. public.access_roles
+  -- se crea más adelante en este mismo script — es una referencia diferida,
+  -- válida porque plpgsql no resuelve nombres hasta que la función corre.
+  insert into public.profiles (id, full_name, email, role, active, access_role_id)
+  values (
+    new.id,
+    coalesce(new.raw_user_meta_data->>'full_name', new.email),
+    new.email,
+    'visitante',
+    false,
+    (select access_role_id from public.access_roles where is_system and base_role = 'visitante' limit 1)
+  );
   return new;
 end;
 $$ language plpgsql security definer;
@@ -194,15 +206,19 @@ create table public.dispatcher (
   driver_admin_charge numeric(12,2) default 0,
   complementary_delivery text,   -- string/number en origen -> se conserva como text
   tax numeric(12,2) default 0,
+  rate numeric(18,6),              -- columna "Rate" (2026-10-07, migración 2026-10-07e)
+  transaction_fee numeric(12,2),   -- columna "Transaction Fee" (antes se guardaba en tax)
   promocode text,
   area_id uuid not null references public.areas(area_id),
   verification_id uuid,   -- FK lógica a dispatcher_verifications (se define abajo con alter)
   created_at timestamptz not null default now()
 );
 
--- RN-009: una orden no puede importarse dos veces para la misma área y fecha operativa
-create unique index uq_dispatcher_order_area_date
-  on public.dispatcher(order_id, area_id, delivery_date);
+-- RN-009: una orden no puede importarse dos veces para el mismo negocio,
+-- área y fecha operativa. Incluye el negocio desde 2026-10-07 (migración
+-- 2026-10-07d): dos negocios pueden repetir Order ID el mismo día.
+create unique index uq_dispatcher_order_area_store_date
+  on public.dispatcher (order_id, area_id, lower(btrim(coalesce(store, ''))), delivery_date);
 
 -- 6. DISPATCHER_VERIFICATIONS (equivalente real de 'verification_history')
 -- Incluye import_completed_at porque el código real NO tiene una colección
@@ -397,10 +413,12 @@ create table public.payment_methods (
 -- Activa": al activar una tasa, todas las demás deben quedar inactivas
 -- — esa regla se aplica en la UI (RazonCambioPage), igual que en el
 -- código original, no como constraint de base de datos.
+-- rate_cup = USD por 1 CUP (ej. 0.002 ≈ 500 CUP por USD), puede ser menor
+-- que 1 — ver migración 2026-10-01_exchange_rate_usd_por_cup.sql.
 create table public.exchange_rates (
   exchange_rate_id uuid primary key default gen_random_uuid(),
   name text not null,
-  rate_cup numeric(12,2) not null,
+  rate_cup numeric(18,8) not null,
   description text,
   active boolean not null default true,
   created_at timestamptz not null default now(),
@@ -459,6 +477,327 @@ create table public.import_sources (
 );
 
 -- =====================================================================
+-- MÓDULO GESTIÓN — ROLES DE ACCESO (agregado 2026-09-23, UNIFICADO 2026-09-24)
+-- =====================================================================
+-- profiles.role (enum de 4 valores fijos) sigue siendo, intacta, la
+-- única fuente de verdad que consultan las políticas RLS de TODO el
+-- sistema (current_user_role() = 'super_admin', etc. — decisión #2,
+-- ver cabecera de este archivo). Eso NO cambia y no se vuelve editable.
+--
+-- Lo que SÍ es 100% editable desde la UI (RolesUsuariosPage → pestaña
+-- "Roles") es esta tabla: qué módulos/ítems de menú ve cada rol
+-- (module_keys, ids de MODULE_CATALOG en moduleCatalog.ts). Se
+-- siembran 4 filas "de sistema" (is_system = true) — Super Admin,
+-- Supervisor, Operador, Visitante — con base_role apuntando 1:1 a los
+-- 4 valores del enum. Esas 4 filas NO se pueden eliminar (protegido
+-- también a nivel de trigger, ver más abajo) porque son el ancla entre
+-- "qué rol de acceso ve un usuario" y "qué puede ejecutar/modificar
+-- según RLS" — pero sus module_keys sí se editan libremente. Un
+-- Super Admin puede además crear roles nuevos (is_system = false),
+-- libres en todo: nombre, descripción, módulos, y a cuál de los 4
+-- niveles de seguridad (base_role) se atan.
+create table public.access_roles (
+  access_role_id uuid primary key default gen_random_uuid(),
+  name text not null unique,
+  description text,
+  base_role public.user_role not null default 'visitante',
+  is_system boolean not null default false,
+  module_keys text[] not null default '{}',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- Protección: las 4 filas de sistema no se pueden eliminar ni perder su
+-- marca is_system, ni siquiera vía SQL directo — son el único puente
+-- entre un Rol de Acceso y el nivel de seguridad real (profiles.role).
+create or replace function public.protect_system_access_roles()
+returns trigger as $$
+begin
+  if tg_op = 'DELETE' then
+    if old.is_system then
+      raise exception 'No se puede eliminar el Rol de Acceso de sistema "%".', old.name;
+    end if;
+    return old;
+  end if;
+  if old.is_system and not new.is_system then
+    raise exception 'No se puede quitar la marca de sistema del Rol de Acceso "%".', old.name;
+  end if;
+  return new;
+end;
+$$ language plpgsql;
+
+create trigger trg_protect_system_access_roles
+  before update or delete on public.access_roles
+  for each row execute function public.protect_system_access_roles();
+
+-- Semilla de los 4 roles de sistema — module_keys replica exactamente
+-- el comportamiento que antes estaba hardcodeado en AppShell.tsx
+-- (hasPermission), para que nadie pierda ni gane acceso el día de la
+-- migración. A partir de aquí es 100% editable desde la UI.
+insert into public.access_roles (name, description, base_role, is_system, module_keys) values
+  ('Super Admin', 'Acceso total a todos los módulos del sistema.', 'super_admin', true, array[
+    'dashboard','dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision',
+    'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cuentas-pagar-negocio','cuentas-cobrar-negocio','planificacion-pagos-negocio','gestion-negocios',
+    'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cuentas-pagar-mensajero','cuentas-cobrar-mensajero','planificacion-pagos-mensajero','gestion-mensajeros',
+    'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','razon-cambio','comision-mandao','documentos-importacion','config-logs'
+  ]),
+  ('Supervisor', 'Acceso total a todos los módulos del sistema.', 'supervisor', true, array[
+    'dashboard','dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision',
+    'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cuentas-pagar-negocio','cuentas-cobrar-negocio','planificacion-pagos-negocio','gestion-negocios',
+    'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cuentas-pagar-mensajero','cuentas-cobrar-mensajero','planificacion-pagos-mensajero','gestion-mensajeros',
+    'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','razon-cambio','comision-mandao','documentos-importacion','config-logs'
+  ]),
+  ('Operador', 'Puede ejecutar Verificación en Dispatcher y Disponibilidad. Sin acceso a Gestión ni Configuración.', 'operador', true, array[
+    'dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision'
+  ]),
+  ('Visitante', 'Solo lectura en Dispatcher y Disponibilidad.', 'visitante', true, array[
+    'dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision'
+  ])
+on conflict (name) do nothing;
+
+alter table public.profiles
+  add column access_role_id uuid references public.access_roles(access_role_id) on delete set null;
+
+-- Todo usuario tiene siempre un Rol de Acceso asignado (se respalda con
+-- el fallback de compatibilidad en AppShell.tsx hasPermission() por si
+-- alguna fila quedara en NULL). Los perfiles existentes se migran al rol
+-- de sistema que corresponde a su profiles.role actual.
+update public.profiles p
+set access_role_id = ar.access_role_id
+from public.access_roles ar
+where p.access_role_id is null and ar.is_system and ar.base_role = p.role;
+
+-- =====================================================================
+-- MÓDULO NEGOCIOS/MENSAJEROS — CONCILIACIÓN (agregado 2026-09-24,
+-- UNIFICADO/CORREGIDO 2026-09-30)
+-- =====================================================================
+-- Ver "Instrucciones Conciliaciones Mandao.md" secciones 6 (Negocios) y
+-- 7 (Mensajeros) para la especificación funcional completa (reglas de
+-- negocio, mapeo de Payment Type a los 4 baldes, fórmula de CxC/CxP).
+-- 2026-09-30: renombrada `conciliaciones` -> `conciliaciones_businesses`
+-- y `estado` pasó de boolean a un ciclo de vida de texto (Nuevo/Enviado/
+-- Aprobado/Incorrecto/Facturado), para alinear con las instrucciones
+-- generales de Conciliación (que cubren Negocios y Mensajeros a la vez
+-- y usan una tabla separada por entidad, no una compartida).
+
+-- Comisión que retiene Mandao por las órdenes de cada tipo de entidad.
+-- Un solo valor vigente por entity_type — sin historial de tasas pasadas
+-- como exchange_rates, porque no se pidió esa función; si hace falta
+-- más adelante se amplía igual que RazonCambioPage.
+create table public.commission_settings (
+  entity_type text primary key check (entity_type in ('businesses', 'messengers')),
+  percentage numeric(5,2) not null,
+  updated_at timestamptz not null default now(),
+  updated_by uuid references auth.users(id)
+);
+
+-- El 20% de Mensajeros es un valor inicial de referencia (igual que
+-- Negocios) — confirmado por el usuario 2026-09-30: Negocios inicia en
+-- 20%, Mensajeros inicia en 10%. Ambos ajustables desde Configuración ->
+-- Comisión Mandao.
+insert into public.commission_settings (entity_type, percentage) values
+  ('businesses', 20.00),
+  ('messengers', 10.00)
+on conflict (entity_type) do nothing;
+
+-- Tarifa de Alquiler de Mochila (Mensajeros), por tipo de mochila — se
+-- gestiona en el mismo submódulo "Comisión Mandao" (Configuración). Sin
+-- valor inicial confirmado por el usuario todavía: arranca en 0.00,
+-- editable desde la UI antes de que afecte ninguna conciliación real.
+create table public.backpack_rental_rates (
+  backpack_type text primary key check (backpack_type in ('Pequeña', 'Grande')),
+  rate numeric(12,2) not null default 0,
+  updated_at timestamptz not null default now(),
+  updated_by uuid references auth.users(id)
+);
+
+insert into public.backpack_rental_rates (backpack_type, rate) values
+  ('Pequeña', 0.00),
+  ('Grande', 0.00)
+on conflict (backpack_type) do nothing;
+
+-- Ajustes generales clave/valor (ej. carpeta de Drive de los PDF de
+-- Conciliación). Ver migración 2026-10-07_conciliaciones_pdf_google_drive.sql.
+create table public.app_settings (
+  setting_key text primary key,
+  value text,
+  updated_at timestamptz not null default now(),
+  updated_by uuid references auth.users(id)
+);
+
+-- % de descuento sobre Disponibilidades en Conciliación de Mensajeros
+-- (Configuración -> Comisión Mandao). Ver migración 2026-10-01b.
+create table public.availability_discount_settings (
+  entity_type text primary key check (entity_type = 'messengers'),
+  percentage numeric(5,2) not null default 0 check (percentage >= 0 and percentage <= 100),
+  updated_at timestamptz not null default now(),
+  updated_by uuid references auth.users(id)
+);
+
+insert into public.availability_discount_settings (entity_type, percentage) values
+  ('messengers', 0.00)
+on conflict (entity_type) do nothing;
+
+-- Reglas de excepción de la Verificación del Dispatcher (Configuración ->
+-- Reglas). Ver migración 2026-09-30d_dispatcher_rules.sql para el detalle.
+create table public.dispatcher_rules (
+  rule_id uuid primary key default gen_random_uuid(),
+  actor text not null check (actor in ('negocios', 'mensajeros')),
+  name text not null,
+  store text,
+  when_empty text[] not null default '{}',
+  description text,
+  columns jsonb not null default '[]'::jsonb,
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  updated_by uuid references auth.users(id)
+);
+
+-- Reglas iniciales: reproducen exactamente lo que la Verificación ya
+-- toleraba antes, para que su comportamiento no cambie al desplegar.
+insert into public.dispatcher_rules (actor, name, store, when_empty, description, columns) values
+  ('negocios', 'Columnas opcionales', null, '{}',
+   'Columnas que hasta hoy la Verificación nunca exigía (se registran en 0 o vacías).',
+   '[{"column":"customerNumber","action":"permitir"},{"column":"processingFee","action":"permitir"},{"column":"tax","action":"permitir"},{"column":"rate","action":"permitir"},{"column":"transactionFee","action":"permitir"},{"column":"promocode","action":"permitir"},{"column":"area","action":"permitir"}]'::jsonb),
+  ('mensajeros', 'Cargos de entrega opcionales', null, '{}',
+   'Los cargos de entrega pueden venir vacíos.',
+   '[{"column":"deliveryCharge","action":"permitir"},{"column":"extraDeliveryCharge","action":"permitir"},{"column":"driverAdminCharge","action":"permitir"},{"column":"complementaryDelivery","action":"permitir"}]'::jsonb),
+  ('negocios', 'Mandao Express', 'Mandao Express', '{}',
+   'Servicio propio de Mandao: no registra monto de producto, oferta ni cargo de administración del negocio.',
+   '[{"column":"productAmount","action":"permitir"},{"column":"storeOffer","action":"permitir"},{"column":"storeAdminCharge","action":"permitir"}]'::jsonb),
+  ('mensajeros', 'Recogida en el establecimiento', null,
+   array['deliveryCharge','extraDeliveryCharge','driverAdminCharge','complementaryDelivery'],
+   'RN-003: el cliente recoge en el negocio; sin cargos de entrega no interviene mensajero.',
+   '[{"column":"driver","action":"permitir"}]'::jsonb);
+
+-- Historial de conciliaciones de Negocios. `establecimiento`/`area`
+-- quedan denormalizados (igual que dispatcher.store) para que el
+-- histórico no cambie de texto si el negocio se renombra después;
+-- business_id/area_id sí son FK reales, usados para el chequeo de
+-- duplicidad (RN sección 6.4.2) y para filtrar.
+--
+-- CÁLCULO POR MÉTODO DE PAGO DEL NEGOCIO (confirmado por el usuario
+-- 2026-09-30, ver Instrucciones sección 6.4 para el detalle completo):
+-- el dispatcher siempre registra los montos en CUP; el método de pago
+-- registrado del negocio (`businesses.payment_method`, catálogo
+-- Configuración → Métodos de Pago → Negocios) decide cuántas filas se
+-- generan por rango y si alguna se convierte a USD:
+--   'Transferencia'            -> 1 fila, todo en CUP:
+--                                 0.8*(TM+SM+US) - CXC_CU
+--   'Transferencia-Efectivo'   -> 2 filas, ambas en CUP:
+--                                 "Transferencia" = 0.8*TM
+--                                 "Efectivo"      = 0.8*(SM+US) - CXC_CU
+--   'Transferencia-Exterior'   -> 2 filas:
+--                                 "Transferencia" (CUP) = 0.8*TM - CXC_CU
+--                                 "Exterior" (USD, vía tasa de cambio activa)
+--                                          = 0.8*(SM+US) convertido a USD
+-- En todos los casos cada fila solo llena los baldes que le corresponden
+-- (los demás quedan en 0) para que el total de esa fila siga saliendo de
+-- la misma fórmula universal `cxp_tm+cxp_sm+cxp_us-cxc_cu`.
+create table public.conciliaciones_businesses (
+  conciliacion_id uuid primary key default gen_random_uuid(),
+  fecha date not null default current_date,
+  business_id uuid not null references public.businesses(business_id),
+  establecimiento text not null,
+  fecha_inicial date not null,
+  fecha_final date not null,
+  area_id uuid not null references public.areas(area_id),
+  area text not null,
+  ordenes_efectivo integer not null default 0,
+  cxc_cu numeric(12,2) not null default 0,
+  ordenes_transfermovil integer not null default 0,
+  cxp_tm numeric(12,2) not null default 0,
+  ordenes_saldo_mandao integer not null default 0,
+  cxp_sm numeric(12,2) not null default 0,
+  ordenes_tarjeta integer not null default 0,
+  cxp_us numeric(12,2) not null default 0,
+  -- via_pago: antes guardaba el método de pago crudo del negocio; desde
+  -- 2026-09-30 guarda el "riel" de liquidación de ESTA fila concreta
+  -- ('Transferencia' / 'Efectivo' / 'Exterior') — ver sección 6.4 y el
+  -- comentario grande más abajo. moneda indica en qué está expresada
+  -- esta fila (los CxP/CxC "Exterior" van en USD, el resto en CUP).
+  via_pago text,
+  moneda text not null default 'CUP' check (moneda in ('CUP', 'USD')),
+  responsable text not null,
+  responsable_id uuid references auth.users(id),
+  conciliacion text not null,
+  estado text not null default 'Nuevo'
+    check (estado in ('Nuevo', 'Enviado', 'Aprobado', 'Incorrecto', 'Facturado')),
+  facturacion text,
+  descuento numeric(12,2),
+  nota text,
+  pagado numeric(12,2),
+  saldo numeric(12,2),
+  estado_pago text,
+  referencia text,
+  fecha_pago date,
+  prioridad text,
+  pdf_drive_file_id text,   -- PDF subido a Google Drive (2026-10-07)
+  pdf_drive_url text,
+  comision_pct numeric(5,2),     -- % de comisión usado (2026-10-15, migración 2026-10-15)
+  tasa_cambio numeric(18,8),     -- USD por 1 CUP usada en filas Exterior (2026-10-15)
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- RN sección 6.4.2 "Duplicidad", ampliada 2026-09-30: un negocio con
+-- Método de Pago "Transferencia-Efectivo" o "Transferencia-Exterior"
+-- genera DOS filas por rango (una por cada riel de liquidación) — el
+-- índice único ahora incluye `via_pago` para permitir esas dos filas
+-- coexistiendo, sin dejar de bloquear un duplicado real de la misma fila.
+create unique index uq_conciliaciones_businesses_range
+  on public.conciliaciones_businesses(business_id, fecha_inicial, fecha_final, via_pago);
+
+-- Historial de conciliaciones de Mensajeros — ver Instrucciones sección
+-- 7. `disponibilidades` (suma de availabilities.amount_to_pay del mismo
+-- mensajero en el rango) SÍ está implementado; `alquiler_mochila` queda
+-- en 0 por ahora — pendiente de que el usuario defina su fuente/monto
+-- (sección 7.4). `saldo_cup` es el neto (Total por Pagar - Total por
+-- Cobrar) en CUP, sin conversión: los mensajeros siempre cobran y pagan en
+-- CUP (corregido 2026-09-30, ver migración 2026-09-30e).
+create table public.conciliaciones_messengers (
+  conciliacion_id uuid primary key default gen_random_uuid(),
+  fecha date not null default current_date,
+  messenger_id uuid not null references public.messengers(messenger_id),
+  mensajero text not null,
+  fecha_inicial date not null,
+  fecha_final date not null,
+  area_id uuid not null references public.areas(area_id),
+  area text not null,
+  ordenes_efectivo integer not null default 0,
+  cxc_cu numeric(12,2) not null default 0,
+  ordenes_transfermovil integer not null default 0,
+  cxp_tm numeric(12,2) not null default 0,
+  ordenes_saldo_mandao integer not null default 0,
+  cxp_sm numeric(12,2) not null default 0,
+  ordenes_tarjeta integer not null default 0,
+  cxp_us numeric(12,2) not null default 0,
+  tipo_mochila text,
+  alquiler_mochila numeric(12,2) not null default 0,
+  disponibilidades numeric(12,2) not null default 0,
+  total_ordenes integer not null default 0,
+  total_por_cobrar numeric(12,2) not null default 0,
+  total_por_pagar numeric(12,2) not null default 0,
+  saldo_cup numeric(12,2),
+  via_pago text,
+  responsable text not null,
+  responsable_id uuid references auth.users(id),
+  conciliacion text not null,
+  estado text not null default 'Nuevo'
+    check (estado in ('Nuevo', 'Enviado', 'Aprobado', 'Incorrecto', 'Facturado')),
+  facturacion text,
+  pdf_drive_file_id text,   -- PDF subido a Google Drive (2026-10-07)
+  pdf_drive_url text,
+  comision_pct numeric(5,2),     -- % de comisión usado (2026-10-15, migración 2026-10-15)
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index uq_conciliaciones_messengers_range
+  on public.conciliaciones_messengers(messenger_id, fecha_inicial, fecha_final);
+
+-- =====================================================================
 -- RLS — Row Level Security alineado a los 3 roles del sistema
 -- =====================================================================
 alter table public.areas enable row level security;
@@ -477,6 +816,14 @@ alter table public.payment_methods enable row level security;
 alter table public.exchange_rates enable row level security;
 alter table public.businesses enable row level security;
 alter table public.import_sources enable row level security;
+alter table public.access_roles enable row level security;
+alter table public.commission_settings enable row level security;
+alter table public.backpack_rental_rates enable row level security;
+alter table public.availability_discount_settings enable row level security;
+alter table public.app_settings enable row level security;
+alter table public.dispatcher_rules enable row level security;
+alter table public.conciliaciones_businesses enable row level security;
+alter table public.conciliaciones_messengers enable row level security;
 
 -- Lectura: los 4 roles pueden leer (Visitante = solo lectura, según matriz de
 -- permisos) — PERO solo si profiles.active = true (public.is_active_user()).
@@ -494,6 +841,9 @@ create policy "read_all_authenticated" on public.availability_imports for select
 create policy "read_all_authenticated" on public.availability_verifications for select using (public.is_active_user());
 create policy "read_all_authenticated" on public.availability_incidents for select using (public.is_active_user());
 create policy "read_all_authenticated" on public.messengers for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.availability_discount_settings for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.app_settings for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.dispatcher_rules for select using (public.is_active_user());
 create policy "read_own_profile" on public.profiles for select using (auth.uid() = id or public.is_admin_or_supervisor());
 -- Edición de perfiles (cambiar rol/estado de otros usuarios): agregado
 -- 2026-09-08 — faltaba por completo, sin esto nadie (ni super_admin)
@@ -505,6 +855,11 @@ create policy "read_all_authenticated" on public.payment_methods for select usin
 create policy "read_all_authenticated" on public.exchange_rates for select using (public.is_active_user());
 create policy "read_all_authenticated" on public.businesses for select using (public.is_active_user());
 create policy "read_all_authenticated" on public.import_sources for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.access_roles for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.commission_settings for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.backpack_rental_rates for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.conciliaciones_businesses for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.conciliaciones_messengers for select using (public.is_active_user());
 
 -- Escritura de Verificaciones: Super Admin, Supervisor, Operador (Operador SÍ puede ejecutar verificaciones)
 create policy "insert_verification" on public.dispatcher_verifications
@@ -575,6 +930,35 @@ create policy "manage_businesses" on public.businesses
 create policy "manage_import_sources" on public.import_sources
   for all using (public.current_user_role() = 'super_admin')
   with check (public.current_user_role() = 'super_admin');
+create policy "manage_access_roles" on public.access_roles
+  for all using (public.current_user_role() = 'super_admin')
+  with check (public.current_user_role() = 'super_admin');
+create policy "manage_commission_settings" on public.commission_settings
+  for all using (public.current_user_role() = 'super_admin')
+  with check (public.current_user_role() = 'super_admin');
+create policy "manage_backpack_rental_rates" on public.backpack_rental_rates
+  for all using (public.current_user_role() = 'super_admin')
+  with check (public.current_user_role() = 'super_admin');
+create policy "manage_app_settings" on public.app_settings
+  for all using (public.current_user_role() = 'super_admin')
+  with check (public.current_user_role() = 'super_admin');
+create policy "manage_availability_discount_settings" on public.availability_discount_settings
+  for all using (public.current_user_role() = 'super_admin')
+  with check (public.current_user_role() = 'super_admin');
+create policy "manage_dispatcher_rules" on public.dispatcher_rules
+  for all using (public.current_user_role() = 'super_admin')
+  with check (public.current_user_role() = 'super_admin');
+
+-- Conciliaciones: ejecutar el proceso (insertar) y corregir registros
+-- (editar/eliminar) queda al mismo nivel que Importación (ROLE_CAN_IMPORT
+-- en auth.tsx) — Super Admin/Supervisor, no Operador, por ser un proceso
+-- que mueve dinero (a diferencia de Verificar, que Operador sí puede).
+create policy "manage_conciliaciones_businesses" on public.conciliaciones_businesses
+  for all using (public.is_admin_or_supervisor())
+  with check (public.is_admin_or_supervisor());
+create policy "manage_conciliaciones_messengers" on public.conciliaciones_messengers
+  for all using (public.is_admin_or_supervisor())
+  with check (public.is_admin_or_supervisor());
 
 -- =====================================================================
 -- FUNCIÓN DE APOYO — RN-005: Coincidencia difusa (Dispatcher)
@@ -620,3 +1004,89 @@ alter default privileges in schema public
   grant usage, select on sequences to anon, authenticated;
 alter default privileges in schema public
   grant execute on functions to anon, authenticated;
+
+-- =====================================================================
+-- CONSECUTIVO DE CONCILIACIONES (PN/CN/PM/CM + año + número) — agregado
+-- 2026-10-07, ver migraciones 2026-10-07b y 2026-10-07c (las liquidaciones
+-- en 0 no se numeran).
+-- Va al final porque revoca el execute que otorgan los GRANT de arriba.
+-- =====================================================================
+create table public.conciliacion_consecutivos (
+  prefijo text not null,
+  anio int not null,
+  ultimo int not null default 0,
+  primary key (prefijo, anio)
+);
+
+alter table public.conciliacion_consecutivos enable row level security;
+-- Sin políticas: solo lo usa la función SECURITY DEFINER de abajo.
+
+create or replace function public.next_conciliacion_consecutivo(p_prefijo text, p_fecha date)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_anio int := extract(year from coalesce(p_fecha, current_date))::int;
+  v_n int;
+begin
+  insert into public.conciliacion_consecutivos as c (prefijo, anio, ultimo)
+  values (p_prefijo, v_anio, 1)
+  on conflict (prefijo, anio) do update set ultimo = c.ultimo + 1
+  returning ultimo into v_n;
+  -- 4 dígitos (0001); si un año supera 9999 se usan los dígitos necesarios.
+  return p_prefijo || lpad((v_anio % 100)::text, 2, '0')
+    || case when v_n < 10000 then lpad(v_n::text, 4, '0') else v_n::text end;
+end;
+$$;
+
+create or replace function public.set_consecutivo_conciliacion_negocio()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_cxp numeric := coalesce(new.cxp_tm, 0) + coalesce(new.cxp_sm, 0) + coalesce(new.cxp_us, 0);
+  v_cxc numeric := coalesce(new.cxc_cu, 0);
+begin
+  if new.consecutivo is null and round(v_cxp - v_cxc, 2) <> 0 then
+    new.consecutivo := public.next_conciliacion_consecutivo(
+      case when v_cxp > v_cxc then 'PN' else 'CN' end, new.fecha);
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.set_consecutivo_conciliacion_mensajero()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_pagar numeric := coalesce(new.total_por_pagar, 0);
+  v_cobrar numeric := coalesce(new.total_por_cobrar, 0);
+begin
+  if new.consecutivo is null and round(v_pagar - v_cobrar, 2) <> 0 then
+    new.consecutivo := public.next_conciliacion_consecutivo(
+      case when v_pagar > v_cobrar then 'PM' else 'CM' end, new.fecha);
+  end if;
+  return new;
+end;
+$$;
+
+alter table public.conciliaciones_businesses add column consecutivo text unique;
+alter table public.conciliaciones_messengers add column consecutivo text unique;
+
+create trigger trg_consecutivo_conciliacion_negocio
+  before insert on public.conciliaciones_businesses
+  for each row execute function public.set_consecutivo_conciliacion_negocio();
+
+create trigger trg_consecutivo_conciliacion_mensajero
+  before insert on public.conciliaciones_messengers
+  for each row execute function public.set_consecutivo_conciliacion_mensajero();
+
+-- Solo los triggers deben llamar al generador.
+revoke execute on function public.next_conciliacion_consecutivo(text, date) from public, anon, authenticated;

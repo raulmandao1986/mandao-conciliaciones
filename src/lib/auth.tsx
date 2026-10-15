@@ -15,6 +15,11 @@ export interface User {
   domain: string;
   uid: string;
   active: boolean;
+  // Rol de Acceso (tabla access_roles): capa nueva y separada, solo de UI
+  // (qué módulos ve en el menú), no de seguridad — ver moduleCatalog.ts y
+  // AppShell.tsx hasPermission(). null = sin asignar, se usa el comportamiento
+  // histórico basado en `role`.
+  accessModules: string[] | null;
 }
 
 interface AuthContextType {
@@ -39,10 +44,17 @@ export const ROLE_CAN_IMPORT = (role: UserRole) =>
 export const ROLE_CAN_VERIFY = (role: UserRole) =>
   role === 'super_admin' || role === 'supervisor' || role === 'operador';
 
-async function fetchProfile(userId: string): Promise<{ role: UserRole; active: boolean; full_name: string } | null> {
+interface Profile {
+  role: UserRole;
+  active: boolean;
+  full_name: string;
+  accessModules: string[] | null;
+}
+
+async function fetchProfile(userId: string): Promise<Profile | null> {
   const { data, error } = await supabase
     .from('profiles')
-    .select('role, active, full_name')
+    .select('role, active, full_name, access_roles ( module_keys )')
     .eq('id', userId)
     .single();
 
@@ -50,12 +62,18 @@ async function fetchProfile(userId: string): Promise<{ role: UserRole; active: b
     console.error('[Auth] No se pudo cargar el perfil desde Supabase:', error.message);
     return null;
   }
-  return data as any;
+  const row = data as any;
+  return {
+    role: row.role,
+    active: row.active,
+    full_name: row.full_name,
+    accessModules: row.access_roles?.module_keys ?? null,
+  };
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
-  const [profile, setProfile] = useState<{ role: UserRole; active: boolean; full_name: string } | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -127,6 +145,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         domain: session.user.email?.split('@')[1] || '',
         uid: session.user.id,
         active: profile.active,
+        accessModules: profile.accessModules,
       }
     : null;
 

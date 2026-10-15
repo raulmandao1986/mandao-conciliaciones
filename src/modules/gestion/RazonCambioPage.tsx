@@ -9,6 +9,14 @@ import { DataTable } from '../../design-system/patterns/DataTable';
 import { cn } from '../../lib/utils';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
 
+// La tasa se expresa en USD por 1 CUP (ej. 0.002 ≈ 500 CUP por USD,
+// confirmado por el usuario 2026-10-01): puede ser menor que 1, así que
+// se muestra con hasta 8 decimales en vez de los 2 de un monto.
+const formatRate = (value: number) =>
+  new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 8 }).format(value);
+const formatCupPerUsd = (usdPorCup: number) =>
+  new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(1 / usdPorCup);
+
 interface ExchangeRateRecord {
   id: string;
   nombre: string;
@@ -107,7 +115,7 @@ export function RazonCambioPage() {
     setSelectedRate(null);
     setFormData({
       nombre: 'Tasa de Cambio',
-      tasaCUP: 120,
+      tasaCUP: 0.002,
       descripcion: '',
       estado: 'activo'
     });
@@ -116,7 +124,7 @@ export function RazonCambioPage() {
 
   const handleSave = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!formData.nombre || !formData.tasaCUP) return;
+    if (!formData.nombre || !(Number(formData.tasaCUP) > 0)) return;
 
     setSaving(true);
     try {
@@ -212,7 +220,7 @@ export function RazonCambioPage() {
           <div>
             <h1 className="text-xl font-bold text-[var(--color-text)]">Razón de Cambio de Referencia</h1>
             <p className="text-sm text-[var(--color-text-muted)] mt-1">
-              Fije las tasas de conversión cambiaria (USD/CUP) necesarias en la facturación y conciliaciones.
+              Fije las tasas de conversión cambiaria (USD por 1 CUP, ej. 0.002) necesarias en la facturación y conciliaciones.
             </p>
           </div>
         </div>
@@ -241,8 +249,13 @@ export function RazonCambioPage() {
           <div>
             <span className="text-xs uppercase font-extrabold text-[var(--color-brand-ink)] tracking-widest block opacity-70">Tasa de Cambio Vigente</span>
             <span className="text-4xl font-black text-[var(--color-brand-ink)] mt-3 block font-sans tracking-tight">
-              1 USD = {activeRate ? `${activeRate.tasaCUP.toFixed(2)} CUP` : 'No definida'}
+              {activeRate ? `1 CUP = ${formatRate(activeRate.tasaCUP)} USD` : 'No definida'}
             </span>
+            {activeRate && (
+              <p className="text-xs text-[var(--color-brand-ink)] opacity-80 mt-1 font-mono tabular-nums">
+                ≈ {formatCupPerUsd(activeRate.tasaCUP)} CUP por 1 USD
+              </p>
+            )}
             <p className="text-xs text-[var(--color-brand-ink)] opacity-80 mt-2 font-mono">
               Ref: {activeRate ? activeRate.nombre : 'Por favor configure una tasa activa'}
             </p>
@@ -296,9 +309,14 @@ export function RazonCambioPage() {
             {
               header: 'Valor Cambiario',
               accessor: (item) => (
-                <span className="font-mono text-sm font-bold text-[var(--color-text)] tabular-nums">
-                  1.00 USD = {item.tasaCUP.toFixed(2)} CUP
-                </span>
+                <div className="flex flex-col">
+                  <span className="font-mono text-sm font-bold text-[var(--color-text)] tabular-nums">
+                    1 CUP = {formatRate(item.tasaCUP)} USD
+                  </span>
+                  <span className="font-mono text-xs text-[var(--color-text-muted)] tabular-nums">
+                    ≈ {formatCupPerUsd(item.tasaCUP)} CUP por 1 USD
+                  </span>
+                </div>
               )
             },
             {
@@ -358,7 +376,7 @@ export function RazonCambioPage() {
         footer={
           <div className="flex gap-3">
             <Button variant="ghost" className="flex-1" onClick={() => setIsFormOpen(false)}>Cancelar</Button>
-            <Button variant="brand" className="flex-1" onClick={handleSave} disabled={!formData.nombre || !formData.tasaCUP || saving}>
+            <Button variant="brand" className="flex-1" onClick={handleSave} disabled={!formData.nombre || !(Number(formData.tasaCUP) > 0) || saving}>
               {saving ? <Loader2 size={16} className="mr-2 inline animate-spin" /> : <Save size={16} className="mr-2 inline" />}
               Guardar Tasa
             </Button>
@@ -380,17 +398,24 @@ export function RazonCambioPage() {
             </label>
 
             <label className="flex flex-col gap-1.5">
-              <span className="text-xs font-bold text-[var(--color-text)]">Tasa en CUP por 1 USD *</span>
+              <span className="text-xs font-bold text-[var(--color-text)]">Tasa en USD por 1 CUP *</span>
               <input
                 type="number"
-                step="0.01"
-                min="1"
+                step="any"
+                min="0"
                 value={formData.tasaCUP}
                 onChange={(e) => setFormData(p => ({ ...p, tasaCUP: Number(e.target.value) }))}
-                placeholder="Ej. 350.00"
-                className="h-10 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)] transition-all font-mono"
+                placeholder="Ej. 0.002"
+                className="h-10 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)] transition-all font-mono text-right tabular-nums"
                 required
               />
+              {Number(formData.tasaCUP) > 0 ? (
+                <span className="text-xs text-[var(--color-text-muted)] tabular-nums">
+                  Equivale a ≈ {formatCupPerUsd(Number(formData.tasaCUP))} CUP por 1 USD.
+                </span>
+              ) : (
+                <span className="text-xs font-medium text-[var(--color-danger)]">La tasa debe ser mayor que 0.</span>
+              )}
             </label>
 
             <label className="flex flex-col gap-1.5">

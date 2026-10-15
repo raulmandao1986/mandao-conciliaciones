@@ -24,6 +24,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../../lib/utils';
 import { logAuditEvent } from '../../lib/supabase';
+import { toLocalISODate } from '../../lib/formatters';
 
 interface InvoiceRecord {
   id: string;
@@ -179,8 +180,8 @@ export function FacturacionPage() {
       tax: taxNum,
       total: totalNum,
       status: 'pendiente',
-      invoiceDate: new Date().toISOString().split('T')[0],
-      dueDate: new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString().split('T')[0],
+      invoiceDate: toLocalISODate(),
+      dueDate: toLocalISODate(new Date(Date.now() + 14 * 24 * 3600 * 1000)),
       payoutMethod: 'Transferencia Bancaria'
     };
 

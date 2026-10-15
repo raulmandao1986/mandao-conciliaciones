@@ -30,6 +30,7 @@ import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
 import { BulkImportModal } from './components/BulkImportModal';
+import { toLocalISODate } from '../../lib/formatters';
 
 interface AreaOption {
   id: string;
@@ -146,7 +147,7 @@ export function GestionMensajerosPage() {
     cuentaFiscal: '',
     viaPago: 'Transferencia',
     tipoMochila: 'Grande',
-    fechaAlta: new Date().toISOString().split('T')[0],
+    fechaAlta: toLocalISODate(),
     fechaBaja: '',
     estado: 'activo' as 'activo' | 'bloqueado',
     areaId: areas[0]?.id || '',
@@ -216,7 +217,7 @@ export function GestionMensajerosPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `listado_mensajeros_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `listado_mensajeros_${toLocalISODate()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -309,7 +310,7 @@ export function GestionMensajerosPage() {
       cuentaFiscal: messenger.cuentaFiscal,
       viaPago: messenger.viaPago || 'Transferencia',
       tipoMochila: messenger.tipoMochila || 'Grande',
-      fechaAlta: messenger.fechaAlta || new Date().toISOString().split('T')[0],
+      fechaAlta: messenger.fechaAlta || toLocalISODate(),
       fechaBaja: messenger.fechaBaja || '',
       estado: messenger.estado,
       areaId: messenger.areaId,

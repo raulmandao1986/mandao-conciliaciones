@@ -13,7 +13,8 @@ import { Package } from 'lucide-react';
 // su propia fase. Se cargan de forma perezosa (React.lazy) para que un
 // fallo de resolución de módulo en uno de ellos no tumbe el resto de la
 // app (Dispatcher/Disponibilidad) al cargar.
-const ConciliacionPage = lazy(() => import('./conciliacion/ConciliacionPage').then(m => ({ default: m.ConciliacionPage })));
+const ConciliacionNegociosPage = lazy(() => import('./conciliacion/ConciliacionNegociosPage').then(m => ({ default: m.ConciliacionNegociosPage })));
+const ConciliacionMensajerosPage = lazy(() => import('./conciliacion/ConciliacionMensajerosPage').then(m => ({ default: m.ConciliacionMensajerosPage })));
 const FacturacionPage = lazy(() => import('./conciliacion/FacturacionPage').then(m => ({ default: m.FacturacionPage })));
 const CuentasPagarPage = lazy(() => import('./conciliacion/CuentasPagarPage').then(m => ({ default: m.CuentasPagarPage })));
 const CuentasCobrarPage = lazy(() => import('./conciliacion/CuentasCobrarPage').then(m => ({ default: m.CuentasCobrarPage })));
@@ -26,6 +27,8 @@ const MetodosPagoPage = lazy(() => import('./gestion/MetodosPagoPage').then(m =>
 const RazonCambioPage = lazy(() => import('./gestion/RazonCambioPage').then(m => ({ default: m.RazonCambioPage })));
 const LogsAuditoriaPage = lazy(() => import('./gestion/LogsAuditoriaPage').then(m => ({ default: m.LogsAuditoriaPage })));
 const DocumentosImportacionPage = lazy(() => import('./gestion/DocumentosImportacionPage').then(m => ({ default: m.DocumentosImportacionPage })));
+const ComisionMandaoPage = lazy(() => import('./gestion/ComisionMandaoPage').then(m => ({ default: m.ComisionMandaoPage })));
+const ReglasPage = lazy(() => import('./gestion/ReglasPage').then(m => ({ default: m.ReglasPage })));
 
 interface ModuleRouterProps {
   activeTab: string;
@@ -56,8 +59,9 @@ function renderModule(activeTab: string) {
       return <DisponibilidadRevisionPage />;
     case 'conciliacion':
     case 'conciliacion-negocio':
+      return <ConciliacionNegociosPage />;
     case 'conciliacion-mensajero':
-      return <ConciliacionPage />;
+      return <ConciliacionMensajerosPage />;
     case 'facturacion-negocio':
     case 'facturacion-mensajero':
       return <FacturacionPage />;
@@ -87,6 +91,13 @@ function renderModule(activeTab: string) {
       return <MetodosPagoPage type="ordenes" />;
     case 'razon-cambio':
       return <RazonCambioPage />;
+    case 'comision-mandao':
+      return <ComisionMandaoPage />;
+    case 'reglas':
+    case 'reglas-negocios':
+      return <ReglasPage actor="negocios" />;
+    case 'reglas-mensajeros':
+      return <ReglasPage actor="mensajeros" />;
     case 'config-logs':
       return <LogsAuditoriaPage />;
     case 'documentos-importacion':

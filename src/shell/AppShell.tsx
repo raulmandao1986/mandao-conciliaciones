@@ -1,14 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  LayoutDashboard, 
-  Send, 
-  GitMerge, 
-  FileText, 
-  CreditCard, 
-  Receipt, 
-  CalendarClock, 
-  Building2, 
-  Users,
+import {
   ChevronRight,
   LogOut,
   ExternalLink,
@@ -17,104 +8,19 @@ import {
   X,
   Settings,
   Loader2,
-  MapPin,
-  DollarSign,
   Shield,
   Info,
   CheckCircle2,
   XCircle,
   AlertTriangle,
-  RefreshCw,
-  FileSpreadsheet
+  RefreshCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { useAuth, UserRole } from '../lib/auth';
+import { useAuth } from '../lib/auth';
 import { cn } from '../lib/utils';
 import { Button } from '../design-system/primitives/Button';
 import { SlideOver } from '../design-system/primitives/SlideOver';
-
-interface NavItem {
-  id: string;
-  label: string;
-  icon: React.ElementType;
-  subItems?: { id: string; label: string }[];
-}
-
-interface NavSection {
-  title: string;
-  items: NavItem[];
-}
-
-const NAV_SECTIONS: NavSection[] = [
-  {
-    title: 'General',
-    items: [
-      { id: 'dashboard', label: 'Dashboard General', icon: LayoutDashboard },
-      { 
-        id: 'dispatcher', 
-        label: 'Dispatcher', 
-        icon: Send,
-        subItems: [
-          { id: 'dispatcher-verificacion', label: 'Verificación' },
-          { id: 'dispatcher-revision', label: 'Revisión' },
-        ]
-      },
-      { 
-        id: 'disponibilidad', 
-        label: 'Disponibilidad', 
-        icon: CalendarClock,
-        subItems: [
-          { id: 'disponibilidad-verificacion', label: 'Verificación' },
-          { id: 'disponibilidad-revision', label: 'Revisión' },
-        ]
-      },
-    ]
-  },
-  {
-    title: 'Módulo Negocios',
-    items: [
-      { id: 'dashboard-negocio', label: 'Dashboard', icon: LayoutDashboard },
-      { id: 'conciliacion-negocio', label: 'Conciliación', icon: GitMerge },
-      { id: 'facturacion-negocio', label: 'Facturación', icon: FileText },
-      { id: 'cuentas-pagar-negocio', label: 'Cuentas por Pagar', icon: CreditCard },
-      { id: 'cuentas-cobrar-negocio', label: 'Cuentas por Cobrar', icon: Receipt },
-      { id: 'planificacion-pagos-negocio', label: 'Planificación Pagos', icon: CalendarClock },
-      { id: 'gestion-negocios', label: 'Gestión de Negocios', icon: Building2 },
-    ]
-  },
-  {
-    title: 'Módulo Mensajeros',
-    items: [
-      { id: 'dashboard-mensajero', label: 'Dashboard', icon: LayoutDashboard },
-      { id: 'conciliacion-mensajero', label: 'Conciliación', icon: GitMerge },
-      { id: 'facturacion-mensajero', label: 'Facturación', icon: FileText },
-      { id: 'cuentas-pagar-mensajero', label: 'Cuentas por Pagar', icon: CreditCard },
-      { id: 'cuentas-cobrar-mensajero', label: 'Cuentas por Cobrar', icon: Receipt },
-      { id: 'planificacion-pagos-mensajero', label: 'Planificación Pagos', icon: CalendarClock },
-      { id: 'gestion-mensajeros', label: 'Gestión de Mensajeros', icon: Users },
-    ]
-  },
-  {
-    title: 'Configuración',
-    items: [
-      { id: 'roles-usuarios', label: 'Roles y Usuarios', icon: Settings },
-      { id: 'areas', label: 'Áreas', icon: MapPin },
-      { 
-        id: 'metodos-pago', 
-        label: 'Métodos de Pago', 
-        icon: CreditCard,
-        subItems: [
-          { id: 'metodos-pago-negocios', label: 'Negocios' },
-          { id: 'metodos-pago-mensajeros', label: 'Mensajeros' },
-          { id: 'metodos-pago-ordenes', label: 'Órdenes' },
-        ]
-      },
-      { id: 'razon-cambio', label: 'Razón de Cambio', icon: DollarSign },
-      { id: 'documentos-importacion', label: 'Data', icon: FileSpreadsheet },
-      { id: 'config-logs', label: 'Log', icon: FileText },
-    ]
-  }
-];
+import { NAV_SECTIONS } from '../lib/moduleCatalog';
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, isLoading: isAuthLoading, logout, reloadPermissions } = useAuth();
@@ -141,26 +47,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const hasPermission = (itemId: string) => {
     if (!user) return false;
-    if (user.role === 'super_admin') {
-      return true;
+    // El menú se decide por el Rol de Acceso asignado al usuario
+    // (Configuración → Roles y Usuarios → pestaña "Roles"), tabla
+    // access_roles.module_keys — 100% editable desde la UI, sin nada
+    // hardcodeado aquí. Esto NO afecta la seguridad real: lo que un
+    // usuario puede ejecutar o modificar lo sigue decidiendo
+    // exclusivamente user.role (profiles.role) vía RLS en Supabase.
+    if (user.accessModules) {
+      return user.accessModules.includes(itemId);
     }
-    if (itemId === 'areas' || itemId === 'metodos-pago' || itemId === 'metodos-pago-negocios' || itemId === 'metodos-pago-mensajeros' || itemId === 'metodos-pago-ordenes' || itemId === 'razon-cambio' || itemId === 'config-logs') {
-      // Catálogos de gestión — fuera del alcance de esta migración por
-      // ahora; visibles para supervisor mientras se construye esa fase.
-      const allowed = user.role === 'supervisor';
-      return allowed;
-    }
-    if (itemId === 'dispatcher-verificacion' || itemId === 'dispatcher-revision' || itemId === 'disponibilidad-verificacion' || itemId === 'disponibilidad-revision') {
-      // En alcance: visibles para los 4 roles. Lo que cada rol puede
-      // EJECUTAR dentro de la página (verificar/importar) se controla
-      // con ROLE_CAN_VERIFY/ROLE_CAN_IMPORT + las políticas RLS de
-      // Supabase, no ocultando el ítem del menú.
-      const allowed = true;
-      return allowed;
-    }
-    // Cualquier otro ítem (Negocios, Mensajeros, roles-usuarios, etc.):
-    // fuera del alcance de esta migración, visible solo para supervisor.
-    return user.role === 'supervisor';
+    // Fallback de compatibilidad: no debería ocurrir tras la migración
+    // 2026-09-24 (todo profile queda con un Rol de Acceso asignado), pero
+    // por si acaso alguno quedara en NULL, no lo deja sin ver nada.
+    return user.role === 'super_admin' || user.role === 'supervisor';
   };
 
   const toggleMenu = (id: string) => {

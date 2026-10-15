@@ -34,6 +34,7 @@ import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
 import { BulkImportModal } from './components/BulkImportModal';
+import { toLocalISODate } from '../../lib/formatters';
 
 const BANCOS = ['BANMET', 'BPA', 'BANDEC'];
 const FALLBACK_METODOS_PAGO = ['Transferencia', 'Transferencia-Exterior', 'Transferencia-Especial', 'Transferencia-Efectivo', 'Transferencia-Saldo'];
@@ -300,7 +301,7 @@ export function GestionNegociosPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `listado_negocios_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `listado_negocios_${toLocalISODate()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);

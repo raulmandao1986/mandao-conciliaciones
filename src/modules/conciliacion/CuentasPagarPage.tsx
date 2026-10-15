@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../../lib/utils';
+import { toLocalISODate } from '../../lib/formatters';
 
 interface PayoutRecord {
   id: string;
@@ -118,7 +119,7 @@ export function CuentasPagarPage() {
 
   // Form payment details
   const [paymentReference, setPaymentReference] = useState('');
-  const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split('T')[0]);
+  const [paymentDate, setPaymentDate] = useState(toLocalISODate());
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
