@@ -394,9 +394,31 @@ create index idx_messengers_name_trgm on public.messengers using gin (name gin_t
 -- RazonCambioPage.tsx.bak) — se mantienen los mismos campos y la misma
 -- lógica de negocio, solo cambia el nombre de columna a snake_case.
 
+-- 12b. PAYMENT_GROUPS (2026-10-27). Grupos con que se arman el PDF y los
+-- resúmenes de la conciliación (Efectivo, Pago en Línea, Pago en Línea
+-- Exterior; configurable en Configuración -> Tipología de Pago).
+create table public.payment_groups (
+  group_id uuid primary key default gen_random_uuid(),
+  name text not null unique,
+  sort_order int not null default 0,
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+insert into public.payment_groups (name, sort_order) values
+  ('Efectivo', 1),
+  ('Pago en Línea', 2),
+  ('Pago en Línea Exterior', 3)
+on conflict (name) do nothing;
+
 -- 13. PAYMENT_METHODS (= 'MetodosPago'). Un solo catálogo compartido
 -- por Negocios/Mensajeros/Órdenes, filtrado por los 3 booleanos
 -- 'applies_to_*' — igual que hacía MetodosPagoPage con su prop `type`.
+-- tipologia/currency/group_id (2026-10-27): clasificación de las órdenes
+-- en la conciliación — 'cobrar' (Cuenta por Cobrar, hoy solo Efectivo) o
+-- 'pagar'; moneda CUP/USD (USD = parte "Exterior" de los negocios con vía
+-- Transferencia-Exterior) y grupo del PDF.
 create table public.payment_methods (
   payment_method_id uuid primary key default gen_random_uuid(),
   name text not null,
@@ -405,6 +427,9 @@ create table public.payment_methods (
   applies_to_messengers boolean not null default true,
   applies_to_orders boolean not null default true,
   active boolean not null default true,
+  tipologia text not null default 'pagar' check (tipologia in ('cobrar', 'pagar')),
+  currency text not null default 'CUP' check (currency in ('CUP', 'USD')),
+  group_id uuid references public.payment_groups(group_id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -539,13 +564,13 @@ insert into public.access_roles (name, description, base_role, is_system, module
     'dashboard','dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision',
     'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cuentas-pagar-negocio','cuentas-cobrar-negocio','planificacion-pagos-negocio','gestion-negocios',
     'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cuentas-pagar-mensajero','cuentas-cobrar-mensajero','planificacion-pagos-mensajero','gestion-mensajeros',
-    'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','razon-cambio','comision-mandao','documentos-importacion','config-logs'
+    'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','tipologia-cobrar','tipologia-pagar','grupos-pago','razon-cambio','comision-mandao','documentos-importacion','config-logs'
   ]),
   ('Supervisor', 'Acceso total a todos los módulos del sistema.', 'supervisor', true, array[
     'dashboard','dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision',
     'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cuentas-pagar-negocio','cuentas-cobrar-negocio','planificacion-pagos-negocio','gestion-negocios',
     'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cuentas-pagar-mensajero','cuentas-cobrar-mensajero','planificacion-pagos-mensajero','gestion-mensajeros',
-    'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','razon-cambio','comision-mandao','documentos-importacion','config-logs'
+    'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','tipologia-cobrar','tipologia-pagar','grupos-pago','razon-cambio','comision-mandao','documentos-importacion','config-logs'
   ]),
   ('Operador', 'Puede ejecutar Verificación en Dispatcher y Disponibilidad. Sin acceso a Gestión ni Configuración.', 'operador', true, array[
     'dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision'
@@ -737,6 +762,7 @@ create table public.conciliaciones_businesses (
   pdf_drive_url text,
   comision_pct numeric(5,2),     -- % de comisión usado (2026-10-15, migración 2026-10-15)
   tasa_cambio numeric(18,8),     -- USD por 1 CUP usada en filas Exterior (2026-10-15)
+  desglose jsonb,                -- desglose por grupo de pago (2026-10-27)
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -790,6 +816,7 @@ create table public.conciliaciones_messengers (
   pdf_drive_file_id text,   -- PDF subido a Google Drive (2026-10-07)
   pdf_drive_url text,
   comision_pct numeric(5,2),     -- % de comisión usado (2026-10-15, migración 2026-10-15)
+  desglose jsonb,                -- desglose por grupo de pago (2026-10-27)
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -813,6 +840,7 @@ alter table public.availability_incidents enable row level security;
 alter table public.messengers enable row level security;
 alter table public.profiles enable row level security;
 alter table public.payment_methods enable row level security;
+alter table public.payment_groups enable row level security;
 alter table public.exchange_rates enable row level security;
 alter table public.businesses enable row level security;
 alter table public.import_sources enable row level security;
@@ -852,6 +880,7 @@ create policy "manage_profiles_super_admin" on public.profiles
   for update using (public.current_user_role() = 'super_admin')
   with check (public.current_user_role() = 'super_admin');
 create policy "read_all_authenticated" on public.payment_methods for select using (public.is_active_user());
+create policy "read_all_authenticated" on public.payment_groups for select using (public.is_active_user());
 create policy "read_all_authenticated" on public.exchange_rates for select using (public.is_active_user());
 create policy "read_all_authenticated" on public.businesses for select using (public.is_active_user());
 create policy "read_all_authenticated" on public.import_sources for select using (public.is_active_user());
@@ -919,6 +948,9 @@ create policy "manage_messengers" on public.messengers
 -- Métodos de Pago, Razón de Cambio: gestión (CRUD) solo Super Admin,
 -- mismo criterio que Áreas/Mensajeros (ROLE_CAN_MANAGE_CATALOGS en auth.tsx)
 create policy "manage_payment_methods" on public.payment_methods
+  for all using (public.current_user_role() = 'super_admin')
+  with check (public.current_user_role() = 'super_admin');
+create policy "manage_payment_groups" on public.payment_groups
   for all using (public.current_user_role() = 'super_admin')
   with check (public.current_user_role() = 'super_admin');
 create policy "manage_exchange_rates" on public.exchange_rates

@@ -15,6 +15,7 @@ import {
   Percent,
   FileSpreadsheet,
   ListChecks,
+  Layers,
 } from 'lucide-react';
 
 export interface NavItem {
@@ -96,6 +97,16 @@ export const NAV_SECTIONS: NavSection[] = [
           { id: 'metodos-pago-negocios', label: 'Negocios' },
           { id: 'metodos-pago-mensajeros', label: 'Mensajeros' },
           { id: 'metodos-pago-ordenes', label: 'Órdenes' },
+        ]
+      },
+      {
+        id: 'tipologia-pago',
+        label: 'Tipología de Pago',
+        icon: Layers,
+        subItems: [
+          { id: 'tipologia-cobrar', label: 'Cuentas por Cobrar' },
+          { id: 'tipologia-pagar', label: 'Cuentas por Pagar' },
+          { id: 'grupos-pago', label: 'Grupos de Pago' },
         ]
       },
       { id: 'razon-cambio', label: 'Razón de Cambio', icon: DollarSign },

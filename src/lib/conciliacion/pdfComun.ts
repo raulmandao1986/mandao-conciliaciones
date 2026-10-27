@@ -1,19 +1,18 @@
 import { formatDate } from '../formatters';
-import type { PaymentBucket } from './paymentBuckets';
+import { supabase } from '../supabase';
+import { fetchAllRows } from './fetchAllRows';
+import { normalizeEntityName } from './paymentBuckets';
+import {
+  loadCatalogoPagos, clasificarPago, grupoDe, claveLinea, TIPOLOGIA_LABEL, type LineaGrupo,
+} from './catalogoPagos';
 import logoUrl from '../../assets/brand/mandao-logo.jpg';
 
 // Piezas compartidas por los PDF "Reporte de conciliación" de Negocios y de
-// Mensajeros (mismo diseño, entregado por el usuario 2026-10-15).
-
-export const BUCKETS: PaymentBucket[] = ['efectivo', 'transfermovil', 'saldomandao', 'tarjeta'];
+// Mensajeros (mismo diseño, entregado por el usuario 2026-10-15). Desde el
+// 2026-10-27 las columnas son los Grupos de pago del catálogo (Configuración
+// -> Tipología de Pago) guardados en el desglose de cada conciliación.
 
 // Etiquetas sin la palabra "Mandao" (pedido del usuario 2026-10-15).
-export const TIPO: Record<PaymentBucket, string> = {
-  efectivo: 'Efectivo',
-  transfermovil: 'Transfermóvil',
-  saldomandao: 'Saldo',
-  tarjeta: 'Tarjeta',
-};
 export const sinMandao = (t: string) => t.replace(/\s*\bmandao\b\s*/gi, ' ').replace(/\s+/g, ' ').trim();
 
 export const num = (v: number) =>
@@ -68,11 +67,59 @@ export function drawPie(doc: any, fechaConciliacion: string, area: string) {
   doc.setTextColor(...NEGRO);
 }
 
-// Detalle por orden: Mandao se queda con el % (comisión) del importe y el
-// negocio/mensajero con el resto — en Efectivo lo cobra Mandao (CxC), en
-// los demás métodos lo paga (CxP); el reparto es el mismo.
-export interface LineaPdf { fecha: string; orderId: string; bucket: PaymentBucket; paymentType: string; importe: number; beneficio: number; comision: number }
+// Una orden del PDF: `key` es la línea del desglose (grupo + tipología +
+// moneda del método) a la que pertenece.
+export interface OrdenPdf { fecha: string; orderId: string; key: string; paymentType: string; montoCup: number }
 
+// Órdenes de cada conciliación leídas de `dispatcher`: misma entidad (Store
+// o Driver), Área y rango, y solo las que caen en una línea del desglose de
+// esa conciliación (así la fila "Transferencia" de un negocio Exterior no
+// incluye las órdenes en USD). Una consulta por Área + rango.
+export async function loadOrdenesConciliacion<R extends { id: string; areaId: string | null; fechaInicial: string; fechaFinal: string; desglose: LineaGrupo[] }>(
+  records: R[],
+  opts: { campoEntidad: 'store' | 'driver'; campoMonto: 'product_amount' | 'delivery_charge'; nombre: (r: R) => string }
+): Promise<Map<string, OrdenPdf[]>> {
+  const result = new Map<string, OrdenPdf[]>();
+  if (records.length === 0) return result;
+  const catalogo = await loadCatalogoPagos();
+  const grupos = new Map<string, R[]>();
+  records.forEach(r => {
+    const k = `${r.areaId || ''}|${r.fechaInicial}|${r.fechaFinal}`;
+    grupos.set(k, [...(grupos.get(k) || []), r]);
+  });
+  for (const recs of grupos.values()) {
+    const { areaId, fechaInicial, fechaFinal } = recs[0];
+    const rows = await fetchAllRows<any>((from, to) => {
+      let q = supabase.from('dispatcher')
+        .select(`order_pk, order_id, delivery_date, ${opts.campoEntidad}, payment_type, ${opts.campoMonto}`)
+        .gte('delivery_date', fechaInicial)
+        .lte('delivery_date', fechaFinal);
+      if (areaId) q = q.eq('area_id', areaId);
+      return q.order('order_pk').range(from, to);
+    });
+    recs.forEach(rec => {
+      const nombre = normalizeEntityName(opts.nombre(rec));
+      const claves = new Set(rec.desglose.map(l => l.key));
+      const ordenes: OrdenPdf[] = [];
+      rows.forEach((r: any) => {
+        if (normalizeEntityName(r[opts.campoEntidad]) !== nombre) return;
+        const metodo = clasificarPago(catalogo, r.payment_type || '');
+        if (!metodo) return;
+        const key = claveLinea(grupoDe(catalogo, metodo).id, metodo.tipologia, metodo.moneda);
+        // Sin desglose guardado (conciliación previa a 2026-10-27): todas.
+        if (claves.size > 0 && !claves.has(key)) return;
+        ordenes.push({ fecha: r.delivery_date, orderId: String(r.order_id || ''), key, paymentType: String(r.payment_type || ''), montoCup: Number(r[opts.campoMonto]) || 0 });
+      });
+      ordenes.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.orderId.localeCompare(b.orderId));
+      result.set(rec.id, ordenes);
+    });
+  }
+  return result;
+}
+
+// Detalle por orden: Mandao se queda con el % (comisión) del importe y el
+// negocio/mensajero con el resto — en lo Por Cobrar (Efectivo) lo cobra
+// Mandao (CxC), en lo Por Pagar lo paga (CxP); el reparto es el mismo.
 export function repartir<T extends { montoCup: number }>(ordenes: T[], pct: number, factor = 1) {
   return ordenes.map(o => {
     const importe = o.montoCup * factor;
@@ -81,9 +128,23 @@ export function repartir<T extends { montoCup: number }>(ordenes: T[], pct: numb
   });
 }
 
-export function resumenPorBucket(lineas: { bucket: PaymentBucket; importe: number; beneficio: number; comision: number }[]) {
-  const porBucket = (b: PaymentBucket) => {
-    const ls = lineas.filter(l => l.bucket === b);
+// Columnas del Resumen Órdenes = líneas del desglose de la conciliación.
+// Si un grupo tiene líneas Por Cobrar y Por Pagar, se distinguen en el título.
+export function columnasResumen(desglose: LineaGrupo[]) {
+  const visibles = desglose.filter(l => l.ordenes > 0);
+  const repetidos = new Set(visibles.map(l => l.grupoId).filter((g, i, a) => a.indexOf(g) !== i));
+  return visibles.map(l => ({
+    key: l.key,
+    titulo: sinMandao(repetidos.has(l.grupoId) ? `${l.grupo} ${TIPOLOGIA_LABEL[l.tipologia]}` : l.grupo),
+  }));
+}
+
+export function resumenPorLinea(
+  lineas: { key: string; importe: number; beneficio: number; comision: number }[],
+  claves: string[]
+) {
+  const porClave = (k: string) => {
+    const ls = lineas.filter(l => l.key === k);
     return {
       ordenes: ls.length,
       ventas: ls.reduce((s, l) => s + l.importe, 0),
@@ -91,12 +152,12 @@ export function resumenPorBucket(lineas: { bucket: PaymentBucket; importe: numbe
       comision: ls.reduce((s, l) => s + l.comision, 0),
     };
   };
-  const res = Object.fromEntries(BUCKETS.map(b => [b, porBucket(b)])) as Record<PaymentBucket, ReturnType<typeof porBucket>>;
-  const tot = BUCKETS.reduce((t, b) => ({
-    ordenes: t.ordenes + res[b].ordenes,
-    ventas: t.ventas + res[b].ventas,
-    beneficio: t.beneficio + res[b].beneficio,
-    comision: t.comision + res[b].comision,
-  }), { ordenes: 0, ventas: 0, beneficio: 0, comision: 0 });
+  const res = Object.fromEntries(claves.map(k => [k, porClave(k)])) as Record<string, ReturnType<typeof porClave>>;
+  const tot = {
+    ordenes: lineas.length,
+    ventas: lineas.reduce((s, l) => s + l.importe, 0),
+    beneficio: lineas.reduce((s, l) => s + l.beneficio, 0),
+    comision: lineas.reduce((s, l) => s + l.comision, 0),
+  };
   return { res, tot };
 }

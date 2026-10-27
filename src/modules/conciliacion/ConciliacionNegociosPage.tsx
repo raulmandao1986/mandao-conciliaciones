@@ -7,9 +7,14 @@ import { Button } from '../../design-system/primitives/Button';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
 import { Pagination, usePagination } from '../../design-system/patterns/Pagination';
 import {
-  PaymentBucket, BucketBreakdown, computeBucketBreakdown, normalizeEntityName, normalizeCompact,
-  EstadoConciliacion, ESTADO_CONCILIACION_OPTIONS, BUCKET_LABELS,
+  normalizeEntityName, normalizeCompact,
+  EstadoConciliacion, ESTADO_CONCILIACION_OPTIONS,
 } from '../../lib/conciliacion/paymentBuckets';
+import {
+  loadCatalogoPagos, computeDesglose, convertirLineas, totales, columnasLegado, parseDesglose,
+  type CatalogoPagos, type LineaGrupo,
+} from '../../lib/conciliacion/catalogoPagos';
+import { GruposDesglose } from './GruposDesglose';
 import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
 import { EstadoConciliacionBadge } from '../../lib/conciliacion/EstadoBadge';
 import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn } from '../../lib/conciliacion/drivePdf';
@@ -23,20 +28,24 @@ import {
 
 // =====================================================================
 // Conciliación de Negocios — ver Instrucciones Conciliaciones Mandao.md
-// sección 6. Fuente de datos: tabla `dispatcher`. El motor de baldes
-// CxC/CxP (efectivo/transfermóvil/saldo mandao/tarjeta) es compartido
-// con Mensajeros — ver lib/conciliacion/paymentBuckets.ts.
+// sección 6. Fuente de datos: tabla `dispatcher`. Las órdenes se agrupan
+// según el catálogo de Métodos de Pago (Tipología Por Cobrar / Por Pagar,
+// Moneda y Grupo — lib/conciliacion/catalogoPagos.ts, 2026-10-27),
+// compartido con Mensajeros.
 //
 // CÁLCULO POR MÉTODO DE PAGO DEL NEGOCIO (confirmado 2026-09-30): el
 // dispatcher siempre registra los montos en CUP. El método de pago
 // registrado del negocio (`businesses.payment_method`, catálogo
 // Configuración → Métodos de Pago → Negocios) decide cuántas filas de
 // conciliación se generan y si alguna se expresa en USD:
-//   'Transferencia'          -> 1 fila (CUP):    0.8*(TM+SM+US) - CxC
-//   'Transferencia-Efectivo' -> 2 filas (CUP):   "Transferencia"=0.8*TM
-//                                                "Efectivo"=0.8*(SM+US)-CxC
-//   'Transferencia-Exterior' -> 2 filas:         "Transferencia"(CUP)=0.8*TM-CxC
-//                                                "Exterior"(USD, vía tasa activa)=0.8*(SM+US)
+//   'Transferencia'          -> 1 fila (CUP) con todos los grupos
+//   'Transferencia-Efectivo' -> 2 filas (CUP): "Transferencia" = Por Pagar de
+//                               métodos CUP; "Efectivo" = Por Cobrar + Por
+//                               Pagar de métodos USD
+//   'Transferencia-Exterior' -> 2 filas: "Transferencia" (CUP) = métodos CUP;
+//                               "Exterior" (USD, vía tasa activa) = métodos USD
+// (con la configuración inicial del catálogo da los mismos números que la
+// regla fija anterior: TM = Pago en Línea, SM/Tarjeta = Pago en Línea Exterior).
 // Un método no reconocido (vacío o distinto de estos 3) usa la fórmula
 // de 'Transferencia' como respaldo, marcado con una advertencia visible.
 // =====================================================================
@@ -69,7 +78,7 @@ interface Settlement {
   registrado: boolean;
   yaConciliado: boolean;
   ordenesEnJuego: number; // cantidad de órdenes que participan en ESTA fila
-  buckets: Record<PaymentBucket, BucketBreakdown>; // baldes de ESTA fila (los que no aplican quedan en 0)
+  grupos: LineaGrupo[]; // desglose por Grupo de pago de ESTA fila (en la moneda de la fila)
   sinClasificar: { ordenes: number; saldo: number; tipos: Set<string> };
   totalCxC: number;
   totalCxP: number;
@@ -93,6 +102,8 @@ interface ConciliacionRecord {
   // se subió: sin carpeta configurada, sin sesión de Google o error).
   pdfDriveUrl: string | null;
   areaId: string | null;
+  // Desglose por Grupo de pago guardado al conciliar (migración 2026-10-27).
+  desglose: LineaGrupo[];
   // % de comisión y tasa (USD por 1 CUP, solo filas Exterior) con que se
   // calculó; null en conciliaciones anteriores a la migración 2026-10-15.
   comisionPct: number | null;
@@ -139,18 +150,9 @@ function describeSubtipo(subtipo: string): string {
   }
 }
 
-function emptyBucketSet(): Record<PaymentBucket, BucketBreakdown> {
-  return {
-    efectivo: { ordenes: 0, saldo: 0, monto: 0 },
-    transfermovil: { ordenes: 0, saldo: 0, monto: 0 },
-    saldomandao: { ordenes: 0, saldo: 0, monto: 0 },
-    tarjeta: { ordenes: 0, saldo: 0, monto: 0 },
-  };
-}
-
 // Arma 1 o 2 "Settlements" para un negocio a partir de TODAS sus órdenes
-// del rango, según su Método de Pago registrado — ver comentario de
-// cabecera del archivo para la fórmula exacta de cada método.
+// del rango, según su Método de Pago registrado y el catálogo de pagos —
+// ver comentario de cabecera del archivo.
 function buildSettlements(params: {
   negocioKey: string;
   negocioNombre: string;
@@ -161,10 +163,16 @@ function buildSettlements(params: {
   ordenes: OrderRow[];
   commissionPercent: number;
   exchangeRateCup: number | null;
+  catalogo: CatalogoPagos;
 }): Array<Omit<Settlement, 'yaConciliado'>> {
-  const full = computeBucketBreakdown(params.ordenes, params.commissionPercent);
+  const full = computeDesglose(
+    params.ordenes.map(o => ({ paymentType: o.paymentType, monto: o.productAmount })),
+    params.commissionPercent,
+    params.catalogo
+  );
   const metodo = normalizeCompact(params.metodoPagoNegocio);
   const metodoReconocido = ['transferencia', 'transferenciaefectivo', 'transferenciaexterior'].includes(metodo);
+  const sinNada = { ordenes: 0, saldo: 0, tipos: new Set<string>() };
 
   const base = {
     sinTasa: false,
@@ -175,94 +183,64 @@ function buildSettlements(params: {
     businessId: params.businessId,
     metodoPagoNegocio: params.metodoPagoNegocio,
     metodoReconocido,
+    registrado: !!params.businessId,
+  };
+  // Fila con las líneas dadas (vacía = no se genera). Las órdenes sin
+  // clasificar se informan en la primera fila del negocio.
+  const settlements: Array<Omit<Settlement, 'yaConciliado'>> = [];
+  const fila = (subtipo: string, moneda: 'CUP' | 'USD', lineas: LineaGrupo[], extra: Partial<Settlement> = {}) => {
+    const t = totales(lineas);
+    if (t.ordenes === 0) return;
+    settlements.push({
+      ...base, ...extra,
+      key: `${params.negocioKey}|${subtipo}`, subtipo, moneda,
+      ordenesEnJuego: t.ordenes,
+      grupos: lineas,
+      sinClasificar: settlements.length === 0 ? full.sinClasificar : sinNada,
+      totalCxC: t.totalCxC, totalCxP: t.totalCxP,
+    });
   };
 
-  // 'Transferencia-Efectivo': dos filas, ambas en CUP.
   if (metodo === 'transferenciaefectivo') {
-    const settlements: Array<Omit<Settlement, 'yaConciliado'>> = [];
-    if (full.buckets.transfermovil.ordenes > 0) {
-      const buckets = emptyBucketSet();
-      buckets.transfermovil = full.buckets.transfermovil;
-      settlements.push({
-        ...base, key: `${params.negocioKey}|Transferencia`, subtipo: 'Transferencia', moneda: 'CUP',
-        registrado: !!params.businessId, ordenesEnJuego: full.buckets.transfermovil.ordenes,
-        buckets, sinClasificar: { ordenes: 0, saldo: 0, tipos: new Set() },
-        totalCxC: 0, totalCxP: buckets.transfermovil.monto,
-      });
-    }
-    const ordenesEfectivoRail = full.buckets.saldomandao.ordenes + full.buckets.tarjeta.ordenes + full.buckets.efectivo.ordenes;
-    if (ordenesEfectivoRail > 0) {
-      const buckets = emptyBucketSet();
-      buckets.saldomandao = full.buckets.saldomandao;
-      buckets.tarjeta = full.buckets.tarjeta;
-      buckets.efectivo = full.buckets.efectivo;
-      settlements.push({
-        ...base, key: `${params.negocioKey}|Efectivo`, subtipo: 'Efectivo', moneda: 'CUP',
-        registrado: !!params.businessId, ordenesEnJuego: ordenesEfectivoRail,
-        buckets, sinClasificar: full.sinClasificar,
-        totalCxC: buckets.efectivo.monto, totalCxP: buckets.saldomandao.monto + buckets.tarjeta.monto,
-      });
-    }
+    // Dos filas en CUP: "Transferencia" = Por Pagar de métodos CUP;
+    // "Efectivo" = Por Cobrar + Por Pagar de métodos USD.
+    fila('Transferencia', 'CUP', full.lineas.filter(l => l.tipologia === 'pagar' && l.moneda === 'CUP'));
+    fila('Efectivo', 'CUP', full.lineas.filter(l => l.tipologia === 'cobrar' || l.moneda === 'USD'));
     return settlements;
   }
 
-  // 'Transferencia-Exterior': dos filas — Transferencia en CUP, Exterior en USD.
   if (metodo === 'transferenciaexterior') {
-    const settlements: Array<Omit<Settlement, 'yaConciliado'>> = [];
-    const ordenesTransferenciaRail = full.buckets.transfermovil.ordenes + full.buckets.efectivo.ordenes;
-    if (ordenesTransferenciaRail > 0) {
-      const buckets = emptyBucketSet();
-      buckets.transfermovil = full.buckets.transfermovil;
-      buckets.efectivo = full.buckets.efectivo;
-      settlements.push({
-        ...base, key: `${params.negocioKey}|Transferencia`, subtipo: 'Transferencia', moneda: 'CUP',
-        registrado: !!params.businessId, ordenesEnJuego: ordenesTransferenciaRail,
-        buckets, sinClasificar: { ordenes: 0, saldo: 0, tipos: new Set() },
-        totalCxC: buckets.efectivo.monto, totalCxP: buckets.transfermovil.monto,
-      });
-    }
-    const ordenesExteriorRail = full.buckets.saldomandao.ordenes + full.buckets.tarjeta.ordenes;
-    if (ordenesExteriorRail > 0) {
-      // La tasa activa está en USD por 1 CUP (ej. 0.002): USD = CUP × tasa
-      // (convención confirmada por el usuario 2026-10-01; antes era CUP ÷ tasa
-      // con la tasa en CUP por USD). Sin tasa activa no se convierte: la fila
-      // queda en CUP y bloqueada (antes usaba tasa 1 y mostraba CUP como USD).
-      const sinTasa = !(params.exchangeRateCup && params.exchangeRateCup > 0);
-      const rate = sinTasa ? 1 : params.exchangeRateCup!;
-      const buckets = emptyBucketSet();
-      // Saldo y CxP se convierten juntos: toda la fila queda en USD (antes el
-      // saldo seguía en CUP pero se mostraba con la etiqueta USD).
-      buckets.saldomandao = { ...full.buckets.saldomandao, saldo: full.buckets.saldomandao.saldo * rate, monto: full.buckets.saldomandao.monto * rate };
-      buckets.tarjeta = { ...full.buckets.tarjeta, saldo: full.buckets.tarjeta.saldo * rate, monto: full.buckets.tarjeta.monto * rate };
-      settlements.push({
-        ...base, sinTasa, key: `${params.negocioKey}|Exterior`, subtipo: 'Exterior', moneda: sinTasa ? 'CUP' : 'USD',
-        registrado: !!params.businessId, ordenesEnJuego: ordenesExteriorRail,
-        buckets, sinClasificar: full.sinClasificar,
-        totalCxC: 0, totalCxP: buckets.saldomandao.monto + buckets.tarjeta.monto,
-      });
-    }
+    fila('Transferencia', 'CUP', full.lineas.filter(l => l.moneda === 'CUP'));
+    // La tasa activa está en USD por 1 CUP (ej. 0.002): USD = CUP × tasa,
+    // aplicada a saldo y CxC/CxP. Sin tasa activa no se convierte: la fila
+    // queda en CUP y bloqueada para conciliar.
+    const sinTasa = !(params.exchangeRateCup && params.exchangeRateCup > 0);
+    const usd = full.lineas.filter(l => l.moneda === 'USD');
+    fila('Exterior', sinTasa ? 'CUP' : 'USD', sinTasa ? usd : convertirLineas(usd, params.exchangeRateCup!), { sinTasa });
     return settlements;
   }
 
-  // 'Transferencia' (o método no reconocido, como respaldo): una sola
-  // fila en CUP con los 4 baldes completos, igual que antes de esta
-  // corrección.
-  if (params.ordenes.length === 0) return [];
-  return [{
-    ...base, key: `${params.negocioKey}|Transferencia`, subtipo: 'Transferencia', moneda: 'CUP',
-    registrado: !!params.businessId, ordenesEnJuego: params.ordenes.length,
-    buckets: full.buckets, sinClasificar: full.sinClasificar,
-    totalCxC: full.totalCxC, totalCxP: full.totalCxP,
-  }];
+  // 'Transferencia' (o método no reconocido, como respaldo): una sola fila
+  // en CUP con todos los grupos.
+  fila('Transferencia', 'CUP', full.lineas);
+  if (settlements.length === 0 && full.sinClasificar.ordenes > 0) {
+    // Solo órdenes sin clasificar: se muestra la fila para que se vea el aviso.
+    settlements.push({
+      ...base, key: `${params.negocioKey}|Transferencia`, subtipo: 'Transferencia', moneda: 'CUP',
+      ordenesEnJuego: 0, grupos: [], sinClasificar: full.sinClasificar, totalCxC: 0, totalCxP: 0,
+    });
+  }
+  return settlements;
 }
 
 const HISTORY_SELECT_BASE = 'conciliacion_id, area_id, fecha, establecimiento, fecha_inicial, fecha_final, area, ordenes_efectivo, cxc_cu, ordenes_transfermovil, cxp_tm, ordenes_saldo_mandao, cxp_sm, ordenes_tarjeta, cxp_us, via_pago, moneda, responsable, conciliacion, estado, estado_pago, facturacion, descuento, nota, pagado, saldo, referencia, fecha_pago, prioridad';
-const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct, tasa_cambio`;
+const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct, tasa_cambio, desglose`;
 
 function mapHistoryRow(r: any): ConciliacionRecord {
   return {
     pdfDriveUrl: r.pdf_drive_url || null,
     areaId: r.area_id || null,
+    desglose: parseDesglose(r.desglose),
     comisionPct: r.comision_pct !== null && r.comision_pct !== undefined ? Number(r.comision_pct) : null,
     tasaCambio: r.tasa_cambio !== null && r.tasa_cambio !== undefined ? Number(r.tasa_cambio) : null,
     consecutivo: r.consecutivo || null,
@@ -428,7 +406,7 @@ export function ConciliacionNegociosPage() {
   const computeSettlements = async (step: StepUpdater = () => {}): Promise<Settlement[]> => {
     // Órdenes del rango (paginadas: sin esto Supabase corta en 1000) y
     // conciliaciones previas del mismo rango exacto, en paralelo.
-    const [data, existentes] = await Promise.all([
+    const [data, existentes, catalogo] = await Promise.all([
       trackStep(step, 'ordenes', fetchAllRows<any>((from, to) => {
         let q = supabase
           .from('dispatcher')
@@ -447,6 +425,8 @@ export function ConciliacionNegociosPage() {
           .order('conciliacion_id')
           .range(from, to)
       ), rows => (rows.length === 0 ? 'Ninguna registrada en este rango' : `${rows.length} ya registrada(s) en este rango`)),
+      // Catálogo de Métodos de Pago (Tipología, Moneda y Grupo).
+      loadCatalogoPagos(),
     ]);
 
     step('calculo', 'running');
@@ -488,6 +468,7 @@ export function ConciliacionNegociosPage() {
         ordenes: ordenesGrupo,
         commissionPercent,
         exchangeRateCup: exchangeRate,
+        catalogo,
       });
       for (const st of settlements) {
         const yaConciliado = !!matchBusiness && conciliados.has(`${matchBusiness.id}|${st.subtipo}`);
@@ -628,8 +609,8 @@ export function ConciliacionNegociosPage() {
     if (!resultados || mode !== 'masiva') return null;
     const b = new ResumenBuilder();
     resultados.forEach(s => {
-      // El saldo de las filas Exterior ya viene convertido a USD (buildSettlements).
-      b.addBuckets(s.buckets, s.moneda);
+      // Las filas Exterior ya traen sus líneas convertidas a USD (buildSettlements).
+      b.addLineas(s.grupos, s.moneda);
       b.addSinClasificar(s.sinClasificar.ordenes, s.sinClasificar.saldo);
     });
     return b.build();
@@ -680,14 +661,9 @@ export function ConciliacionNegociosPage() {
         fecha_final: fechaFin,
         area_id: s.areaId,
         area: s.areaNombre,
-        ordenes_efectivo: s.buckets.efectivo.ordenes,
-        cxc_cu: s.buckets.efectivo.monto,
-        ordenes_transfermovil: s.buckets.transfermovil.ordenes,
-        cxp_tm: s.buckets.transfermovil.monto,
-        ordenes_saldo_mandao: s.buckets.saldomandao.ordenes,
-        cxp_sm: s.buckets.saldomandao.monto,
-        ordenes_tarjeta: s.buckets.tarjeta.ordenes,
-        cxp_us: s.buckets.tarjeta.monto,
+        // Totales en las columnas existentes + desglose por grupo (2026-10-27).
+        ...columnasLegado(s.grupos),
+        desglose: s.grupos,
         via_pago: s.subtipo,
         moneda: s.moneda,
         responsable,
@@ -702,7 +678,7 @@ export function ConciliacionNegociosPage() {
       if (isMissingPdfColumn(error)) {
         // Migración 2026-10-15 sin correr: se registra sin % ni tasa (el PDF
         // usa entonces los valores vigentes en Configuración).
-        const rowsBase = rows.map(({ comision_pct, tasa_cambio, ...rest }) => rest);
+        const rowsBase = rows.map(({ comision_pct, tasa_cambio, desglose, ...rest }) => rest);
         ({ data: inserted, error } = await supabase.from('conciliaciones_businesses').insert(rowsBase).select(HISTORY_SELECT_BASE));
       }
       if (error) throw error;
@@ -1154,15 +1130,19 @@ export function ConciliacionNegociosPage() {
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
                               <FieldMini label="Responsable" value={r.responsable} />
                               <FieldMini label="Fecha de Conciliación" value={formatDate(r.fecha)} />
-                              <FieldMini label="Órdenes Efectivo / CxC CU" value={`${r.ordenesEfectivo} / ${formatCurrency(r.cxcCU, r.moneda)}`} />
-                              <FieldMini label="Órdenes Transfermóvil / CxP TM" value={`${r.ordenesTransfermovil} / ${formatCurrency(r.cxpTM, r.moneda)}`} />
-                              <FieldMini label="Órdenes Saldo Mandao / CxP SM" value={`${r.ordenesSaldoMandao} / ${formatCurrency(r.cxpSM, r.moneda)}`} />
-                              <FieldMini label="Órdenes Tarjeta / CxP US" value={`${r.ordenesTarjeta} / ${formatCurrency(r.cxpUS, r.moneda)}`} />
+                              <FieldMini label="Por Cobrar (CxC)" value={`${r.ordenesEfectivo} órdenes / ${formatCurrency(r.cxcCU, r.moneda)}`} />
+                              <FieldMini label="Por Pagar (CxP)" value={`${r.ordenesTransfermovil + r.ordenesSaldoMandao + r.ordenesTarjeta} órdenes / ${formatCurrency(r.cxpTM + r.cxpSM + r.cxpUS, r.moneda)}`} />
                               <FieldMini label="Facturación" value={r.facturacion || 'Pendiente'} />
                               <FieldMini label="Descuento" value={r.descuento !== null ? formatCurrency(r.descuento, r.moneda) : '—'} />
                               <FieldMini label="Nota" value={r.nota || '—'} />
                               <FieldMini label="Pagado" value={r.pagado !== null ? formatCurrency(r.pagado, r.moneda) : '—'} />
                               <FieldMini label="Saldo" value={r.saldo !== null ? formatCurrency(r.saldo, r.moneda) : '—'} />
+                              {r.desglose.length > 0 && (
+                                <div className="col-span-2 md:col-span-4">
+                                  <span className="block text-[10px] font-bold uppercase text-slate-400 mb-1">Desglose por grupo de pago</span>
+                                  <GruposDesglose lineas={r.desglose} moneda={r.moneda} className="max-w-2xl" />
+                                </div>
+                              )}
                               <FieldMini label="Referencia" value={r.referencia || '—'} />
                               <FieldMini label="Fecha de Pago" value={r.fechaPago ? formatDate(r.fechaPago) : '—'} />
                               <FieldMini label="Prioridad" value={r.prioridad || '—'} />
@@ -1196,25 +1176,6 @@ function FieldMini({ label, value }: { label: string; value: string }) {
 // Cash) NO es lo mismo que el riel de liquidación "Efectivo" del negocio
 // (Método de Pago "Transferencia-Efectivo" — cómo Mandao le entrega el
 // dinero: en persona/en mano, o por transferencia). Para no repetir la
-// palabra "Efectivo" con dos significados distintos dentro de la misma
-// tarjeta, el balde de órdenes se rotula aquí de forma más explícita
-// (confirmado con el usuario 2026-09-30).
-function BucketRow({ bucket, bucketKey, moneda }: { bucket: BucketBreakdown; bucketKey: PaymentBucket; moneda: 'CUP' | 'USD' }) {
-  const isEfectivo = bucketKey === 'efectivo';
-  const label = isEfectivo ? 'Efectivo (Cash del cliente)' : BUCKET_LABELS[bucketKey];
-  if (bucket.ordenes === 0) return null;
-  return (
-    <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-slate-100 last:border-0">
-      <div className="flex flex-col">
-        <span className="text-xs font-bold text-[var(--color-text)]">{label}</span>
-        <span className="text-[10px] text-slate-400">{bucket.ordenes} órdenes · Saldo {formatCurrency(bucket.saldo, isEfectivo ? 'CUP' : moneda)}</span>
-      </div>
-      <span className={cn('font-mono font-black text-sm tabular-nums', isEfectivo ? 'text-[var(--color-danger)]' : 'text-[var(--color-success)]')}>
-        {isEfectivo ? 'CxC ' : 'CxP '}{formatCurrency(bucket.monto, moneda)}
-      </span>
-    </div>
-  );
-}
 
 // Liquidación en 0 (CxP = CxC): no se paga ni se cobra y la base de datos
 // no le asigna consecutivo (migración 2026-10-07c).
@@ -1266,17 +1227,12 @@ function NegocioResultCard({
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-[var(--color-border)] overflow-hidden">
-            <BucketRow bucket={calculo.buckets.efectivo} bucketKey="efectivo" moneda={calculo.moneda} />
-            <BucketRow bucket={calculo.buckets.transfermovil} bucketKey="transfermovil" moneda={calculo.moneda} />
-            <BucketRow bucket={calculo.buckets.saldomandao} bucketKey="saldomandao" moneda={calculo.moneda} />
-            <BucketRow bucket={calculo.buckets.tarjeta} bucketKey="tarjeta" moneda={calculo.moneda} />
-          </div>
+          <GruposDesglose lineas={calculo.grupos} moneda={calculo.moneda} />
 
           {calculo.sinClasificar.ordenes > 0 && (
             <div className="flex items-start gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 p-3 rounded-md">
               <AlertTriangle size={14} className="shrink-0 mt-0.5" />
-              <span>{calculo.sinClasificar.ordenes} órdenes con método de pago no reconocido ({Array.from(calculo.sinClasificar.tipos).join(', ')}) no se incluyeron en ningún balde.</span>
+              <span>{calculo.sinClasificar.ordenes} órdenes con método de pago no reconocido ({Array.from(calculo.sinClasificar.tipos).join(', ')}) no están en el catálogo de Métodos de Pago (Órdenes) y no se incluyeron.</span>
             </div>
           )}
 
@@ -1440,12 +1396,7 @@ function MasivaResultTable({
                   {isExpanded && (
                     <tr className="bg-slate-50/60">
                       <td colSpan={8} className="p-4">
-                        <div className="rounded-xl border border-[var(--color-border)] overflow-hidden max-w-xl">
-                          <BucketRow bucket={r.buckets.efectivo} bucketKey="efectivo" moneda={r.moneda} />
-                          <BucketRow bucket={r.buckets.transfermovil} bucketKey="transfermovil" moneda={r.moneda} />
-                          <BucketRow bucket={r.buckets.saldomandao} bucketKey="saldomandao" moneda={r.moneda} />
-                          <BucketRow bucket={r.buckets.tarjeta} bucketKey="tarjeta" moneda={r.moneda} />
-                        </div>
+                        <GruposDesglose lineas={r.grupos} moneda={r.moneda} className="max-w-2xl" />
                         {r.sinClasificar.ordenes > 0 && (
                           <p className="text-[11px] text-amber-700 mt-2">{r.sinClasificar.ordenes} órdenes con método de pago no reconocido: {Array.from(r.sinClasificar.tipos).join(', ')}</p>
                         )}

@@ -10,13 +10,15 @@ import { Button } from '../../design-system/primitives/Button';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
 import { Pagination, usePagination } from '../../design-system/patterns/Pagination';
 import {
-  PaymentBucket, BucketBreakdown, computeBucketBreakdown, normalizeEntityName,
+  normalizeEntityName,
   EstadoConciliacion, ESTADO_CONCILIACION_OPTIONS,
 } from '../../lib/conciliacion/paymentBuckets';
 import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
 import { EstadoConciliacionBadge } from '../../lib/conciliacion/EstadoBadge';
 import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn } from '../../lib/conciliacion/drivePdf';
 import { ResumenMetodosPago, ResumenBuilder } from './ResumenMetodosPago';
+import { loadCatalogoPagos, computeDesglose, columnasLegado, parseDesglose, type LineaGrupo } from '../../lib/conciliacion/catalogoPagos';
+import { GruposDesglose } from './GruposDesglose';
 import { buildPdfMensajero, loadOrdenesMensajero } from '../../lib/conciliacion/pdfConciliacionMensajero';
 import { ProcesoProgreso, useProcessSteps, trackStep, type StepStatus } from './ProcesoProgreso';
 import {
@@ -67,7 +69,7 @@ interface MensajeroCalculo {
   registrado: boolean;
   yaConciliado: boolean;
   ordenes: OrderRow[];
-  buckets: Record<PaymentBucket, BucketBreakdown>;
+  grupos: LineaGrupo[]; // desglose por Grupo de pago (Configuración -> Tipología de Pago)
   sinClasificar: { ordenes: number; saldo: number; tipos: Set<string> };
   totalCxC: number;
   totalCxPBaldes: number;
@@ -96,6 +98,8 @@ interface ConciliacionRecord {
   // PDF guardado en Google Drive al registrar la conciliación (null si no se subió).
   pdfDriveUrl: string | null;
   areaId: string | null;
+  // Desglose por Grupo de pago guardado al conciliar (migración 2026-10-27).
+  desglose: LineaGrupo[];
   // % de comisión con que se calculó (null antes de la migración 2026-10-15).
   comisionPct: number | null;
   fecha: string;
@@ -126,12 +130,13 @@ interface ConciliacionRecord {
 }
 
 const HISTORY_SELECT_BASE = 'conciliacion_id, area_id, fecha, mensajero, fecha_inicial, fecha_final, area, ordenes_efectivo, cxc_cu, ordenes_transfermovil, cxp_tm, ordenes_saldo_mandao, cxp_sm, ordenes_tarjeta, cxp_us, tipo_mochila, alquiler_mochila, disponibilidades, total_ordenes, total_por_cobrar, total_por_pagar, saldo_cup, via_pago, responsable, conciliacion, estado, facturacion';
-const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct`;
+const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct, desglose`;
 
 function mapHistoryRow(r: any): ConciliacionRecord {
   return {
     pdfDriveUrl: r.pdf_drive_url || null,
     areaId: r.area_id || null,
+    desglose: parseDesglose(r.desglose),
     comisionPct: r.comision_pct !== null && r.comision_pct !== undefined ? Number(r.comision_pct) : null,
     consecutivo: r.consecutivo || null,
     id: r.conciliacion_id,
@@ -301,7 +306,7 @@ export function ConciliacionMensajerosPage() {
   // Masiva, el selector de pendientes y el cálculo Individual.
   const computeCalculos = async (step: StepUpdater = () => {}): Promise<MensajeroCalculo[]> => {
     // Las 3 consultas del rango se hacen una sola vez y en paralelo.
-    const [data, existentes, disps] = await Promise.all([
+    const [data, existentes, disps, catalogo] = await Promise.all([
       trackStep(step, 'ordenes', fetchAllRows<any>((from, to) => {
         let q = supabase
           .from('dispatcher')
@@ -331,6 +336,8 @@ export function ConciliacionMensajerosPage() {
         if (selectedAreaId) q = q.eq('area_id', selectedAreaId);
         return q.order('availability_id').range(from, to);
       }), rows => `${rows.length} registro(s) en el rango`),
+      // Catálogo de Métodos de Pago (Tipología, Moneda y Grupo).
+      loadCatalogoPagos(),
     ]);
 
     step('calculo', 'running');
@@ -372,11 +379,12 @@ export function ConciliacionMensajerosPage() {
       const disponibilidadesBruto = driverName ? dispsPorMensajero.get(`${normalizeEntityName(driverName)}|${areaId}`) || 0 : 0;
       const disponibilidades = Math.round(disponibilidadesBruto * (1 - availabilityDiscount / 100) * 100) / 100;
 
-      // El motor de baldes es el mismo de Negocios; el "saldo" de cada
-      // orden de mensajero es su Delivery Charge.
-      const calc = computeBucketBreakdown(
-        ordenesGrupo.map(o => ({ paymentType: o.paymentType, productAmount: o.deliveryCharge })),
-        commissionPercent
+      // Mismo motor de Negocios (catálogo de pagos); el "saldo" de cada
+      // orden de mensajero es su Delivery Charge. Mensajeros: todo en CUP.
+      const calc = computeDesglose(
+        ordenesGrupo.map(o => ({ paymentType: o.paymentType, monto: o.deliveryCharge })),
+        commissionPercent,
+        catalogo
       );
       // Tarifa fija por tipo de mochila del mensajero (sección 7.4). Un
       // mensajero sin registrar en 'messengers' todavía no tiene tipo de
@@ -398,7 +406,7 @@ export function ConciliacionMensajerosPage() {
         registrado: !!matchMessenger,
         yaConciliado,
         ordenes: ordenesGrupo,
-        buckets: calc.buckets,
+        grupos: calc.lineas,
         sinClasificar: calc.sinClasificar,
         totalCxC: calc.totalCxC,
         totalCxPBaldes: calc.totalCxP,
@@ -532,7 +540,7 @@ export function ConciliacionMensajerosPage() {
     if (!resultados || mode !== 'masiva') return null;
     const b = new ResumenBuilder();
     resultados.forEach(c => {
-      b.addBuckets(c.buckets, 'CUP');
+      b.addLineas(c.grupos, 'CUP');
       b.addSinClasificar(c.sinClasificar.ordenes, c.sinClasificar.saldo);
     });
     return {
@@ -587,14 +595,9 @@ export function ConciliacionMensajerosPage() {
         fecha_final: fechaFin,
         area_id: c.areaId,
         area: c.areaNombre,
-        ordenes_efectivo: c.buckets.efectivo.ordenes,
-        cxc_cu: c.buckets.efectivo.monto,
-        ordenes_transfermovil: c.buckets.transfermovil.ordenes,
-        cxp_tm: c.buckets.transfermovil.monto,
-        ordenes_saldo_mandao: c.buckets.saldomandao.ordenes,
-        cxp_sm: c.buckets.saldomandao.monto,
-        ordenes_tarjeta: c.buckets.tarjeta.ordenes,
-        cxp_us: c.buckets.tarjeta.monto,
+        // Totales en las columnas existentes + desglose por grupo (2026-10-27).
+        ...columnasLegado(c.grupos),
+        desglose: c.grupos,
         tipo_mochila: c.tipoMochila,
         alquiler_mochila: c.alquilerMochila,
         disponibilidades: c.disponibilidades,
@@ -614,7 +617,7 @@ export function ConciliacionMensajerosPage() {
       if (isMissingPdfColumn(error)) {
         // Migración 2026-10-15 sin correr: se registra sin el % (el PDF usa
         // entonces el vigente en Configuración).
-        const rowsBase = rows.map(({ comision_pct, ...rest }) => rest);
+        const rowsBase = rows.map(({ comision_pct, desglose, ...rest }) => rest);
         ({ data: inserted, error } = await supabase.from('conciliaciones_messengers').insert(rowsBase).select(HISTORY_SELECT_BASE));
       }
       if (error) throw error;
@@ -1013,14 +1016,18 @@ export function ConciliacionMensajerosPage() {
                               <FieldMini label="Fecha de Conciliación" value={formatDate(r.fecha)} />
                               <FieldMini label="Tipo de Mochila" value={r.tipoMochila} />
                               <FieldMini label="Total Órdenes" value={String(r.totalOrdenes)} />
-                              <FieldMini label="Órdenes Efectivo / CxC CU" value={`${r.ordenesEfectivo} / ${formatCUP(r.cxcCU)}`} />
-                              <FieldMini label="Órdenes Transfermóvil / CxP TM" value={`${r.ordenesTransfermovil} / ${formatCUP(r.cxpTM)}`} />
-                              <FieldMini label="Órdenes Saldo Mandao / CxP SM" value={`${r.ordenesSaldoMandao} / ${formatCUP(r.cxpSM)}`} />
-                              <FieldMini label="Órdenes Tarjeta / CxP US" value={`${r.ordenesTarjeta} / ${formatCUP(r.cxpUS)}`} />
+                              <FieldMini label="Por Cobrar (CxC)" value={`${r.ordenesEfectivo} órdenes / ${formatCUP(r.cxcCU)}`} />
+                              <FieldMini label="Por Pagar (CxP)" value={`${r.ordenesTransfermovil + r.ordenesSaldoMandao + r.ordenesTarjeta} órdenes / ${formatCUP(r.cxpTM + r.cxpSM + r.cxpUS)}`} />
                               <FieldMini label="Disponibilidades" value={formatCUP(r.disponibilidades)} />
                               <FieldMini label="Alquiler Mochila" value={formatCUP(r.alquilerMochila)} />
                               <FieldMini label="Saldo CUP" value={r.saldoCup !== null ? formatCUP(r.saldoCup) : '—'} />
                               <FieldMini label="Facturación" value={r.facturacion || 'Pendiente'} />
+                              {r.desglose.length > 0 && (
+                                <div className="col-span-2 md:col-span-4">
+                                  <span className="block text-[10px] font-bold uppercase text-slate-400 mb-1">Desglose por grupo de pago</span>
+                                  <GruposDesglose lineas={r.desglose} moneda="CUP" className="max-w-2xl" />
+                                </div>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -1043,21 +1050,6 @@ function FieldMini({ label, value }: { label: string; value: string }) {
     <div className="flex flex-col gap-0.5">
       <span className="text-[9px] font-black uppercase tracking-wider text-slate-400">{label}</span>
       <span className="font-semibold text-slate-700">{value}</span>
-    </div>
-  );
-}
-
-function BucketRow({ bucket, label }: { bucket: BucketBreakdown; label: string }) {
-  const isEfectivo = label === 'Efectivo';
-  return (
-    <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-slate-100 last:border-0">
-      <div className="flex flex-col">
-        <span className="text-xs font-bold text-[var(--color-text)]">{label}</span>
-        <span className="text-[10px] text-slate-400">{bucket.ordenes} órdenes · Saldo {formatCUP(bucket.saldo)}</span>
-      </div>
-      <span className={cn('font-mono font-black text-sm tabular-nums', isEfectivo ? 'text-[var(--color-danger)]' : 'text-[var(--color-success)]')}>
-        {isEfectivo ? 'CxC ' : 'CxP '}{formatCUP(bucket.monto)}
-      </span>
     </div>
   );
 }
@@ -1093,12 +1085,7 @@ function MensajeroResultCard({
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-[var(--color-border)] overflow-hidden">
-            <BucketRow bucket={calculo.buckets.efectivo} label="Efectivo" />
-            <BucketRow bucket={calculo.buckets.transfermovil} label="Transfermóvil" />
-            <BucketRow bucket={calculo.buckets.saldomandao} label="Saldo Mandao" />
-            <BucketRow bucket={calculo.buckets.tarjeta} label="Tarjeta" />
-          </div>
+          <GruposDesglose lineas={calculo.grupos} moneda="CUP" />
 
           <div className="grid grid-cols-2 gap-3 text-xs">
             <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
@@ -1272,12 +1259,7 @@ function MasivaResultTable({
                   {isExpanded && (
                     <tr className="bg-slate-50/60">
                       <td colSpan={7} className="p-4">
-                        <div className="rounded-xl border border-[var(--color-border)] overflow-hidden max-w-xl">
-                          <BucketRow bucket={r.buckets.efectivo} label="Efectivo" />
-                          <BucketRow bucket={r.buckets.transfermovil} label="Transfermóvil" />
-                          <BucketRow bucket={r.buckets.saldomandao} label="Saldo Mandao" />
-                          <BucketRow bucket={r.buckets.tarjeta} label="Tarjeta" />
-                        </div>
+                        <GruposDesglose lineas={r.grupos} moneda="CUP" className="max-w-2xl" />
                         <p className="text-[11px] text-slate-500 mt-2">Disponibilidades: {formatCUP(r.disponibilidades)} · Alquiler Mochila ({r.tipoMochila}): {formatCUP(r.alquilerMochila)}</p>
                         {r.sinClasificar.ordenes > 0 && (
                           <p className="text-[11px] text-amber-700 mt-1">{r.sinClasificar.ordenes} órdenes con método de pago no reconocido: {Array.from(r.sinClasificar.tipos).join(', ')}</p>

@@ -1,12 +1,12 @@
 import React from 'react';
 import { BarChart3 } from 'lucide-react';
 import { formatCurrency } from '../../lib/formatters';
-import type { PaymentBucket, BucketBreakdown } from '../../lib/conciliacion/paymentBuckets';
+import { TIPOLOGIA_LABEL, type LineaGrupo } from '../../lib/conciliacion/catalogoPagos';
 
 // Resumen del período en la Conciliación Masiva (pedido por el usuario
 // 2026-10-07): órdenes, ventas, beneficio (negocio/mensajero) y comisión
-// Mandao por método de pago de las órdenes y por moneda. Es solo
-// informativo: no cambia ningún cálculo de la conciliación.
+// Mandao por Grupo de pago (Configuración -> Tipología de Pago, 2026-10-27)
+// y por moneda. Es solo informativo: no cambia ningún cálculo.
 
 export interface ResumenFila {
   key: string;
@@ -16,38 +16,32 @@ export interface ResumenFila {
   ventas: number;
   beneficio: number | null;  // null = no aplica (órdenes sin clasificar)
   comision: number | null;
+  orden?: number;
 }
 
-const BUCKET_ORDER: PaymentBucket[] = ['efectivo', 'transfermovil', 'saldomandao', 'tarjeta'];
-const BUCKET_LABEL: Record<PaymentBucket, string> = {
-  efectivo: 'Efectivo',
-  transfermovil: 'Transfermóvil',
-  saldomandao: 'Saldo Mandao',
-  tarjeta: 'Tarjeta (exterior)',
-};
-
-// Acumulador por método+moneda. `factorVentas` convierte el saldo (siempre
-// en CUP) a la moneda de la fila; el monto CxC/CxP ya viene en esa moneda.
-// Efectivo: la comisión Mandao es lo que se cobra (CxC) y el beneficio es el
-// resto. Resto de métodos: el beneficio es lo que se paga (CxP) y la
-// comisión es la diferencia.
+// Acumulador por grupo + tipología + moneda de la fila. Las líneas ya traen
+// saldo y CxC/CxP en la moneda de su fila. Por Cobrar: la comisión es lo que
+// Mandao cobra (CxC) y el beneficio el resto. Por Pagar: el beneficio es lo
+// que se paga (CxP) y la comisión la diferencia.
 export class ResumenBuilder {
   private filas = new Map<string, ResumenFila>();
 
-  addBuckets(buckets: Record<PaymentBucket, BucketBreakdown>, moneda: 'CUP' | 'USD', factorVentas = 1) {
-    BUCKET_ORDER.forEach(b => {
-      const bk = buckets[b];
-      if (!bk || bk.ordenes === 0) return;
-      const ventas = bk.saldo * factorVentas;
-      const beneficio = b === 'efectivo' ? ventas - bk.monto : bk.monto;
-      const comision = ventas - beneficio;
-      this.add({ key: `${b}|${moneda}`, metodo: BUCKET_LABEL[b], moneda, ordenes: bk.ordenes, ventas, beneficio, comision });
+  addLineas(lineas: LineaGrupo[], moneda: 'CUP' | 'USD') {
+    lineas.forEach(l => {
+      if (l.ordenes === 0) return;
+      const ventas = l.saldo;
+      const beneficio = l.tipologia === 'cobrar' ? ventas - l.monto : l.monto;
+      this.add({
+        key: `${l.grupoId}|${l.tipologia}|${moneda}`,
+        metodo: `${l.grupo} · ${TIPOLOGIA_LABEL[l.tipologia]}`,
+        moneda, ordenes: l.ordenes, ventas, beneficio, comision: ventas - beneficio, orden: l.orden,
+      });
     });
   }
 
   addSinClasificar(ordenes: number, saldoCup: number) {
     if (ordenes === 0) return;
-    this.add({ key: 'sinclasificar|CUP', metodo: 'Sin clasificar', moneda: 'CUP', ordenes, ventas: saldoCup, beneficio: null, comision: null });
+    this.add({ key: 'sinclasificar|CUP', metodo: 'Sin clasificar', moneda: 'CUP', ordenes, ventas: saldoCup, beneficio: null, comision: null, orden: 9999 });
   }
 
   private add(f: ResumenFila) {
@@ -60,12 +54,8 @@ export class ResumenBuilder {
   }
 
   build(): ResumenFila[] {
-    const rank = (k: string) => {
-      const [b, m] = k.split('|');
-      const i = BUCKET_ORDER.indexOf(b as PaymentBucket);
-      return (i === -1 ? 99 : i) * 2 + (m === 'USD' ? 1 : 0);
-    };
-    return Array.from(this.filas.values()).sort((a, b) => rank(a.key) - rank(b.key));
+    return Array.from(this.filas.values()).sort((a, b) =>
+      (a.orden ?? 0) - (b.orden ?? 0) || a.metodo.localeCompare(b.metodo) || a.moneda.localeCompare(b.moneda));
   }
 }
 
@@ -109,7 +99,7 @@ export function ResumenMetodosPago({
         <table className="w-full text-left border-collapse text-sm">
           <thead className="bg-slate-50 border-b border-[var(--color-border)]">
             <tr className="text-[10px] font-black text-[var(--color-text-faint)] uppercase tracking-wider">
-              <th className="p-3">Método de pago</th>
+              <th className="p-3">Grupo de pago</th>
               <th className="p-3">Moneda</th>
               <th className="p-3 text-right">Órdenes</th>
               <th className="p-3 text-right">{ventasLabel}</th>

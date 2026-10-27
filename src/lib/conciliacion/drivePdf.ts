@@ -77,5 +77,5 @@ export function describeDriveResult(r: DrivePdfResult): string {
 // las columnas pdf_drive_url / consecutivo / comision_pct / tasa_cambio no existen: el histórico y el
 // registro reintentan sin ellas en vez de fallar.
 export function isMissingPdfColumn(error: { code?: string; message?: string } | null): boolean {
-  return !!error && (error.code === '42703' || /pdf_drive_url|consecutivo|comision_pct|tasa_cambio/.test(error.message || ''));
+  return !!error && (error.code === '42703' || /pdf_drive_url|consecutivo|comision_pct|tasa_cambio|desglose/.test(error.message || ''));
 }

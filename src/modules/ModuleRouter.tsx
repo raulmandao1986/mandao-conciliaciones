@@ -28,6 +28,8 @@ const RazonCambioPage = lazy(() => import('./gestion/RazonCambioPage').then(m =>
 const LogsAuditoriaPage = lazy(() => import('./gestion/LogsAuditoriaPage').then(m => ({ default: m.LogsAuditoriaPage })));
 const DocumentosImportacionPage = lazy(() => import('./gestion/DocumentosImportacionPage').then(m => ({ default: m.DocumentosImportacionPage })));
 const ComisionMandaoPage = lazy(() => import('./gestion/ComisionMandaoPage').then(m => ({ default: m.ComisionMandaoPage })));
+const TipologiaPagoPage = lazy(() => import('./gestion/TipologiaPagoPage').then(m => ({ default: m.TipologiaPagoPage })));
+const GruposPagoPage = lazy(() => import('./gestion/TipologiaPagoPage').then(m => ({ default: m.GruposPagoPage })));
 const ReglasPage = lazy(() => import('./gestion/ReglasPage').then(m => ({ default: m.ReglasPage })));
 
 interface ModuleRouterProps {
@@ -87,6 +89,13 @@ function renderModule(activeTab: string) {
       return <MetodosPagoPage type="negocios" />;
     case 'metodos-pago-mensajeros':
       return <MetodosPagoPage type="mensajeros" />;
+    case 'tipologia-pago':
+    case 'tipologia-cobrar':
+      return <TipologiaPagoPage tipologia="cobrar" />;
+    case 'tipologia-pagar':
+      return <TipologiaPagoPage tipologia="pagar" />;
+    case 'grupos-pago':
+      return <GruposPagoPage />;
     case 'metodos-pago-ordenes':
       return <MetodosPagoPage type="ordenes" />;
     case 'razon-cambio':
