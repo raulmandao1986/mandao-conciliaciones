@@ -16,14 +16,15 @@ import {
 } from '../../lib/conciliacion/catalogoPagos';
 import { GruposDesglose } from './GruposDesglose';
 import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
-import { EstadoConciliacionBadge } from '../../lib/conciliacion/EstadoBadge';
+import { EstadoConciliacionControl, ReconciliacionesLog } from '../../lib/conciliacion/EstadoBadge';
+import { puedeReconciliar, parseEstado, cambiarEstadoConciliacion } from '../../lib/conciliacion/estados';
 import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn } from '../../lib/conciliacion/drivePdf';
 import { ResumenMetodosPago, ResumenBuilder } from './ResumenMetodosPago';
 import { buildPdfNegocio, loadOrdenesNegocio } from '../../lib/conciliacion/pdfConciliacionNegocio';
 import { ProcesoProgreso, useProcessSteps, trackStep, type StepStatus } from './ProcesoProgreso';
 import {
   GitMerge, Loader2, Search, Calculator, AlertTriangle, CheckCircle2, XCircle,
-  ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud
+  ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud, RotateCcw
 } from 'lucide-react';
 
 // =====================================================================
@@ -77,6 +78,8 @@ interface Settlement {
   moneda: 'CUP' | 'USD';
   registrado: boolean;
   yaConciliado: boolean;
+  // Conciliación ya registrada para esta fila y rango (null = pendiente).
+  previa: PreviaConciliacion | null;
   ordenesEnJuego: number; // cantidad de órdenes que participan en ESTA fila
   grupos: LineaGrupo[]; // desglose por Grupo de pago de ESTA fila (en la moneda de la fila)
   sinClasificar: { ordenes: number; saldo: number; tipos: Set<string> };
@@ -87,10 +90,15 @@ interface Settlement {
   sinTasa: boolean;
 }
 
+interface PreviaConciliacion { id: string; estado: EstadoConciliacion; consecutivo: string | null }
+// Ya conciliada pero todavía en Nuevo/Enviado: se puede reconciliar.
+const esReconciliable = (s: { yaConciliado: boolean; previa: PreviaConciliacion | null }) =>
+  s.yaConciliado && !!s.previa && puedeReconciliar(s.previa.estado);
+
 interface AreaOption { id: string; nombre: string; }
 interface BusinessOption { id: string; nombre: string; areaId: string; metodoPago: string; }
 // Negocio con liquidaciones pendientes en el Área + rango elegidos (selector Individual).
-interface PendienteOption { key: string; nombre: string; areaNombre: string; registrado: boolean; }
+interface PendienteOption { key: string; nombre: string; areaNombre: string; registrado: boolean; reconciliar: boolean; }
 type StepUpdater = (key: string, status: StepStatus, detail?: string) => void;
 
 interface ConciliacionRecord {
@@ -126,6 +134,7 @@ interface ConciliacionRecord {
   responsable: string;
   conciliacion: string;
   estado: EstadoConciliacion;
+  reconciliaciones: number; // veces que se reconcilió (migración 2026-10-27b)
   estadoPago: string | null;
   facturacion: string | null;
   descuento: number | null;
@@ -164,7 +173,7 @@ function buildSettlements(params: {
   commissionPercent: number;
   exchangeRateCup: number | null;
   catalogo: CatalogoPagos;
-}): Array<Omit<Settlement, 'yaConciliado'>> {
+}): Array<Omit<Settlement, 'yaConciliado' | 'previa'>> {
   const full = computeDesglose(
     params.ordenes.map(o => ({ paymentType: o.paymentType, monto: o.productAmount })),
     params.commissionPercent,
@@ -187,7 +196,7 @@ function buildSettlements(params: {
   };
   // Fila con las líneas dadas (vacía = no se genera). Las órdenes sin
   // clasificar se informan en la primera fila del negocio.
-  const settlements: Array<Omit<Settlement, 'yaConciliado'>> = [];
+  const settlements: Array<Omit<Settlement, 'yaConciliado' | 'previa'>> = [];
   const fila = (subtipo: string, moneda: 'CUP' | 'USD', lineas: LineaGrupo[], extra: Partial<Settlement> = {}) => {
     const t = totales(lineas);
     if (t.ordenes === 0) return;
@@ -234,7 +243,7 @@ function buildSettlements(params: {
 }
 
 const HISTORY_SELECT_BASE = 'conciliacion_id, area_id, fecha, establecimiento, fecha_inicial, fecha_final, area, ordenes_efectivo, cxc_cu, ordenes_transfermovil, cxp_tm, ordenes_saldo_mandao, cxp_sm, ordenes_tarjeta, cxp_us, via_pago, moneda, responsable, conciliacion, estado, estado_pago, facturacion, descuento, nota, pagado, saldo, referencia, fecha_pago, prioridad';
-const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct, tasa_cambio, desglose`;
+const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct, tasa_cambio, desglose, reconciliaciones`;
 
 function mapHistoryRow(r: any): ConciliacionRecord {
   return {
@@ -262,7 +271,8 @@ function mapHistoryRow(r: any): ConciliacionRecord {
     moneda: (r.moneda || 'CUP') as 'CUP' | 'USD',
     responsable: r.responsable,
     conciliacion: r.conciliacion,
-    estado: r.estado || 'Nuevo',
+    estado: parseEstado(r.estado),
+    reconciliaciones: Number(r.reconciliaciones) || 0,
     estadoPago: r.estado_pago,
     facturacion: r.facturacion,
     descuento: r.descuento !== null ? Number(r.descuento) : null,
@@ -281,10 +291,10 @@ const pdfFileNameNegocio = (rec: ConciliacionRecord) =>
   `${rec.consecutivo ? `${rec.consecutivo}-` : ''}conciliacion-${rec.establecimiento.replace(/[^a-z0-9]/gi, '-')}-${rec.viaPago}-${rec.fechaInicial}_${rec.fechaFinal}.pdf`;
 
 // Histórico ordenado por consecutivo descendente (año y número, ej.
-// PN260012 antes que CN260011 antes que PN250099). Las conciliaciones sin
+// PN260012 antes que CNU260011 antes que PN250099; U = numeración en USD). Las conciliaciones sin
 // consecutivo (saldo 0) van al final, por fecha descendente.
 function compareConsecutivoDesc(a: { consecutivo: string | null; fecha: string }, b: { consecutivo: string | null; fecha: string }): number {
-  const num = (c: string | null) => (c ? Number(c.slice(2)) : -1); // AA + número
+  const num = (c: string | null) => (c ? Number(c.replace(/\D/g, '')) || 0 : -1); // dígitos: año + número
   const diff = num(b.consecutivo) - num(a.consecutivo);
   if (diff !== 0) return diff;
   if (a.consecutivo && b.consecutivo) return b.consecutivo.localeCompare(a.consecutivo);
@@ -419,7 +429,7 @@ export function ConciliacionNegociosPage() {
       trackStep(step, 'previas', fetchAllRows<any>((from, to) =>
         supabase
           .from('conciliaciones_businesses')
-          .select('conciliacion_id, business_id, via_pago')
+          .select('conciliacion_id, business_id, via_pago, estado, consecutivo')
           .eq('fecha_inicial', fechaInicio)
           .eq('fecha_final', fechaFin)
           .order('conciliacion_id')
@@ -431,7 +441,10 @@ export function ConciliacionNegociosPage() {
 
     step('calculo', 'running');
     // Duplicidad por business_id + rango + subtipo/via_pago (sección 6.4.3).
-    const conciliados = new Set<string>(existentes.map((r: any) => `${r.business_id}|${r.via_pago}`));
+    const previas = new Map<string, PreviaConciliacion>(existentes.map((r: any) => [
+      `${r.business_id}|${r.via_pago}`,
+      { id: r.conciliacion_id, estado: parseEstado(r.estado), consecutivo: r.consecutivo || null },
+    ]));
 
     const groups = new Map<string, OrderRow[]>();
     data.forEach((r: any) => {
@@ -471,8 +484,8 @@ export function ConciliacionNegociosPage() {
         catalogo,
       });
       for (const st of settlements) {
-        const yaConciliado = !!matchBusiness && conciliados.has(`${matchBusiness.id}|${st.subtipo}`);
-        allSettlements.push({ ...st, yaConciliado });
+        const previa = matchBusiness ? previas.get(`${matchBusiness.id}|${st.subtipo}`) || null : null;
+        allSettlements.push({ ...st, yaConciliado: !!previa, previa });
       }
     }
 
@@ -499,8 +512,10 @@ export function ConciliacionNegociosPage() {
         if (req !== pendientesReq.current) return;
         const porNegocio = new Map<string, PendienteOption>();
         all.forEach(st => {
-          if (st.yaConciliado || st.ordenesEnJuego === 0 || porNegocio.has(st.negocioKey)) return;
-          porNegocio.set(st.negocioKey, { key: st.negocioKey, nombre: st.negocioNombre, areaNombre: st.areaNombre, registrado: st.registrado });
+          if (st.ordenesEnJuego === 0 || (st.yaConciliado && !esReconciliable(st))) return;
+          const prev = porNegocio.get(st.negocioKey);
+          if (prev) { if (!st.yaConciliado) prev.reconciliar = false; return; }
+          porNegocio.set(st.negocioKey, { key: st.negocioKey, nombre: st.negocioNombre, areaNombre: st.areaNombre, registrado: st.registrado, reconciliar: st.yaConciliado });
         });
         const list = Array.from(porNegocio.values()).sort((a, b) => a.nombre.localeCompare(b.nombre) || a.areaNombre.localeCompare(b.areaNombre));
         setPendientes(list);
@@ -624,7 +639,7 @@ export function ConciliacionNegociosPage() {
   const elegiblesParaConciliar = useMemo(() => {
     if (!resultadosVisibles) return [];
     if (mode === 'individual') {
-      return resultadosVisibles.filter(r => r.registrado && !r.yaConciliado && !r.sinTasa && r.ordenesEnJuego > 0);
+      return resultadosVisibles.filter(r => r.registrado && (!r.yaConciliado || esReconciliable(r)) && !r.sinTasa && r.ordenesEnJuego > 0);
     }
     return resultadosVisibles.filter(r => selectedMasivaKeys[r.key] && r.registrado && !r.yaConciliado && !r.sinTasa && r.ordenesEnJuego > 0);
   }, [resultadosVisibles, mode, selectedMasivaKeys]);
@@ -653,7 +668,7 @@ export function ConciliacionNegociosPage() {
       const responsable = profileData?.full_name || userData?.user?.email || 'Usuario Mandao';
       const hoy = toLocalISODate();
 
-      const rows = elegiblesParaConciliar.map(s => ({
+      const fila = (s: Settlement) => ({
         fecha: hoy,
         business_id: s.businessId,
         establecimiento: s.negocioNombre,
@@ -672,20 +687,48 @@ export function ConciliacionNegociosPage() {
         estado: 'Nuevo',
         comision_pct: commissionPercent,
         tasa_cambio: s.moneda === 'USD' ? exchangeRate : null,
-      }));
+      });
+      const nuevos = elegiblesParaConciliar.filter(s => !s.yaConciliado);
+      const aReconciliar = elegiblesParaConciliar.filter(s => s.yaConciliado && s.previa);
+      const rows = nuevos.map(fila);
 
-      let { data: inserted, error } = await supabase.from('conciliaciones_businesses').insert(rows).select(HISTORY_SELECT);
-      if (isMissingPdfColumn(error)) {
-        // Migración 2026-10-15 sin correr: se registra sin % ni tasa (el PDF
-        // usa entonces los valores vigentes en Configuración).
-        const rowsBase = rows.map(({ comision_pct, tasa_cambio, desglose, ...rest }) => rest);
-        ({ data: inserted, error } = await supabase.from('conciliaciones_businesses').insert(rowsBase).select(HISTORY_SELECT_BASE));
+      let inserted: any[] = [];
+      if (rows.length > 0) {
+        let { data, error } = await supabase.from('conciliaciones_businesses').insert(rows).select(HISTORY_SELECT);
+        if (isMissingPdfColumn(error)) {
+          // Migración 2026-10-15 sin correr: se registra sin % ni tasa (el PDF
+          // usa entonces los valores vigentes en Configuración).
+          const rowsBase = rows.map(({ comision_pct, tasa_cambio, desglose, ...rest }) => rest);
+          ({ data, error } = await supabase.from('conciliaciones_businesses').insert(rowsBase).select(HISTORY_SELECT_BASE));
+        }
+        if (error) throw error;
+        inserted = data || [];
       }
-      if (error) throw error;
-      concSteps.update('registro', 'done', `${rows.length} conciliación(es) guardada(s)`);
+
+      // Reconciliación (2026-10-27b): se actualizan los montos de la fila ya
+      // registrada; la base mantiene el consecutivo, registra antes/después y
+      // rechaza el cambio si ya está Confirmada. Vuelve a Nuevo para reenviar
+      // el PDF corregido (el enlace al PDF anterior se descarta).
+      const actualizados: any[] = [];
+      for (const s of aReconciliar) {
+        const { fecha, business_id, establecimiento, fecha_inicial, fecha_final, area_id, area, conciliacion, ...cambios } = fila(s);
+        const { data, error } = await supabase
+          .from('conciliaciones_businesses')
+          .update({ ...cambios, estado: 'Nuevo', pdf_drive_file_id: null, pdf_drive_url: null, updated_at: new Date().toISOString() })
+          .eq('conciliacion_id', s.previa!.id)
+          .select(HISTORY_SELECT)
+          .single();
+        if (error) throw new Error(`${s.negocioNombre} (${s.subtipo}): ${error.message}`);
+        actualizados.push(data);
+      }
+      concSteps.update('registro', 'done', [
+        rows.length > 0 ? `${rows.length} conciliación(es) guardada(s)` : '',
+        actualizados.length > 0 ? `${actualizados.length} reconciliada(s)` : '',
+      ].filter(Boolean).join(' · '));
 
       await logAuditEvent('Conciliaciones', mode === 'individual' ? 'Conciliación Individual Registrada' : 'Conciliación Masiva Registrada', {
         cantidadFilas: rows.length,
+        reconciliadas: aReconciliar.map(s => `${s.negocioNombre} (${s.subtipo}) ${s.previa?.consecutivo || ''}`.trim()),
         rangoFechas: `${fechaInicio} - ${fechaFin}`,
         area: selectedAreaId ? areas.find(a => a.id === selectedAreaId)?.nombre : 'Todas',
       });
@@ -693,7 +736,7 @@ export function ConciliacionNegociosPage() {
       // PDF de cada conciliación -> carpeta de Google Drive (Configuración -> Data).
       // Un fallo aquí no deshace las conciliaciones: queda como advertencia.
       concSteps.update('drive', 'running', 'Cargando el detalle de órdenes…');
-      const registros = (inserted || []).map(mapHistoryRow);
+      const registros = [...inserted, ...actualizados].map(mapHistoryRow);
       const ordenesPorConciliacion = await loadOrdenesNegocio(registros);
       const drive = await subirPdfsConciliacion({
         records: registros,
@@ -716,7 +759,10 @@ export function ConciliacionNegociosPage() {
       const enCero = elegiblesParaConciliar.filter(e => esSaldoCero(e.totalCxP, e.totalCxC)).length;
       setConcResult({
         ok: true,
-        message: `Se registraron ${rows.length} conciliación(es) con éxito.`
+        message: [
+          rows.length > 0 ? `Se registraron ${rows.length} conciliación(es) con éxito.` : '',
+          actualizados.length > 0 ? `Se reconciliaron ${actualizados.length} conciliación(es): se mantuvo el consecutivo, quedaron en Nuevo y el cambio quedó registrado.` : '',
+        ].filter(Boolean).join('\n')
           + (enCero > 0 ? `\n${enCero} liquidación(es) en 0 (no se paga ni se cobra) quedaron registradas sin consecutivo.` : ''),
       });
     } catch (err: any) {
@@ -727,6 +773,27 @@ export function ConciliacionNegociosPage() {
       concSteps.finish(failed);
       setConciliando(false);
     }
+  };
+
+  const handleCambiarEstado = async (rec: ConciliacionRecord, nuevo: EstadoConciliacion) => {
+    try {
+      await cambiarEstadoConciliacion('conciliaciones_businesses', { id: rec.id, estado: rec.estado, nombre: rec.conciliacion, consecutivo: rec.consecutivo }, nuevo);
+      setHistory(prev => prev.map(h => (h.id === rec.id ? { ...h, estado: nuevo } : h)));
+    } catch (err: any) {
+      alert('No se pudo cambiar el estado: ' + (err?.message || err));
+    }
+  };
+
+  // Lleva la conciliación del histórico a la calculadora Individual (mismo
+  // negocio, Área y rango) para recalcularla y reconciliarla.
+  const handleReconciliarDesdeHistorico = (rec: ConciliacionRecord) => {
+    setMode('individual');
+    resetCalculo();
+    setSelectedAreaId(rec.areaId || '');
+    setFechaInicio(rec.fechaInicial);
+    setFechaFin(rec.fechaFinal);
+    setSelectedNegocioKey(`${normalizeEntityName(rec.establecimiento)}|${rec.areaId}`);
+    document.querySelector('main')?.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   // % y tasa vigentes: solo se usan para conciliaciones registradas antes de
@@ -883,11 +950,11 @@ export function ConciliacionNegociosPage() {
                       ? 'Elija un rango de fechas válido'
                       : pendientes.length === 0
                         ? 'Sin negocios pendientes en el rango'
-                        : `Seleccione… (${pendientes.length} pendientes)`}
+                        : `Seleccione… (${pendientes.filter(x => !x.reconciliar).length} pendientes${pendientes.some(x => x.reconciliar) ? ` · ${pendientes.filter(x => x.reconciliar).length} para reconciliar` : ''})`}
                 </option>
                 {(pendientes || []).map(pn => (
                   <option key={pn.key} value={pn.key}>
-                    {pn.nombre}{!selectedAreaId ? ` — ${pn.areaNombre}` : ''}{!pn.registrado ? ' (sin registrar)' : ''}
+                    {pn.nombre}{!selectedAreaId ? ` — ${pn.areaNombre}` : ''}{!pn.registrado ? ' (sin registrar)' : ''}{pn.reconciliar ? ' (reconciliar)' : ''}
                   </option>
                 ))}
               </select>
@@ -942,10 +1009,10 @@ export function ConciliacionNegociosPage() {
               onClick={handleConfirmConciliar}
               disabled={elegiblesParaConciliar.length === 0}
             >
-              <CheckCircle2 size={16} />
+              {elegiblesParaConciliar.some(e => e.yaConciliado) ? <RotateCcw size={16} /> : <CheckCircle2 size={16} />}
               {elegiblesParaConciliar.length > 1
-                ? `Conciliar ${elegiblesParaConciliar.map(e => `${e.subtipo} (${e.moneda})`).join(' + ')}`
-                : 'Conciliar'}
+                ? elegiblesParaConciliar.map(e => `${e.yaConciliado ? 'Reconciliar' : 'Conciliar'} ${e.subtipo} (${e.moneda})`).join(' + ')
+                : elegiblesParaConciliar[0]?.yaConciliado ? 'Reconciliar' : 'Conciliar'}
             </Button>
           )}
         </div>
@@ -982,7 +1049,7 @@ export function ConciliacionNegociosPage() {
       <ConfirmDialog
         isOpen={confirmOpen}
         title="¿Confirmar Conciliación?"
-        message={`Se va${elegiblesParaConciliar.length === 1 ? '' : 'n'} a registrar ${elegiblesParaConciliar.length} conciliación(es) en la base de datos. Esta acción no se puede deshacer desde aquí.`}
+        message={mensajeConfirmacion(elegiblesParaConciliar.filter(e => !e.yaConciliado).length, elegiblesParaConciliar.filter(e => e.yaConciliado).length)}
         onConfirm={handleConciliar}
         onCancel={() => setConfirmOpen(false)}
         isDanger={false}
@@ -1099,7 +1166,9 @@ export function ConciliacionNegociosPage() {
                             <span className="font-bold text-sm text-slate-400 tabular-nums">{formatCurrency(0, r.moneda)}</span>
                           )}
                         </td>
-                        <td className="p-4"><EstadoConciliacionBadge estado={r.estado} /></td>
+                        <td className="p-4">
+                          <EstadoConciliacionControl estado={r.estado} neto={totalCxP - r.cxcCU} editable={canExecute} onCambiar={nuevo => handleCambiarEstado(r, nuevo)} />
+                        </td>
                         <td className="p-4" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center gap-2">
                             <button
@@ -1119,6 +1188,16 @@ export function ConciliacionNegociosPage() {
                                 className="p-1 text-slate-400 hover:text-[var(--color-primary)] disabled:opacity-50"
                               >
                                 {subiendoId === r.id ? <Loader2 size={13} className="animate-spin" /> : <UploadCloud size={13} />}
+                              </button>
+                            )}
+                            {canExecute && puedeReconciliar(r.estado) && (
+                              <button
+                                onClick={() => handleReconciliarDesdeHistorico(r)}
+                                aria-label="Reconciliar"
+                                title="Reconciliar: recalcular con las órdenes actuales (mantiene el consecutivo)"
+                                className="p-1 text-slate-400 hover:text-[var(--color-primary)]"
+                              >
+                                <RotateCcw size={13} />
                               </button>
                             )}
                           </div>
@@ -1146,6 +1225,7 @@ export function ConciliacionNegociosPage() {
                               <FieldMini label="Referencia" value={r.referencia || '—'} />
                               <FieldMini label="Fecha de Pago" value={r.fechaPago ? formatDate(r.fechaPago) : '—'} />
                               <FieldMini label="Prioridad" value={r.prioridad || '—'} />
+                              <ReconciliacionesLog conciliacionId={r.id} moneda={r.moneda} cantidad={r.reconciliaciones} />
                             </div>
                           </td>
                         </tr>
@@ -1177,6 +1257,13 @@ function FieldMini({ label, value }: { label: string; value: string }) {
 // (Método de Pago "Transferencia-Efectivo" — cómo Mandao le entrega el
 // dinero: en persona/en mano, o por transferencia). Para no repetir la
 
+function mensajeConfirmacion(nuevas: number, reconciliar: number): string {
+  const partes: string[] = [];
+  if (nuevas > 0) partes.push(`Se va${nuevas === 1 ? '' : 'n'} a registrar ${nuevas} conciliación(es) nueva(s).`);
+  if (reconciliar > 0) partes.push(`Se va${reconciliar === 1 ? '' : 'n'} a reconciliar ${reconciliar} conciliación(es) ya registrada(s): se actualizan los montos, se mantiene el consecutivo, vuelven a estado Nuevo (para reenviar el PDF corregido) y queda registro de los valores anteriores.`);
+  return partes.join(' ');
+}
+
 // Liquidación en 0 (CxP = CxC): no se paga ni se cobra y la base de datos
 // no le asigna consecutivo (migración 2026-10-07c).
 const esSaldoCero = (cxp: number, cxc: number) => Math.abs(cxp - cxc) < 0.005;
@@ -1202,7 +1289,11 @@ function NegocioResultCard({
           <p className="text-[10px] text-slate-400 mt-0.5 italic">{describeSubtipo(calculo.subtipo)}</p>
         </div>
         {calculo.yaConciliado && (
-          <span className="text-[10px] font-black uppercase bg-amber-50 text-amber-700 border border-amber-200 px-2.5 py-1 rounded-full">Ya conciliado en este rango</span>
+          <span className="text-[10px] font-black uppercase bg-amber-50 text-amber-700 border border-amber-200 px-2.5 py-1 rounded-full text-right">
+            {esReconciliable(calculo)
+              ? `Conciliado${calculo.previa?.consecutivo ? ` ${calculo.previa.consecutivo}` : ''} (${calculo.previa?.estado}) · se reconciliará`
+              : `Conciliado (${calculo.previa?.estado}) · no se puede reconciliar`}
+          </span>
         )}
       </div>
 

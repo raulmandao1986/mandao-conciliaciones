@@ -14,7 +14,8 @@ import {
   EstadoConciliacion, ESTADO_CONCILIACION_OPTIONS,
 } from '../../lib/conciliacion/paymentBuckets';
 import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
-import { EstadoConciliacionBadge } from '../../lib/conciliacion/EstadoBadge';
+import { EstadoConciliacionControl, ReconciliacionesLog } from '../../lib/conciliacion/EstadoBadge';
+import { puedeReconciliar, parseEstado, cambiarEstadoConciliacion } from '../../lib/conciliacion/estados';
 import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn } from '../../lib/conciliacion/drivePdf';
 import { ResumenMetodosPago, ResumenBuilder } from './ResumenMetodosPago';
 import { loadCatalogoPagos, computeDesglose, columnasLegado, parseDesglose, type LineaGrupo } from '../../lib/conciliacion/catalogoPagos';
@@ -23,7 +24,7 @@ import { buildPdfMensajero, loadOrdenesMensajero } from '../../lib/conciliacion/
 import { ProcesoProgreso, useProcessSteps, trackStep, type StepStatus } from './ProcesoProgreso';
 import {
   Send, Loader2, Search, Calculator, AlertTriangle, CheckCircle2, XCircle,
-  ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud
+  ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud, RotateCcw
 } from 'lucide-react';
 
 // =====================================================================
@@ -68,6 +69,8 @@ interface MensajeroCalculo {
   tipoMochila: string;
   registrado: boolean;
   yaConciliado: boolean;
+  // Conciliación ya registrada para este rango (null = pendiente).
+  previa: PreviaConciliacion | null;
   ordenes: OrderRow[];
   grupos: LineaGrupo[]; // desglose por Grupo de pago (Configuración -> Tipología de Pago)
   sinClasificar: { ordenes: number; saldo: number; tipos: Set<string> };
@@ -84,10 +87,15 @@ interface MensajeroCalculo {
   saldoCup: number | null;
 }
 
+interface PreviaConciliacion { id: string; estado: EstadoConciliacion; consecutivo: string | null }
+// Ya conciliada pero todavía en Nuevo/Enviado: se puede reconciliar.
+const esReconciliable = (c: { yaConciliado: boolean; previa: PreviaConciliacion | null }) =>
+  c.yaConciliado && !!c.previa && puedeReconciliar(c.previa.estado);
+
 interface AreaOption { id: string; nombre: string; }
 interface MessengerOption { id: string; nombre: string; areaId: string; viaPago: string; tipoMochila: string; }
 // Mensajero pendiente de conciliar en el Área + rango elegidos (selector Individual).
-interface PendienteOption { key: string; nombre: string; areaNombre: string; registrado: boolean; }
+interface PendienteOption { key: string; nombre: string; areaNombre: string; registrado: boolean; reconciliar: boolean; }
 type StepUpdater = (key: string, status: StepStatus, detail?: string) => void;
 
 interface ConciliacionRecord {
@@ -126,11 +134,12 @@ interface ConciliacionRecord {
   responsable: string;
   conciliacion: string;
   estado: EstadoConciliacion;
+  reconciliaciones: number; // veces que se reconcilió (migración 2026-10-27b)
   facturacion: string | null;
 }
 
 const HISTORY_SELECT_BASE = 'conciliacion_id, area_id, fecha, mensajero, fecha_inicial, fecha_final, area, ordenes_efectivo, cxc_cu, ordenes_transfermovil, cxp_tm, ordenes_saldo_mandao, cxp_sm, ordenes_tarjeta, cxp_us, tipo_mochila, alquiler_mochila, disponibilidades, total_ordenes, total_por_cobrar, total_por_pagar, saldo_cup, via_pago, responsable, conciliacion, estado, facturacion';
-const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct, desglose`;
+const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct, desglose, reconciliaciones`;
 
 function mapHistoryRow(r: any): ConciliacionRecord {
   return {
@@ -163,7 +172,8 @@ function mapHistoryRow(r: any): ConciliacionRecord {
     viaPago: r.via_pago || 'N/D',
     responsable: r.responsable,
     conciliacion: r.conciliacion,
-    estado: r.estado || 'Nuevo',
+    estado: parseEstado(r.estado),
+    reconciliaciones: Number(r.reconciliaciones) || 0,
     facturacion: r.facturacion,
 
   };
@@ -173,6 +183,13 @@ function mapHistoryRow(r: any): ConciliacionRecord {
 const pdfFileNameMensajero = (rec: ConciliacionRecord) =>
   `${rec.consecutivo ? `${rec.consecutivo}-` : ''}conciliacion-${rec.mensajero.replace(/[^a-z0-9]/gi, '-')}-${rec.fechaInicial}_${rec.fechaFinal}.pdf`;
 
+function mensajeConfirmacion(nuevas: number, reconciliar: number): string {
+  const partes: string[] = [];
+  if (nuevas > 0) partes.push(`Se va${nuevas === 1 ? '' : 'n'} a registrar ${nuevas} conciliación(es) nueva(s).`);
+  if (reconciliar > 0) partes.push(`Se va${reconciliar === 1 ? '' : 'n'} a reconciliar ${reconciliar} conciliación(es) ya registrada(s): se actualizan los montos, se mantiene el consecutivo, vuelven a estado Nuevo (para reenviar el PDF corregido) y queda registro de los valores anteriores.`);
+  return partes.join(' ');
+}
+
 // Liquidación en 0 (Total por Pagar = Total por Cobrar): no se paga ni se
 // cobra y la base de datos no le asigna consecutivo (migración 2026-10-07c).
 const esSaldoCero = (pagar: number, cobrar: number) => Math.abs(pagar - cobrar) < 0.005;
@@ -181,7 +198,7 @@ const esSaldoCero = (pagar: number, cobrar: number) => Math.abs(pagar - cobrar) 
 // PN260012 antes que CN260011 antes que PN250099). Las conciliaciones sin
 // consecutivo (saldo 0) van al final, por fecha descendente.
 function compareConsecutivoDesc(a: { consecutivo: string | null; fecha: string }, b: { consecutivo: string | null; fecha: string }): number {
-  const num = (c: string | null) => (c ? Number(c.slice(2)) : -1); // AA + número
+  const num = (c: string | null) => (c ? Number(c.replace(/\D/g, '')) || 0 : -1); // dígitos: año + número
   const diff = num(b.consecutivo) - num(a.consecutivo);
   if (diff !== 0) return diff;
   if (a.consecutivo && b.consecutivo) return b.consecutivo.localeCompare(a.consecutivo);
@@ -320,7 +337,7 @@ export function ConciliacionMensajerosPage() {
       trackStep(step, 'previas', fetchAllRows<any>((from, to) =>
         supabase
           .from('conciliaciones_messengers')
-          .select('conciliacion_id, messenger_id')
+          .select('conciliacion_id, messenger_id, estado, consecutivo')
           .eq('fecha_inicial', fechaInicio)
           .eq('fecha_final', fechaFin)
           .order('conciliacion_id')
@@ -341,7 +358,10 @@ export function ConciliacionMensajerosPage() {
     ]);
 
     step('calculo', 'running');
-    const conciliados = new Set<string>(existentes.map((r: any) => r.messenger_id));
+    const previas = new Map<string, PreviaConciliacion>(existentes.map((r: any) => [
+      r.messenger_id,
+      { id: r.conciliacion_id, estado: parseEstado(r.estado), consecutivo: r.consecutivo || null },
+    ]));
     const dispsPorMensajero = new Map<string, number>();
     disps.forEach((d: any) => {
       const k = `${normalizeEntityName(d.messenger_name)}|${d.area_id}`;
@@ -370,7 +390,8 @@ export function ConciliacionMensajerosPage() {
       const areaId = ordenesGrupo[0].areaId;
       const areaNombre = areas.find(a => a.id === areaId)?.nombre || 'N/A';
       const matchMessenger = messengers.find(m => normalizeEntityName(m.nombre) === normalizeEntityName(driverName) && m.areaId === areaId);
-      const yaConciliado = !!matchMessenger && conciliados.has(matchMessenger.id);
+      const previa = matchMessenger ? previas.get(matchMessenger.id) || null : null;
+      const yaConciliado = !!previa;
 
       // Disponibilidades del mismo mensajero en el mismo rango y Área —
       // dinero adicional que Mandao le debe (sección 7.4). Se le descuenta
@@ -405,6 +426,7 @@ export function ConciliacionMensajerosPage() {
         tipoMochila,
         registrado: !!matchMessenger,
         yaConciliado,
+        previa,
         ordenes: ordenesGrupo,
         grupos: calc.lineas,
         sinClasificar: calc.sinClasificar,
@@ -442,8 +464,8 @@ export function ConciliacionMensajerosPage() {
         const all = await computeCalculos();
         if (req !== pendientesReq.current) return;
         const list = all
-          .filter(c => !c.yaConciliado && c.ordenes.length > 0)
-          .map(c => ({ key: c.key, nombre: c.mensajeroNombre, areaNombre: c.areaNombre, registrado: c.registrado }));
+          .filter(c => c.ordenes.length > 0 && (!c.yaConciliado || esReconciliable(c)))
+          .map(c => ({ key: c.key, nombre: c.mensajeroNombre, areaNombre: c.areaNombre, registrado: c.registrado, reconciliar: c.yaConciliado }));
         setPendientes(list);
         setSelectedMensajeroKey(prev => (list.some(x => x.key === prev) ? prev : ''));
       } catch (err: any) {
@@ -558,7 +580,7 @@ export function ConciliacionMensajerosPage() {
   const elegiblesParaConciliar = useMemo(() => {
     if (!resultadosVisibles) return [];
     if (mode === 'individual') {
-      return resultadosVisibles.filter(r => r.registrado && !r.yaConciliado && r.ordenes.length > 0);
+      return resultadosVisibles.filter(r => r.registrado && (!r.yaConciliado || esReconciliable(r)) && r.ordenes.length > 0);
     }
     return resultadosVisibles.filter(r => selectedMasivaKeys[r.key] && r.registrado && !r.yaConciliado && r.ordenes.length > 0);
   }, [resultadosVisibles, mode, selectedMasivaKeys]);
@@ -587,7 +609,7 @@ export function ConciliacionMensajerosPage() {
       const responsable = profileData?.full_name || userData?.user?.email || 'Usuario Mandao';
       const hoy = toLocalISODate();
 
-      const rows = elegiblesParaConciliar.map(c => ({
+      const fila = (c: MensajeroCalculo) => ({
         fecha: hoy,
         messenger_id: c.messengerId,
         mensajero: c.mensajeroNombre,
@@ -611,20 +633,48 @@ export function ConciliacionMensajerosPage() {
         conciliacion: `${c.mensajeroNombre} ${fechaInicio} - ${fechaFin}`,
         estado: 'Nuevo',
         comision_pct: commissionPercent,
-      }));
+      });
+      const nuevos = elegiblesParaConciliar.filter(c => !c.yaConciliado);
+      const aReconciliar = elegiblesParaConciliar.filter(c => c.yaConciliado && c.previa);
+      const rows = nuevos.map(fila);
 
-      let { data: inserted, error } = await supabase.from('conciliaciones_messengers').insert(rows).select(HISTORY_SELECT);
-      if (isMissingPdfColumn(error)) {
-        // Migración 2026-10-15 sin correr: se registra sin el % (el PDF usa
-        // entonces el vigente en Configuración).
-        const rowsBase = rows.map(({ comision_pct, desglose, ...rest }) => rest);
-        ({ data: inserted, error } = await supabase.from('conciliaciones_messengers').insert(rowsBase).select(HISTORY_SELECT_BASE));
+      let inserted: any[] = [];
+      if (rows.length > 0) {
+        let { data, error } = await supabase.from('conciliaciones_messengers').insert(rows).select(HISTORY_SELECT);
+        if (isMissingPdfColumn(error)) {
+          // Migración 2026-10-15 sin correr: se registra sin el % (el PDF usa
+          // entonces el vigente en Configuración).
+          const rowsBase = rows.map(({ comision_pct, desglose, ...rest }) => rest);
+          ({ data, error } = await supabase.from('conciliaciones_messengers').insert(rowsBase).select(HISTORY_SELECT_BASE));
+        }
+        if (error) throw error;
+        inserted = data || [];
       }
-      if (error) throw error;
-      concSteps.update('registro', 'done', `${rows.length} conciliación(es) guardada(s)`);
+
+      // Reconciliación (2026-10-27b): se actualizan los montos de la fila ya
+      // registrada; la base mantiene el consecutivo, registra antes/después y
+      // rechaza el cambio si ya está Confirmada. Vuelve a Nuevo para reenviar
+      // el PDF corregido (el enlace al PDF anterior se descarta).
+      const actualizados: any[] = [];
+      for (const c of aReconciliar) {
+        const { fecha, messenger_id, mensajero, fecha_inicial, fecha_final, area_id, area, conciliacion, ...cambios } = fila(c);
+        const { data, error } = await supabase
+          .from('conciliaciones_messengers')
+          .update({ ...cambios, estado: 'Nuevo', pdf_drive_file_id: null, pdf_drive_url: null, updated_at: new Date().toISOString() })
+          .eq('conciliacion_id', c.previa!.id)
+          .select(HISTORY_SELECT)
+          .single();
+        if (error) throw new Error(`${c.mensajeroNombre}: ${error.message}`);
+        actualizados.push(data);
+      }
+      concSteps.update('registro', 'done', [
+        rows.length > 0 ? `${rows.length} conciliación(es) guardada(s)` : '',
+        actualizados.length > 0 ? `${actualizados.length} reconciliada(s)` : '',
+      ].filter(Boolean).join(' · '));
 
       await logAuditEvent('Conciliaciones', mode === 'individual' ? 'Conciliación Individual de Mensajero Registrada' : 'Conciliación Masiva de Mensajeros Registrada', {
         cantidadMensajeros: rows.length,
+        reconciliadas: aReconciliar.map(c => `${c.mensajeroNombre} ${c.previa?.consecutivo || ''}`.trim()),
         rangoFechas: `${fechaInicio} - ${fechaFin}`,
         area: selectedAreaId ? areas.find(a => a.id === selectedAreaId)?.nombre : 'Todas',
       });
@@ -632,7 +682,7 @@ export function ConciliacionMensajerosPage() {
       // PDF de cada conciliación -> carpeta de Google Drive (Configuración -> Data).
       // Un fallo aquí no deshace las conciliaciones: queda como advertencia.
       concSteps.update('drive', 'running', 'Cargando el detalle de órdenes…');
-      const registros = (inserted || []).map(mapHistoryRow);
+      const registros = [...inserted, ...actualizados].map(mapHistoryRow);
       const ordenesPorConciliacion = await loadOrdenesMensajero(registros);
       const drive = await subirPdfsConciliacion({
         records: registros,
@@ -654,7 +704,10 @@ export function ConciliacionMensajerosPage() {
       const enCero = elegiblesParaConciliar.filter(e => esSaldoCero(e.totalPorPagar, e.totalPorCobrar)).length;
       setConcResult({
         ok: true,
-        message: `Se registraron ${rows.length} conciliación(es) con éxito.`
+        message: [
+          rows.length > 0 ? `Se registraron ${rows.length} conciliación(es) con éxito.` : '',
+          actualizados.length > 0 ? `Se reconciliaron ${actualizados.length} conciliación(es): se mantuvo el consecutivo, quedaron en Nuevo y el cambio quedó registrado.` : '',
+        ].filter(Boolean).join('\n')
           + (enCero > 0 ? `\n${enCero} liquidación(es) en 0 (no se paga ni se cobra) quedaron registradas sin consecutivo.` : ''),
       });
     } catch (err: any) {
@@ -665,6 +718,27 @@ export function ConciliacionMensajerosPage() {
       concSteps.finish(failed);
       setConciliando(false);
     }
+  };
+
+  const handleCambiarEstado = async (rec: ConciliacionRecord, nuevo: EstadoConciliacion) => {
+    try {
+      await cambiarEstadoConciliacion('conciliaciones_messengers', { id: rec.id, estado: rec.estado, nombre: rec.conciliacion, consecutivo: rec.consecutivo }, nuevo);
+      setHistory(prev => prev.map(h => (h.id === rec.id ? { ...h, estado: nuevo } : h)));
+    } catch (err: any) {
+      alert('No se pudo cambiar el estado: ' + (err?.message || err));
+    }
+  };
+
+  // Lleva la conciliación del histórico a la calculadora Individual (mismo
+  // mensajero, Área y rango) para recalcularla y reconciliarla.
+  const handleReconciliarDesdeHistorico = (rec: ConciliacionRecord) => {
+    setMode('individual');
+    resetCalculo();
+    setSelectedAreaId(rec.areaId || '');
+    setFechaInicio(rec.fechaInicial);
+    setFechaFin(rec.fechaFinal);
+    setSelectedMensajeroKey(`${normalizeEntityName(rec.mensajero)}|${rec.areaId}`);
+    document.querySelector('main')?.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   // % vigente: solo para conciliaciones registradas antes de que se guardara
@@ -794,11 +868,11 @@ export function ConciliacionMensajerosPage() {
                       ? 'Elija un rango de fechas válido'
                       : pendientes.length === 0
                         ? 'Sin mensajeros pendientes en el rango'
-                        : `Seleccione… (${pendientes.length} pendientes)`}
+                        : `Seleccione… (${pendientes.filter(x => !x.reconciliar).length} pendientes${pendientes.some(x => x.reconciliar) ? ` · ${pendientes.filter(x => x.reconciliar).length} para reconciliar` : ''})`}
                 </option>
                 {(pendientes || []).map(pn => (
                   <option key={pn.key} value={pn.key}>
-                    {pn.nombre}{!selectedAreaId ? ` — ${pn.areaNombre}` : ''}{!pn.registrado ? ' (sin registrar)' : ''}
+                    {pn.nombre}{!selectedAreaId ? ` — ${pn.areaNombre}` : ''}{!pn.registrado ? ' (sin registrar)' : ''}{pn.reconciliar ? ' (reconciliar)' : ''}
                   </option>
                 ))}
               </select>
@@ -876,7 +950,7 @@ export function ConciliacionMensajerosPage() {
       <ConfirmDialog
         isOpen={confirmOpen}
         title="¿Confirmar Conciliación?"
-        message={`Se va${elegiblesParaConciliar.length === 1 ? '' : 'n'} a registrar ${elegiblesParaConciliar.length} conciliación(es) en la base de datos. Esta acción no se puede deshacer desde aquí.`}
+        message={mensajeConfirmacion(elegiblesParaConciliar.filter(e => !e.yaConciliado).length, elegiblesParaConciliar.filter(e => e.yaConciliado).length)}
         onConfirm={handleConciliar}
         onCancel={() => setConfirmOpen(false)}
         isDanger={false}
@@ -987,7 +1061,9 @@ export function ConciliacionMensajerosPage() {
                             <span className="font-bold text-sm text-slate-400 tabular-nums">{formatCUP(0)}</span>
                           )}
                         </td>
-                        <td className="p-4"><EstadoConciliacionBadge estado={r.estado} /></td>
+                        <td className="p-4">
+                          <EstadoConciliacionControl estado={r.estado} neto={r.totalPorPagar - r.totalPorCobrar} editable={canExecute} onCambiar={nuevo => handleCambiarEstado(r, nuevo)} />
+                        </td>
                         <td className="p-4" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center gap-2">
                             <button onClick={() => handleGenerarPDF(r)} className="text-xs font-bold text-blue-600 hover:underline flex items-center gap-1" title={r.pdfDriveUrl ? 'Abrir PDF en Google Drive' : 'Generar/Descargar PDF'}>
@@ -1003,6 +1079,16 @@ export function ConciliacionMensajerosPage() {
                                 className="p-1 text-slate-400 hover:text-[var(--color-primary)] disabled:opacity-50"
                               >
                                 {subiendoId === r.id ? <Loader2 size={13} className="animate-spin" /> : <UploadCloud size={13} />}
+                              </button>
+                            )}
+                            {canExecute && puedeReconciliar(r.estado) && (
+                              <button
+                                onClick={() => handleReconciliarDesdeHistorico(r)}
+                                aria-label="Reconciliar"
+                                title="Reconciliar: recalcular con las órdenes actuales (mantiene el consecutivo)"
+                                className="p-1 text-slate-400 hover:text-[var(--color-primary)]"
+                              >
+                                <RotateCcw size={13} />
                               </button>
                             )}
                           </div>
@@ -1028,6 +1114,7 @@ export function ConciliacionMensajerosPage() {
                                   <GruposDesglose lineas={r.desglose} moneda="CUP" className="max-w-2xl" />
                                 </div>
                               )}
+                              <ReconciliacionesLog conciliacionId={r.id} moneda="CUP" cantidad={r.reconciliaciones} />
                             </div>
                           </td>
                         </tr>
@@ -1074,7 +1161,11 @@ function MensajeroResultCard({
           <p className="text-xs text-slate-500 mt-0.5">Área: {calculo.areaNombre} · Vía de Pago: {calculo.viaPago} · Mochila: {calculo.tipoMochila}</p>
         </div>
         {calculo.yaConciliado && (
-          <span className="text-[10px] font-black uppercase bg-amber-50 text-amber-700 border border-amber-200 px-2.5 py-1 rounded-full">Ya conciliado en este rango</span>
+          <span className="text-[10px] font-black uppercase bg-amber-50 text-amber-700 border border-amber-200 px-2.5 py-1 rounded-full text-right">
+            {esReconciliable(calculo)
+              ? `Conciliado${calculo.previa?.consecutivo ? ` ${calculo.previa.consecutivo}` : ''} (${calculo.previa?.estado}) · se reconciliará`
+              : `Conciliado (${calculo.previa?.estado}) · no se puede reconciliar`}
+          </span>
         )}
       </div>
 
@@ -1149,9 +1240,9 @@ function MensajeroResultCard({
       )}
 
       {canExecute && (
-        <Button variant="brand" className="w-full gap-2" onClick={onConciliar} disabled={sinOrdenes || calculo.yaConciliado || !calculo.registrado}>
-          <CheckCircle2 size={16} />
-          Conciliar
+        <Button variant="brand" className="w-full gap-2" onClick={onConciliar} disabled={sinOrdenes || (calculo.yaConciliado && !esReconciliable(calculo)) || !calculo.registrado}>
+          {calculo.yaConciliado ? <RotateCcw size={16} /> : <CheckCircle2 size={16} />}
+          {calculo.yaConciliado ? 'Reconciliar' : 'Conciliar'}
         </Button>
       )}
     </div>

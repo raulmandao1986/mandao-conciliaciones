@@ -107,6 +107,7 @@ export const NAV_SECTIONS: NavSection[] = [
           { id: 'tipologia-cobrar', label: 'Cuentas por Cobrar' },
           { id: 'tipologia-pagar', label: 'Cuentas por Pagar' },
           { id: 'grupos-pago', label: 'Grupos de Pago' },
+          { id: 'formato-consecutivo', label: 'Formato de Consecutivo' },
         ]
       },
       { id: 'razon-cambio', label: 'Razón de Cambio', icon: DollarSign },

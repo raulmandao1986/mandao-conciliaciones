@@ -29,18 +29,6 @@ export function normalizeEntityName(str: any): string {
     .replace(/\s+/g, ' ');
 }
 
-// Ciclo de vida del campo `estado` en conciliaciones_businesses /
-// conciliaciones_messengers (Instrucciones sección 6.5/7.5): Nuevo al
-// registrarse, y luego Enviado/Aprobado/Incorrecto/Facturado a medida que
-// avanza por procesos que todavía no se construyen (Facturación).
-export type EstadoConciliacion = 'Nuevo' | 'Enviado' | 'Aprobado' | 'Incorrecto' | 'Facturado';
-
-export const ESTADO_CONCILIACION_CONFIG: Record<EstadoConciliacion, { label: string; className: string }> = {
-  Nuevo: { label: 'Nuevo', className: 'bg-slate-100 text-slate-600 border-slate-200' },
-  Enviado: { label: 'Enviado', className: 'bg-blue-50 text-blue-700 border-blue-200' },
-  Aprobado: { label: 'Aprobado', className: 'bg-teal-50 text-teal-700 border-teal-200' },
-  Incorrecto: { label: 'Incorrecto', className: 'bg-red-50 text-red-700 border-red-200' },
-  Facturado: { label: 'Facturado', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
-};
-
-export const ESTADO_CONCILIACION_OPTIONS: EstadoConciliacion[] = ['Nuevo', 'Enviado', 'Aprobado', 'Incorrecto', 'Facturado'];
+// Los estados de la conciliación viven en estados.ts (2026-10-27).
+export type { EstadoConciliacion } from './estados';
+export { ESTADO_CONCILIACION_OPTIONS } from './estados';

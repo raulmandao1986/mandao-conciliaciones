@@ -29,6 +29,7 @@ const LogsAuditoriaPage = lazy(() => import('./gestion/LogsAuditoriaPage').then(
 const DocumentosImportacionPage = lazy(() => import('./gestion/DocumentosImportacionPage').then(m => ({ default: m.DocumentosImportacionPage })));
 const ComisionMandaoPage = lazy(() => import('./gestion/ComisionMandaoPage').then(m => ({ default: m.ComisionMandaoPage })));
 const TipologiaPagoPage = lazy(() => import('./gestion/TipologiaPagoPage').then(m => ({ default: m.TipologiaPagoPage })));
+const FormatoConsecutivoPage = lazy(() => import('./gestion/FormatoConsecutivoPage').then(m => ({ default: m.FormatoConsecutivoPage })));
 const GruposPagoPage = lazy(() => import('./gestion/TipologiaPagoPage').then(m => ({ default: m.GruposPagoPage })));
 const ReglasPage = lazy(() => import('./gestion/ReglasPage').then(m => ({ default: m.ReglasPage })));
 
@@ -96,6 +97,8 @@ function renderModule(activeTab: string) {
       return <TipologiaPagoPage tipologia="pagar" />;
     case 'grupos-pago':
       return <GruposPagoPage />;
+    case 'formato-consecutivo':
+      return <FormatoConsecutivoPage />;
     case 'metodos-pago-ordenes':
       return <MetodosPagoPage type="ordenes" />;
     case 'razon-cambio':
