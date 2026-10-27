@@ -2,7 +2,10 @@ import { supabase } from '../supabase';
 import { formatDate } from '../formatters';
 import { fetchAllRows } from './fetchAllRows';
 import { mapPaymentTypeToBucket, normalizeEntityName, type PaymentBucket } from './paymentBuckets';
-import logoUrl from '../../assets/brand/mandao-logo.jpg';
+import {
+  BUCKETS, TIPO, sinMandao, num, NEGRO, GRIS, PDF_MARGEN as M, BORDES as bordes, CABECERA as cabecera,
+  drawEncabezado, drawPie, repartir, resumenPorBucket,
+} from './pdfComun';
 
 // PDF "Reporte de conciliación" de Negocios (diseño entregado por el
 // usuario 2026-10-15): encabezado, Resumen Órdenes por método de pago y el
@@ -38,16 +41,9 @@ export interface OrdenPdf {
   fecha: string;          // YYYY-MM-DD
   orderId: string;
   bucket: PaymentBucket;
+  paymentType: string;    // dispatcher.payment_type tal cual (Card, Crédito o Débito…)
   montoCup: number;       // product_amount
 }
-
-const BUCKETS: PaymentBucket[] = ['efectivo', 'transfermovil', 'saldomandao', 'tarjeta'];
-const TIPO: Record<PaymentBucket, string> = {
-  efectivo: 'Efectivo',
-  transfermovil: 'Transfermóvil',
-  saldomandao: 'Saldo Mandao',
-  tarjeta: 'Tarjeta',
-};
 
 const bucketCount = (rec: PdfNegocioRecord, b: PaymentBucket) =>
   ({ efectivo: rec.ordenesEfectivo, transfermovil: rec.ordenesTransfermovil, saldomandao: rec.ordenesSaldoMandao, tarjeta: rec.ordenesTarjeta })[b] || 0;
@@ -81,7 +77,7 @@ export async function loadOrdenesNegocio(records: PdfNegocioRecord[]): Promise<M
         if (normalizeEntityName(r.store) !== nombre) return;
         const bucket = mapPaymentTypeToBucket(r.payment_type || '');
         if (!bucket || bucketCount(rec, bucket) === 0) return;
-        ordenes.push({ fecha: r.delivery_date, orderId: String(r.order_id || ''), bucket, montoCup: Number(r.product_amount) || 0 });
+        ordenes.push({ fecha: r.delivery_date, orderId: String(r.order_id || ''), bucket, paymentType: String(r.payment_type || ''), montoCup: Number(r.product_amount) || 0 });
       });
       ordenes.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.orderId.localeCompare(b.orderId));
       result.set(rec.id, ordenes);
@@ -89,29 +85,6 @@ export async function loadOrdenesNegocio(records: PdfNegocioRecord[]): Promise<M
   }
   return result;
 }
-
-let logoPromise: Promise<string | null> | null = null;
-function getLogoDataUrl(): Promise<string | null> {
-  if (!logoPromise) {
-    logoPromise = fetch(logoUrl)
-      .then(r => r.blob())
-      .then(blob => new Promise<string>((resolve, reject) => {
-        const fr = new FileReader();
-        fr.onload = () => resolve(String(fr.result));
-        fr.onerror = reject;
-        fr.readAsDataURL(blob);
-      }))
-      .catch(() => null);
-  }
-  return logoPromise;
-}
-
-const num = (v: number) =>
-  new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v);
-
-const AMARILLO: [number, number, number] = [255, 191, 0];   // --color-brand
-const NEGRO: [number, number, number] = [23, 23, 23];         // --color-brand-ink
-const GRIS: [number, number, number] = [100, 116, 139];
 
 export async function buildPdfNegocio(
   rec: PdfNegocioRecord,
@@ -126,46 +99,13 @@ export async function buildPdfNegocio(
   const tasa = esUSD ? (rec.tasaCambio ?? defaults.tasaCambio ?? 0) : 1;
   const mon = rec.moneda;
 
-  // Detalle por orden: Efectivo -> Mandao cobra el % (comisión) y el
-  // negocio se queda el resto; demás métodos -> Mandao paga (100 − %).
-  const lineas = ordenes.map(o => {
-    const importe = o.montoCup * tasa;
-    const comision = importe * pct;
-    return { ...o, importe, beneficio: importe - comision, comision };
-  });
-  const porBucket = (b: PaymentBucket) => {
-    const ls = lineas.filter(l => l.bucket === b);
-    return {
-      ordenes: ls.length,
-      ventas: ls.reduce((s, l) => s + l.importe, 0),
-      beneficio: ls.reduce((s, l) => s + l.beneficio, 0),
-      comision: ls.reduce((s, l) => s + l.comision, 0),
-    };
-  };
-  const res = Object.fromEntries(BUCKETS.map(b => [b, porBucket(b)])) as Record<PaymentBucket, ReturnType<typeof porBucket>>;
-  const tot = BUCKETS.reduce((t, b) => ({
-    ordenes: t.ordenes + res[b].ordenes,
-    ventas: t.ventas + res[b].ventas,
-    beneficio: t.beneficio + res[b].beneficio,
-    comision: t.comision + res[b].comision,
-  }), { ordenes: 0, ventas: 0, beneficio: 0, comision: 0 });
+  const lineas = repartir(ordenes, pct, tasa);
+  const { res, tot } = resumenPorBucket(lineas);
 
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-  const pageW = doc.internal.pageSize.getWidth();
-  const M = 14;
 
   // Encabezado: título + logo (solo en el PDF en CUP).
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(20);
-  doc.setTextColor(...NEGRO);
-  doc.text('Reporte de conciliación', M, 26);
-  if (!esUSD) {
-    const logo = await getLogoDataUrl();
-    if (logo) doc.addImage(logo, 'JPEG', pageW - M - 44, 8, 44, 44 * 154 / 272);
-  }
-
-  const bordes = { lineColor: NEGRO, lineWidth: 0.2 };
-  const cabecera = { fillColor: AMARILLO, textColor: NEGRO, fontStyle: 'bold' as const, halign: 'center' as const, ...bordes };
+  await drawEncabezado(doc, !esUSD);
 
   autoTable(doc, {
     startY: 40,
@@ -173,19 +113,24 @@ export async function buildPdfNegocio(
     theme: 'grid',
     styles: { fontSize: 8.5, halign: 'center', textColor: NEGRO, cellPadding: 1.6, ...bordes },
     headStyles: cabecera,
-    head: [['Consecutivo', 'Fecha Inicio', 'Fecha Fin', 'Establecimiento', 'Vía de pago']],
+    head: [['Establecimiento', 'Fecha Inicio', 'Fecha Fin', 'Vía de pago']],
     body: [[
-      rec.consecutivo || 'Sin consecutivo (saldo 0)',
+      rec.establecimiento,
       formatDate(rec.fechaInicial),
       formatDate(rec.fechaFinal),
-      rec.establecimiento,
       `${rec.viaPago} (${mon})`,
     ]],
   });
 
-  // Resumen Órdenes: Efectivo y Transfermóvil siempre en CUP; Saldo Mandao
-  // y Tarjeta en la moneda del documento (USD en Exterior).
+  // Resumen Órdenes: solo las columnas de esta conciliación. PDF en USD
+  // (Exterior): Saldo y Tarjeta. PDF en CUP: los métodos con órdenes en esta
+  // fila (un negocio "Transferencia" normal sí tiene Saldo/Tarjeta en CUP; el
+  // PDF en CUP de un negocio Exterior queda con Efectivo y Transfermóvil).
   const col = (b: PaymentBucket) => res[b];
+  const conOrdenes = BUCKETS.filter(b => bucketCount(rec, b) > 0);
+  const cols: PaymentBucket[] = esUSD
+    ? ['saldomandao', 'tarjeta']
+    : (conOrdenes.length > 0 ? conOrdenes : ['efectivo', 'transfermovil']);
   autoTable(doc, {
     startY: (doc as any).lastAutoTable.finalY + 6,
     margin: { left: M, right: M },
@@ -194,14 +139,14 @@ export async function buildPdfNegocio(
     headStyles: cabecera,
     columnStyles: { 0: { fontStyle: 'bold' } },
     head: [
-      [{ content: 'Resumen Órdenes', colSpan: 6, styles: { halign: 'center' } }],
-      ['Datos', 'Efectivo (CUP)', 'Transfermóvil (CUP)', `Saldo Mandao (${mon})`, `Tarjeta (${mon})`, `Totales (${mon})`],
+      [{ content: 'Resumen Órdenes', colSpan: cols.length + 2, styles: { halign: 'center' } }],
+      ['Datos', ...cols.map(b => `${TIPO[b]} (${mon})`), `Totales (${mon})`],
     ],
     body: [
-      ['Órdenes', ...BUCKETS.map(b => String(col(b).ordenes)), String(tot.ordenes)],
-      ['Ventas', ...BUCKETS.map(b => num(col(b).ventas)), num(tot.ventas)],
-      ['Beneficio Negocio', ...BUCKETS.map(b => num(col(b).beneficio)), num(tot.beneficio)],
-      ['Comisión Mandao', ...BUCKETS.map(b => num(col(b).comision)), num(tot.comision)],
+      ['Órdenes', ...cols.map(b => String(col(b).ordenes)), String(tot.ordenes)],
+      ['Ventas', ...cols.map(b => num(col(b).ventas)), num(tot.ventas)],
+      ['Beneficio Negocio', ...cols.map(b => num(col(b).beneficio)), num(tot.beneficio)],
+      ['Comisión', ...cols.map(b => num(col(b).comision)), num(tot.comision)],
     ],
   });
 
@@ -231,20 +176,13 @@ export async function buildPdfNegocio(
     columnStyles: {
       3: { halign: 'right' }, 4: { halign: 'right' }, 5: { halign: 'right' },
     },
-    head: [['Fecha', 'Tipo de pedido', 'Número de orden', `Importe Total (${mon})`, 'Beneficio Negocio', 'Comisión Mandao']],
+    head: [['Fecha', 'Tipo de pedido', 'Número de orden', `Importe Total (${mon})`, 'Beneficio Negocio', 'Comisión']],
     body: lineas.length > 0
-      ? lineas.map(l => [formatDate(l.fecha), TIPO[l.bucket], l.orderId, num(l.importe), num(l.beneficio), num(l.comision)])
+      // Tipo de pedido = dispatcher.payment_type real (no la categoría).
+      ? lineas.map(l => [formatDate(l.fecha), sinMandao(l.paymentType) || TIPO[l.bucket], l.orderId, num(l.importe), num(l.beneficio), num(l.comision)])
       : [[{ content: 'No se encontraron órdenes para esta conciliación.', colSpan: 6, styles: { halign: 'center', textColor: GRIS } }]],
-    // Pie de cada página: responsable / fecha de conciliación y paginado.
-    didDrawPage: () => {
-      const h = doc.internal.pageSize.getHeight();
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(7.5);
-      doc.setTextColor(...GRIS);
-      doc.text(`Conciliado el ${formatDate(rec.fecha)} por ${rec.responsable} · Área: ${rec.area}`, M, h - 8);
-      doc.text(`Página ${doc.getNumberOfPages()}`, pageW - M, h - 8, { align: 'right' });
-      doc.setTextColor(...NEGRO);
-    },
+    // Pie de cada página: fecha de conciliación, Área y paginado.
+    didDrawPage: () => drawPie(doc, rec.fecha, rec.area),
   });
 
   return doc;

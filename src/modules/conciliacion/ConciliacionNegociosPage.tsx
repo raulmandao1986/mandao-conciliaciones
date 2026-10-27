@@ -1037,33 +1037,41 @@ export function ConciliacionNegociosPage() {
       <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)] shadow-sm overflow-hidden">
         <div className="p-4 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] space-y-3">
           <h3 className="text-xs font-black uppercase tracking-widest text-slate-500">Histórico de Conciliaciones ({filteredHistory.length})</h3>
-          <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
-            <div className="relative md:col-span-2">
+          {/* Filtros: se acomodan en varias líneas según el ancho disponible. */}
+          <div className="flex flex-wrap gap-3">
+            <div className="relative flex-[2_1_16rem] min-w-[14rem]">
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--color-text-faint)]" />
               <input
                 type="text"
-                placeholder="Buscar por establecimiento, responsable..."
+                placeholder="Buscar por establecimiento, responsable, consecutivo..."
+                aria-label="Buscar"
                 value={historySearch}
                 onChange={(e) => setHistorySearch(e.target.value)}
-                className="w-full h-9 pl-9 pr-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)]"
+                className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] pl-9"
               />
             </div>
-            <select value={historyAreaFilter} onChange={(e) => setHistoryAreaFilter(e.target.value)} className="h-9 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none">
+            <select value={historyAreaFilter} onChange={(e) => setHistoryAreaFilter(e.target.value)} aria-label="Todas las Áreas" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
               <option value="">Todas las Áreas</option>
               {areas.map(a => <option key={a.id} value={a.nombre}>{a.nombre}</option>)}
             </select>
-            <select value={historyViaFilter} onChange={(e) => setHistoryViaFilter(e.target.value)} className="h-9 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none">
+            <select value={historyViaFilter} onChange={(e) => setHistoryViaFilter(e.target.value)} aria-label="Todos los Rieles" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
               <option value="">Todos los Rieles</option>
               {viasDisponibles.map(v => <option key={v} value={v}>{v}</option>)}
             </select>
-            <select value={historyEstadoFilter} onChange={(e) => setHistoryEstadoFilter(e.target.value)} className="h-9 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none">
+            <select value={historyEstadoFilter} onChange={(e) => setHistoryEstadoFilter(e.target.value)} aria-label="Todos los Estados" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
               <option value="">Todos los Estados</option>
               {ESTADO_CONCILIACION_OPTIONS.map(e => <option key={e} value={e}>{e}</option>)}
             </select>
-            <div className="flex gap-2">
-              <input type="date" value={historyFechaInicio} onChange={(e) => setHistoryFechaInicio(e.target.value)} className="h-9 w-full px-2 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-xs outline-none font-mono" />
-              <input type="date" value={historyFechaFin} onChange={(e) => setHistoryFechaFin(e.target.value)} className="h-9 w-full px-2 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-xs outline-none font-mono" />
-            </div>
+            {/* Fechas con su etiqueta; cada campo tiene un ancho mínimo propio
+                para no desbordar (antes compartían una sola columna del grid). */}
+            <label className="flex items-center gap-2 flex-1 min-w-[11rem]">
+              <span className="text-xs font-medium text-[var(--color-text-muted)] shrink-0">Desde</span>
+              <input type="date" value={historyFechaInicio} onChange={(e) => setHistoryFechaInicio(e.target.value)} className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] px-2 font-mono text-xs" />
+            </label>
+            <label className="flex items-center gap-2 flex-1 min-w-[11rem]">
+              <span className="text-xs font-medium text-[var(--color-text-muted)] shrink-0">Hasta</span>
+              <input type="date" value={historyFechaFin} onChange={(e) => setHistoryFechaFin(e.target.value)} className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] px-2 font-mono text-xs" />
+            </label>
           </div>
         </div>
 

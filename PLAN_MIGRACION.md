@@ -340,13 +340,13 @@ Estado vigente del proyecto. Todo corre en local contra el proyecto Supabase rea
 - Cálculo por **vía de pago del negocio** (`businesses.payment_method`): Transferencia (1 fila CUP), Transferencia-Efectivo (2 filas CUP), Transferencia-Exterior (fila CUP + fila "Exterior" en USD). Saldo de una orden = `product_amount`; comisión configurable (Configuración → Comisión Mandao).
 - **Tasa de cambio = USD por 1 CUP** (hoy 0.002): `USD = CUP × tasa`, aplicada a saldo y CxP de la fila Exterior. Sin tasa activa la fila Exterior queda bloqueada con alerta.
 - Individual: **un solo botón** concilia todas las filas pendientes del negocio (CUP + USD).
-- **PDF "Reporte de conciliación"** (`lib/conciliacion/pdfConciliacionNegocio.ts`): encabezado, Resumen Órdenes por método de pago, total a pagar/cobrar y detalle por orden. Fila CUP con logo; fila USD (Exterior) sin logo. Cada conciliación guarda `comision_pct` y `tasa_cambio` para regenerarlo con los mismos números.
+- **PDF "Reporte de conciliación"** (`lib/conciliacion/pdfConciliacionNegocio.ts`): encabezado, Resumen Órdenes por método de pago, total a pagar/cobrar y detalle por orden. Fila CUP con logo; fila USD (Exterior) sin logo. Ajustes del 2026-10-15: sin consecutivo en la tabla de encabezado (Establecimiento primero), Resumen solo con las columnas de esa fila (Exterior: Saldo y Tarjeta), sin la palabra "Mandao", sin responsable en el pie y "Tipo de pedido" con el `payment_type` real. Cada conciliación guarda `comision_pct` y `tasa_cambio` para regenerarlo con los mismos números.
 
 ### 13.2 Conciliación de Mensajeros (`ConciliacionMensajerosPage.tsx`)
 - Saldo de una orden = **`delivery_charge`**; todo en **CUP** (vías de pago Efectivo / Transferencia).
 - Saldo CUP = Total por Pagar − Total por Cobrar (antes se multiplicaba por la tasa: doble conversión, corregido).
 - Disponibilidades con **% de descuento** configurable; Alquiler de Mochila por tipo (CUP).
-- Pendiente: rediseño del PDF (mismo formato que Negocios).
+- **PDF "Reporte de conciliación"** (`lib/conciliacion/pdfConciliacionMensajero.ts`, 2026-10-15): mismo diseño que Negocios sobre Delivery Charge, con tabla de Liquidación (comisión en Efectivo, pago por órdenes electrónicas, Disponibilidades netas, Alquiler de Mochila y total). Piezas comunes de ambos PDF en `lib/conciliacion/pdfComun.ts`.
 
 ### 13.3 Común a ambas conciliaciones
 - **Consecutivo** asignado por la BD (trigger + contador atómico `conciliacion_consecutivos`): `PN/CN` (Negocios) y `PM/CM` (Mensajeros) + año (2 dígitos) + número de 4 dígitos, P si se paga y C si se cobra; reinicia cada año. Las liquidaciones en **0** no se numeran y se notifican.
@@ -374,9 +374,8 @@ Estado vigente del proyecto. Todo corre en local contra el proyecto Supabase rea
 ### 13.7 Pendientes
 | Pendiente | Tipo |
 |---|---|
-| Probar el PDF nuevo de Negocios con una conciliación real | Prueba |
-| Rediseño del PDF de Mensajeros | Código |
-| Pantallas que no se ajustan al ancho (falta identificar cuáles) | Código — esperando capturas |
+| Probar los PDF nuevos (Negocios y Mensajeros) con conciliaciones reales | Prueba |
+| Pantallas que no se ajustan al ancho: corregido el filtro del histórico de Conciliaciones; falta identificar otras | Código — esperando capturas |
 | Facturación, Cuentas por Cobrar/Pagar, Planificación de Pagos (siguen con datos de prueba) | Código — definir reglas de negocio |
 | Fuente del título del PDF y logo en alta resolución | Código — esperando archivos |
 | Desplegar `sync-exchange-rate` y activar el cron de El Toque | Acción tuya |

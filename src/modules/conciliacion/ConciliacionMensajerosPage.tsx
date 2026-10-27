@@ -17,6 +17,7 @@ import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
 import { EstadoConciliacionBadge } from '../../lib/conciliacion/EstadoBadge';
 import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn } from '../../lib/conciliacion/drivePdf';
 import { ResumenMetodosPago, ResumenBuilder } from './ResumenMetodosPago';
+import { buildPdfMensajero, loadOrdenesMensajero } from '../../lib/conciliacion/pdfConciliacionMensajero';
 import { ProcesoProgreso, useProcessSteps, trackStep, type StepStatus } from './ProcesoProgreso';
 import {
   Send, Loader2, Search, Calculator, AlertTriangle, CheckCircle2, XCircle,
@@ -94,6 +95,9 @@ interface ConciliacionRecord {
   consecutivo: string | null;
   // PDF guardado en Google Drive al registrar la conciliación (null si no se subió).
   pdfDriveUrl: string | null;
+  areaId: string | null;
+  // % de comisión con que se calculó (null antes de la migración 2026-10-15).
+  comisionPct: number | null;
   fecha: string;
   mensajero: string;
   fechaInicial: string;
@@ -121,12 +125,14 @@ interface ConciliacionRecord {
   facturacion: string | null;
 }
 
-const HISTORY_SELECT_BASE = 'conciliacion_id, fecha, mensajero, fecha_inicial, fecha_final, area, ordenes_efectivo, cxc_cu, ordenes_transfermovil, cxp_tm, ordenes_saldo_mandao, cxp_sm, ordenes_tarjeta, cxp_us, tipo_mochila, alquiler_mochila, disponibilidades, total_ordenes, total_por_cobrar, total_por_pagar, saldo_cup, via_pago, responsable, conciliacion, estado, facturacion';
-const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo`;
+const HISTORY_SELECT_BASE = 'conciliacion_id, area_id, fecha, mensajero, fecha_inicial, fecha_final, area, ordenes_efectivo, cxc_cu, ordenes_transfermovil, cxp_tm, ordenes_saldo_mandao, cxp_sm, ordenes_tarjeta, cxp_us, tipo_mochila, alquiler_mochila, disponibilidades, total_ordenes, total_por_cobrar, total_por_pagar, saldo_cup, via_pago, responsable, conciliacion, estado, facturacion';
+const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct`;
 
 function mapHistoryRow(r: any): ConciliacionRecord {
   return {
     pdfDriveUrl: r.pdf_drive_url || null,
+    areaId: r.area_id || null,
+    comisionPct: r.comision_pct !== null && r.comision_pct !== undefined ? Number(r.comision_pct) : null,
     consecutivo: r.consecutivo || null,
     id: r.conciliacion_id,
     fecha: r.fecha,
@@ -158,48 +164,7 @@ function mapHistoryRow(r: any): ConciliacionRecord {
   };
 }
 
-// PDF de una conciliación a partir de los campos ya guardados: se sube a
-// Google Drive al registrarla y se puede regenerar desde la BD.
-async function buildPdfMensajero(rec: ConciliacionRecord) {
-  const { jsPDF } = await import('jspdf');
-  const autoTable = (await import('jspdf-autotable')).default;
-
-  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-  doc.setFontSize(16);
-  doc.text(`Conciliación de Mensajero${rec.consecutivo ? ` · ${rec.consecutivo}` : ''}`, 14, 18);
-  doc.setFontSize(10);
-  doc.text(`Mensajero: ${rec.mensajero}`, 14, 26);
-  doc.text(`Período: ${formatDate(rec.fechaInicial)} - ${formatDate(rec.fechaFinal)}`, 14, 32);
-  doc.text(`Área: ${rec.area}   Responsable: ${rec.responsable}`, 14, 38);
-  doc.text(`Vía de Pago: ${rec.viaPago}   Tipo de Mochila: ${rec.tipoMochila}`, 14, 44);
-
-  autoTable(doc, {
-    startY: 52,
-    head: [['Concepto', 'Órdenes', 'Monto']],
-    body: [
-      ['Efectivo (CxC)', String(rec.ordenesEfectivo), formatCUP(rec.cxcCU)],
-      ['Transfermóvil (CxP)', String(rec.ordenesTransfermovil), formatCUP(rec.cxpTM)],
-      ['Saldo Mandao (CxP)', String(rec.ordenesSaldoMandao), formatCUP(rec.cxpSM)],
-      ['Tarjeta (CxP)', String(rec.ordenesTarjeta), formatCUP(rec.cxpUS)],
-      ['Disponibilidades', '—', formatCUP(rec.disponibilidades)],
-      ['Alquiler Mochila', '—', formatCUP(rec.alquilerMochila)],
-    ],
-  });
-
-  const finalY = (doc as any).lastAutoTable?.finalY || 90;
-  doc.setFontSize(11);
-  if (rec.totalPorPagar > rec.totalPorCobrar) {
-    doc.text(`Total a Pagar al Mensajero: ${formatCUP(rec.totalPorPagar - rec.totalPorCobrar)}`, 14, finalY + 10);
-  } else if (rec.totalPorCobrar > rec.totalPorPagar) {
-    doc.text(`Total a Cobrar al Mensajero: ${formatCUP(rec.totalPorCobrar - rec.totalPorPagar)}`, 14, finalY + 10);
-  }
-  if (rec.saldoCup !== null) {
-    doc.text(`Saldo CUP: ${formatCUP(rec.saldoCup)}`, 14, finalY + 16);
-  }
-
-  return doc;
-}
-
+// PDF: diseño "Reporte de conciliación" en src/lib/conciliacion/pdfConciliacionMensajero.ts.
 const pdfFileNameMensajero = (rec: ConciliacionRecord) =>
   `${rec.consecutivo ? `${rec.consecutivo}-` : ''}conciliacion-${rec.mensajero.replace(/[^a-z0-9]/gi, '-')}-${rec.fechaInicial}_${rec.fechaFinal}.pdf`;
 
@@ -642,11 +607,15 @@ export function ConciliacionMensajerosPage() {
         responsable_id: userData?.user?.id || null,
         conciliacion: `${c.mensajeroNombre} ${fechaInicio} - ${fechaFin}`,
         estado: 'Nuevo',
+        comision_pct: commissionPercent,
       }));
 
       let { data: inserted, error } = await supabase.from('conciliaciones_messengers').insert(rows).select(HISTORY_SELECT);
       if (isMissingPdfColumn(error)) {
-        ({ data: inserted, error } = await supabase.from('conciliaciones_messengers').insert(rows).select(HISTORY_SELECT_BASE));
+        // Migración 2026-10-15 sin correr: se registra sin el % (el PDF usa
+        // entonces el vigente en Configuración).
+        const rowsBase = rows.map(({ comision_pct, ...rest }) => rest);
+        ({ data: inserted, error } = await supabase.from('conciliaciones_messengers').insert(rowsBase).select(HISTORY_SELECT_BASE));
       }
       if (error) throw error;
       concSteps.update('registro', 'done', `${rows.length} conciliación(es) guardada(s)`);
@@ -659,11 +628,13 @@ export function ConciliacionMensajerosPage() {
 
       // PDF de cada conciliación -> carpeta de Google Drive (Configuración -> Data).
       // Un fallo aquí no deshace las conciliaciones: queda como advertencia.
-      concSteps.update('drive', 'running');
+      concSteps.update('drive', 'running', 'Cargando el detalle de órdenes…');
+      const registros = (inserted || []).map(mapHistoryRow);
+      const ordenesPorConciliacion = await loadOrdenesMensajero(registros);
       const drive = await subirPdfsConciliacion({
-        records: (inserted || []).map(mapHistoryRow),
+        records: registros,
         table: 'conciliaciones_messengers',
-        buildPdfBlob: async rec => (await buildPdfMensajero(rec)).output('blob'),
+        buildPdfBlob: async rec => (await buildPdfMensajero(rec, ordenesPorConciliacion.get(rec.id) || [], pdfDefaults)).output('blob'),
         fileName: pdfFileNameMensajero,
         displayName: rec => rec.mensajero,
         onProgress: (done, tot) => concSteps.update('drive', 'running', `${done} de ${tot} PDF`),
@@ -693,6 +664,10 @@ export function ConciliacionMensajerosPage() {
     }
   };
 
+  // % vigente: solo para conciliaciones registradas antes de que se guardara
+  // con cada fila (migración 2026-10-15).
+  const pdfDefaults = { comisionPct: commissionPercent };
+
   // Reintento desde el histórico cuando el PDF no se pudo subir al conciliar.
   const handleSubirPdf = async (rec: ConciliacionRecord) => {
     setSubiendoId(rec.id);
@@ -700,7 +675,7 @@ export function ConciliacionMensajerosPage() {
       const drive = await subirPdfsConciliacion({
         records: [rec],
         table: 'conciliaciones_messengers',
-        buildPdfBlob: async r => (await buildPdfMensajero(r)).output('blob'),
+        buildPdfBlob: async r => (await buildPdfMensajero(r, (await loadOrdenesMensajero([r])).get(r.id) || [], pdfDefaults)).output('blob'),
         fileName: pdfFileNameMensajero,
         displayName: r => r.mensajero,
       });
@@ -721,7 +696,8 @@ export function ConciliacionMensajerosPage() {
     // La pestaña se abre antes del await para que el navegador no la bloquee.
     const win = window.open('', '_blank');
     try {
-      const doc = await buildPdfMensajero(rec);
+      const ordenes = (await loadOrdenesMensajero([rec])).get(rec.id) || [];
+      const doc = await buildPdfMensajero(rec, ordenes, pdfDefaults);
       if (win) win.location.href = URL.createObjectURL(doc.output('blob'));
       else doc.save(pdfFileNameMensajero(rec));
     } catch (err: any) {
@@ -927,23 +903,37 @@ export function ConciliacionMensajerosPage() {
       <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)] shadow-sm overflow-hidden">
         <div className="p-4 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] space-y-3">
           <h3 className="text-xs font-black uppercase tracking-widest text-slate-500">Histórico de Conciliaciones ({filteredHistory.length})</h3>
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
-            <div className="relative md:col-span-2">
+          {/* Filtros: se acomodan en varias líneas según el ancho disponible. */}
+          <div className="flex flex-wrap gap-3">
+            <div className="relative flex-[2_1_16rem] min-w-[14rem]">
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--color-text-faint)]" />
-              <input type="text" placeholder="Buscar por mensajero, responsable..." value={historySearch} onChange={(e) => setHistorySearch(e.target.value)} className="w-full h-9 pl-9 pr-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)]" />
+              <input
+                type="text"
+                placeholder="Buscar por mensajero, responsable, consecutivo..."
+                aria-label="Buscar"
+                value={historySearch}
+                onChange={(e) => setHistorySearch(e.target.value)}
+                className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] pl-9"
+              />
             </div>
-            <select value={historyAreaFilter} onChange={(e) => setHistoryAreaFilter(e.target.value)} className="h-9 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none">
+            <select value={historyAreaFilter} onChange={(e) => setHistoryAreaFilter(e.target.value)} aria-label="Todas las Áreas" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
               <option value="">Todas las Áreas</option>
               {areas.map(a => <option key={a.id} value={a.nombre}>{a.nombre}</option>)}
             </select>
-            <select value={historyEstadoFilter} onChange={(e) => setHistoryEstadoFilter(e.target.value)} className="h-9 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none">
+            <select value={historyEstadoFilter} onChange={(e) => setHistoryEstadoFilter(e.target.value)} aria-label="Todos los Estados" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
               <option value="">Todos los Estados</option>
               {ESTADO_CONCILIACION_OPTIONS.map(e => <option key={e} value={e}>{e}</option>)}
             </select>
-            <div className="flex gap-2">
-              <input type="date" value={historyFechaInicio} onChange={(e) => setHistoryFechaInicio(e.target.value)} className="h-9 w-full px-2 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-xs outline-none font-mono" />
-              <input type="date" value={historyFechaFin} onChange={(e) => setHistoryFechaFin(e.target.value)} className="h-9 w-full px-2 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-xs outline-none font-mono" />
-            </div>
+            {/* Fechas con su etiqueta; cada campo tiene un ancho mínimo propio
+                para no desbordar (antes compartían una sola columna del grid). */}
+            <label className="flex items-center gap-2 flex-1 min-w-[11rem]">
+              <span className="text-xs font-medium text-[var(--color-text-muted)] shrink-0">Desde</span>
+              <input type="date" value={historyFechaInicio} onChange={(e) => setHistoryFechaInicio(e.target.value)} className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] px-2 font-mono text-xs" />
+            </label>
+            <label className="flex items-center gap-2 flex-1 min-w-[11rem]">
+              <span className="text-xs font-medium text-[var(--color-text-muted)] shrink-0">Hasta</span>
+              <input type="date" value={historyFechaFin} onChange={(e) => setHistoryFechaFin(e.target.value)} className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] px-2 font-mono text-xs" />
+            </label>
           </div>
         </div>
 
