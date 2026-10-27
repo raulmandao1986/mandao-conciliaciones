@@ -8,6 +8,7 @@ import { StatusBadge } from '../../design-system/primitives/StatusBadge';
 import { DataTable } from '../../design-system/patterns/DataTable';
 import { cn } from '../../lib/utils';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
+import { DriveFolderSettingsCard } from './components/DriveFolderSettingsCard';
 
 type EntityType = 'businesses' | 'messengers';
 
@@ -172,7 +173,7 @@ export function DocumentosImportacionPage() {
           <div>
             <h1 className="text-xl font-bold text-[var(--color-text)]">Data</h1>
             <p className="text-sm text-[var(--color-text-muted)] mt-1">
-              Registre los IDs de los Google Sheet de origen para la Importación Masiva de Negocios y Mensajeros.
+              Registre los IDs de los Google Sheet de origen para la Importación Masiva de Negocios y Mensajeros, y la carpeta de Google Drive de los PDF de Conciliación.
             </p>
           </div>
         </div>
@@ -182,6 +183,11 @@ export function DocumentosImportacionPage() {
             Nuevo Documento
           </Button>
         )}
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <DriveFolderSettingsCard canWrite={canWrite} entity="negocios" />
+        <DriveFolderSettingsCard canWrite={canWrite} entity="mensajeros" />
       </div>
 
       <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)] shadow-sm overflow-hidden">

@@ -17,7 +17,16 @@ interface PaymentMethodRecord {
   aplicaMensajeros: boolean;
   aplicaOrdenes: boolean;
   estado: 'activo' | 'inactivo';
+  // Clasificación para la conciliación (migración 2026-10-27): Tipología
+  // (Por Cobrar / Por Pagar), Moneda y Grupo con el que se arma el PDF.
+  tipologia: 'cobrar' | 'pagar';
+  moneda: 'CUP' | 'USD';
+  grupoId: string | null;
 }
+
+interface GrupoOption { id: string; nombre: string; orden: number }
+
+const TIPOLOGIA_TXT = { cobrar: 'Por Cobrar', pagar: 'Por Pagar' } as const;
 
 export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | 'ordenes' }) {
   const { user } = useAuth();
@@ -38,18 +47,30 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
     aplicaNegocios: true,
     aplicaMensajeros: true,
     aplicaOrdenes: true,
-    estado: 'activo' as 'activo' | 'inactivo'
+    estado: 'activo' as 'activo' | 'inactivo',
+    tipologia: 'pagar' as 'cobrar' | 'pagar',
+    moneda: 'CUP' as 'CUP' | 'USD',
+    grupoId: '',
   });
+  const [grupos, setGrupos] = useState<GrupoOption[]>([]);
+  // false = la migración 2026-10-27 todavía no se corrió (sin columnas de clasificación).
+  const [conClasificacion, setConClasificacion] = useState(true);
 
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [methodIdToDelete, setMethodIdToDelete] = useState<string | null>(null);
 
   const loadMethods = async () => {
     setLoading(true);
-    const { data: rows, error } = await supabase
-      .from('payment_methods')
-      .select('payment_method_id, name, description, applies_to_businesses, applies_to_messengers, applies_to_orders, active')
-      .order('name', { ascending: true });
+    const base = 'payment_method_id, name, description, applies_to_businesses, applies_to_messengers, applies_to_orders, active';
+    const query = (cols: string) => supabase.from('payment_methods').select(cols).order('name', { ascending: true });
+    let { data: rows, error } = await query(`${base}, tipologia, currency, group_id`);
+    const sinColumnas = !!error && (error.code === '42703' || /tipologia|currency|group_id/.test(error.message || ''));
+    if (sinColumnas) ({ data: rows, error } = await query(base));
+    setConClasificacion(!sinColumnas);
+    if (!sinColumnas) {
+      const { data: gs } = await supabase.from('payment_groups').select('group_id, name, sort_order').eq('active', true).order('sort_order');
+      setGrupos((gs || []).map((g: any) => ({ id: g.group_id, nombre: g.name, orden: g.sort_order ?? 0 })));
+    }
     if (error) {
       console.error('Error fetching payment_methods:', error.message);
       setLoading(false);
@@ -62,7 +83,10 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
       aplicaNegocios: m.applies_to_businesses,
       aplicaMensajeros: m.applies_to_messengers,
       aplicaOrdenes: m.applies_to_orders,
-      estado: m.active ? 'activo' : 'inactivo'
+      estado: m.active ? 'activo' : 'inactivo',
+      tipologia: m.tipologia === 'cobrar' ? 'cobrar' : 'pagar',
+      moneda: m.currency === 'USD' ? 'USD' : 'CUP',
+      grupoId: m.group_id || null,
     }));
     setData(records);
     setLoading(false);
@@ -91,7 +115,10 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
       aplicaNegocios: method.aplicaNegocios !== false,
       aplicaMensajeros: method.aplicaMensajeros !== false,
       aplicaOrdenes: method.aplicaOrdenes !== false,
-      estado: method.estado || 'activo'
+      estado: method.estado || 'activo',
+      tipologia: method.tipologia,
+      moneda: method.moneda,
+      grupoId: method.grupoId || '',
     });
     setIsFormOpen(true);
   };
@@ -104,7 +131,10 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
       aplicaNegocios: type === 'negocios' || !type,
       aplicaMensajeros: type === 'mensajeros' || !type,
       aplicaOrdenes: type === 'ordenes' || !type,
-      estado: 'activo'
+      estado: 'activo',
+      tipologia: 'pagar',
+      moneda: 'CUP',
+      grupoId: '',
     });
     setIsFormOpen(true);
   };
@@ -122,7 +152,12 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
         applies_to_messengers: formData.aplicaMensajeros,
         applies_to_orders: formData.aplicaOrdenes,
         active: formData.estado === 'activo',
-        updated_at: new Date().toISOString()
+        updated_at: new Date().toISOString(),
+        ...(conClasificacion ? {
+          tipologia: formData.tipologia,
+          currency: formData.moneda,
+          group_id: formData.grupoId || null,
+        } : {}),
       };
 
       if (selectedMethod) {
@@ -219,6 +254,23 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
               Órdenes
             </span>
           )}
+        </div>
+      )
+    });
+  }
+
+  // Clasificación: Tipología · Moneda · Grupo (también editable en
+  // Configuración -> Tipología de Pago).
+  if (conClasificacion) {
+    tableColumns.push({
+      header: 'Clasificación',
+      accessor: (item: PaymentMethodRecord) => (
+        <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+          <span className={cn('px-2 py-0.5 rounded font-bold border', item.tipologia === 'cobrar' ? 'bg-[var(--color-danger-bg)] text-[var(--color-danger)] border-red-200' : 'bg-[var(--color-success-bg)] text-[var(--color-success)] border-green-200')}>
+            {TIPOLOGIA_TXT[item.tipologia]}
+          </span>
+          <span className="px-2 py-0.5 rounded font-mono font-bold bg-[var(--color-surface-3)] text-[var(--color-text)] border border-[var(--color-border)]">{item.moneda}</span>
+          <span className="text-[var(--color-text-muted)]">{grupos.find(g => g.id === item.grupoId)?.nombre || 'Sin grupo'}</span>
         </div>
       )
     });
@@ -396,6 +448,43 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
                     <span className="text-xs text-[var(--color-text-faint)]">Gestión y control de Órdenes directas de reparto</span>
                   </div>
                 </label>
+              </div>
+            )}
+
+            {conClasificacion && (
+              <div className="space-y-3 border-t border-[var(--color-border)] pt-4">
+                <div>
+                  <span className="text-xs font-bold text-[var(--color-text)] block">Clasificación para la Conciliación</span>
+                  <span className="text-[11px] text-[var(--color-text-muted)]">
+                    Define si las órdenes pagadas con este método generan una Cuenta por Cobrar o por Pagar, su moneda y con qué grupo se muestran en el PDF.
+                  </span>
+                </div>
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs font-bold text-[var(--color-text)]">Tipología *</span>
+                  <select value={formData.tipologia} onChange={(e) => setFormData(p => ({ ...p, tipologia: e.target.value as 'cobrar' | 'pagar' }))} className="h-10 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)]">
+                    <option value="cobrar">Por Cobrar — el negocio/mensajero cobra al cliente y le debe a Mandao (ej. Efectivo)</option>
+                    <option value="pagar">Por Pagar — obligación de Mandao (ej. Transfermóvil, Saldo, tarjetas)</option>
+                  </select>
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-xs font-bold text-[var(--color-text)]">Moneda *</span>
+                    <select value={formData.moneda} onChange={(e) => setFormData(p => ({ ...p, moneda: e.target.value as 'CUP' | 'USD' }))} className="h-10 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)]">
+                      <option value="CUP">CUP</option>
+                      <option value="USD">USD</option>
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-xs font-bold text-[var(--color-text)]">Grupo</span>
+                    <select value={formData.grupoId} onChange={(e) => setFormData(p => ({ ...p, grupoId: e.target.value }))} className="h-10 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)]">
+                      <option value="">Sin grupo</option>
+                      {grupos.map(g => <option key={g.id} value={g.id}>{g.nombre}</option>)}
+                    </select>
+                  </label>
+                </div>
+                <span className="text-[11px] text-[var(--color-text-faint)] block">
+                  Moneda USD: estas órdenes forman la liquidación "Exterior" de los negocios con vía Transferencia-Exterior; para el resto de los negocios se liquidan en CUP.
+                </span>
               </div>
             )}
 

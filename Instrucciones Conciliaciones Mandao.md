@@ -228,6 +228,10 @@ El sistema tiene **3 roles de usuario** con matrices de acceso diferenciadas. El
 
 > ✅ **MÓDULO EN IMPLEMENTACIÓN ACTIVA.** Todo el contenido de esta sección debe respetarse y ejecutarse tal como está especificado.
 
+> **Corrección 2026-09-30 — Fechas y Moneda**:
+> - **Fechas**: el formato real de "Delivery Date"/"Fecha" en los Sheets es **dd/mm/yyyy**. Antes existían ~5 copias distintas del parser de fechas entre Verificación/Revisión de Dispatcher y Disponibilidad, todas con un `new Date(str)` de último recurso para formatos no reconocidos (ambiguo, depende del motor JS) — esa era la causa real de que algunas órdenes no se importaran, sin ningún aviso. Se consolidó en un único parser compartido (`lib/sheetDateParser.ts`) usado por las 4 pantallas, sin ese fallback: una fecha no reconocida ahora se reporta como **incidencia crítica** (RN-002 ampliada) con el valor exacto de la celda, en vez de desaparecer del rango en silencio.
+> - **Moneda**: el dispatcher siempre registra los montos en CUP — nunca en USD. Antes Verificación/Revisión de Dispatcher mostraban estos montos con un "$" crudo (`formatCUP()` ahora los etiqueta correctamente). La única conversión a USD que existe en todo el sistema ocurre **dentro de Conciliación de Negocios**, y solo para negocios con Método de Pago "Transferencia-Exterior" — ver sección 6.4.
+
 El Dispatcher es el **módulo central** del sistema. Es la puerta de entrada de toda la información que luego se concilia y factura. Toda generación de código para este módulo debe respetar el flujo exacto descrito aquí.
 
 ### Estructura de carpetas del módulo
@@ -426,13 +430,142 @@ Sistema muestra diferencias detectadas
 
 ## 6. Módulo Negocios
 
-> ⏳ Pendiente de especificación — fase posterior del desarrollo. No implementar hasta que este bloque sea reemplazado con la especificación completa.
+> ✅ Submódulo **Conciliación** implementado 2026-09-24, conectado a Supabase (`src/modules/conciliacion/ConciliacionNegociosPage.tsx`), corregido 2026-09-30 (tabla renombrada a `conciliaciones_businesses`, `estado` ahora es un ciclo de vida de texto) al comparar contra las instrucciones generales de Conciliación que cubren Negocios y Mensajeros a la vez — ver sección 7 para Mensajeros, y `lib/conciliacion/paymentBuckets.ts` para el motor de cálculo compartido entre ambas entidades. Dashboard/Facturación/Cuentas por Pagar/Cuentas por Cobrar/Planificación de Pagos de Negocios siguen ⏳ pendientes de especificación.
+
+### 6.1 Submódulo Conciliación — Descripción general
+
+Procesa y registra el balance financiero de los negocios en un período determinado. La fuente de las órdenes es la tabla `dispatcher` (ya verificada e importada por el Dispatcher — ver sección 5), **no** un nuevo origen de datos.
+
+**Parámetros de entrada:**
+- **Rango de Fechas**: Fecha Inicial y Fecha Final (filtran `dispatcher.delivery_date`).
+- **Área**: seleccionable desde `areas`; en modo Masiva admite "Todas las Áreas".
+- **Negocio**: seleccionable desde `businesses` filtrado por el Área elegida — obligatorio solo en modo Individual.
+
+### 6.2 Tipos de Conciliación
+
+- **Individual**: procesa y muestra en pantalla el detalle de un único negocio ya elegido en el selector.
+- **Masiva**: agrupa todas las órdenes del rango (de un Área o de todas) por negocio (`dispatcher.store`, normalizado sin tildes/mayúsculas) y calcula el desglose de cada uno por separado. Cada negocio se concilia como un registro independiente en `conciliaciones_businesses` — no se mezclan montos entre negocios. **Solo se muestran y procesan los negocios pendientes**: los que ya tienen una conciliación registrada para ese mismo rango exacto se omiten por completo de la lista (no se listan ni grisados) — ver regla 6.4.2.
+
+### 6.3 Mapeo de Payment Type a los 4 baldes (confirmado con el usuario 2026-09-24)
+
+`dispatcher.payment_type` es texto libre (validado por RN-005 contra `payment_methods`, pero no normalizado antes de guardarse). El catálogo real vigente que aplica a Órdenes y su balde:
+
+| `payment_type` (catálogo real) | Balde |
+|---|---|
+| `Cash` | Efectivo |
+| `Transfermóvil` | Transfermóvil |
+| `Saldo Mandao` | Saldo Mandao |
+| `Card` | Tarjeta |
+| `Crédito o Débito` | Tarjeta |
+| `TropiPay Balance` | Tarjeta |
+
+La comparación se hace normalizada (sin tildes, minúsculas, sin espacios — `normalizeCompact()` en `ConciliacionNegociosPage.tsx`) para tolerar variaciones de formato. Una orden cuyo `payment_type` no calza con ninguna fila de la tabla se cuenta aparte como "sin clasificar" y se avisa en la UI — no se descarta silenciosamente ni se fuerza a un balde.
+
+### 6.4 Cálculo financiero — por Método de Pago del negocio (corregido 2026-09-30)
+
+- **Saldo de una orden** = `dispatcher.product_amount` (confirmado con el usuario: sin restar Store Offer, Processing Fee ni Store Admin Charge). **Siempre está en CUP** — el dispatcher nunca registra montos en USD.
+- **% de Comisión Mandao**: configurable en Configuración → Comisión Mandao (tabla `commission_settings`, 20% para Negocios y 10% para Mensajeros).
+- **Efectivo → CxC CU** = % configurado del saldo de las órdenes en Efectivo (siempre en CUP). Es dinero que el negocio debe a Mandao.
+- **Transfermóvil/Saldo Mandao/Tarjeta → CxP TM/SM/US** = (100% − % configurado) del saldo de cada balde. Es dinero que Mandao debe al negocio.
+- **El cálculo real NO es uno solo por negocio** — depende del Método de Pago registrado del negocio (`businesses.payment_method`, catálogo Configuración → Métodos de Pago → Negocios). Genera 1 o 2 filas de conciliación por rango:
+
+  | Método de Pago del negocio | Filas generadas | Fórmula |
+  |---|---|---|
+  | `Transferencia` (o no reconocido, como respaldo) | 1 fila, CUP | `0.8×(TM+SM+US) − CxC` |
+  | `Transferencia-Efectivo` | 2 filas, ambas CUP | "Transferencia" = `0.8×TM` · "Efectivo" = `0.8×(SM+US) − CxC` |
+  | `Transferencia-Exterior` | 2 filas | "Transferencia" (CUP) = `0.8×TM − CxC` · "Exterior" (USD, vía tasa de cambio activa) = `0.8×(SM+US)` convertido |
+
+  (`0.8` es el (100% − % de comisión) vigente, hoy 80% con el 20% configurado). Cada fila solo llena los baldes que le corresponden — los demás quedan en `0` — para que el total de esa fila salga siempre de la misma fórmula universal `CxP TM + CxP SM + CxP US − CxC CU`, sin mezclar CUP con USD dentro de una misma fila.
+
+  > **Aclaración importante (confirmada con el usuario 2026-09-30)**: el nombre "Efectivo" de la fila/riel de liquidación **no tiene relación** con el balde de órdenes "Efectivo" (`payment_type = Cash`, lo que pagó el cliente). "Efectivo" como riel describe **cómo Mandao le entrega el dinero al negocio** (en persona/en mano, o por transferencia, según se acuerde) — es un canal de pago hacia el negocio, no una clasificación de las órdenes. La fórmula de esa fila (`0.8×(SM+US) − CxC`) sigue usando el balde de órdenes Efectivo solo para restar el CxC que le corresponde cobrar al negocio, no porque el riel "Efectivo" agrupe esas órdenes. La UI (`ConciliacionNegociosPage.tsx`) rotula el balde de órdenes como "Efectivo (Cash del cliente)" para evitar la confusión.
+- La conversión a USD (columna `moneda = 'USD'`) **solo ocurre** en la fila "Exterior" de un negocio con Método de Pago `Transferencia-Exterior`, usando la tasa de cambio activa (Configuración → Razón de Cambio). Todo lo demás del sistema (Dispatcher, Disponibilidad, el resto de Conciliación) se muestra siempre en CUP — antes se mostraba con "$" dando a entender que era USD, ya corregido.
+- **Convención de la tasa** (confirmado por el usuario 2026-10-01): la tasa activa está en **USD por 1 CUP** (hoy 0.002), así que la fila "Exterior" convierte con `USD = CUP × tasa`. Antes la tasa se guardaba como CUP por USD y se dividía.
+- **Total a Pagar** (de una fila) = `CxP − CxC`, se muestra solo si es estrictamente mayor que cero, en la `moneda` de esa fila.
+- **Total a Cobrar** (de una fila) = `CxC − CxP`, se muestra solo si es estrictamente mayor que cero, en la `moneda` de esa fila.
+
+### 6.4.1 Regla — Existencia de datos
+
+El negocio (Individual) o cada negocio iterado (Masiva) debe tener al menos una orden en el rango de fechas; si no, se informa "sin órdenes" y el botón Conciliar permanece deshabilitado para ese negocio.
+
+### 6.4.2 Regla — Duplicidad (Filtro de Pendientes)
+
+No puede existir una conciliación previa para el mismo `business_id`, el mismo rango exacto (`fecha_inicial`/`fecha_final`) **y el mismo riel de liquidación** (`via_pago`: "Transferencia"/"Efectivo"/"Exterior") — un negocio con Método de Pago dividido en 2 filas puede tener una ya conciliada y la otra pendiente, de forma independiente. En Individual esto bloquea el botón "Conciliar" de esa fila y muestra un aviso; en Masiva, esa fila directamente no aparece en la lista de pendientes (ver 6.2). Verificado en la UI antes de habilitar "Conciliar" y reforzado con un índice único real en Supabase (`uq_conciliaciones_businesses_range`, sobre `business_id, fecha_inicial, fecha_final, via_pago`), que rechaza el insert aunque la UI fallara en detectarlo.
+
+### 6.4.3 Regla — Existencia del negocio en el catálogo
+
+`dispatcher.store` es texto libre importado del Sheet — puede no tener fila correspondiente en `businesses` todavía (típicamente en Masiva, donde el negocio se descubre desde las órdenes en vez de elegirse de un listado ya registrado). Si falta, la Conciliación de ese negocio queda bloqueada y la UI ofrece un botón "Registrar Negocio(s) Faltante(s)" que inserta una fila mínima en `businesses` (nombre + área + activo) — solo disponible para Super Admin, misma política RLS que Gestión de Negocios (`manage_businesses`). En modo Individual esta regla no aplica nunca (el negocio ya viene de `businesses` por construcción del selector).
+
+### 6.5 Registro en Base de Datos (tabla `conciliaciones_businesses`, ver sección 12 tabla 19)
+
+Al ejecutar "Conciliar" se inserta 1 fila por cada liquidación elegible marcada en `conciliaciones_businesses` (un negocio con Método de Pago dividido aporta hasta 2 filas — ver 6.4):
+
+| Campo (spec) | Columna real | Origen |
+|---|---|---|
+| Fecha | `fecha` | Fecha del día en que se ejecuta |
+| Establecimiento | `establecimiento` | `dispatcher.store` / nombre del negocio |
+| Fecha inicial / final | `fecha_inicial` / `fecha_final` | Rango seleccionado |
+| Órdenes Efectivo / CXC CU | `ordenes_efectivo` / `cxc_cu` | Balde Efectivo — `0` si no le toca a esta fila |
+| Órdenes Transfermóvil / CXP TM | `ordenes_transfermovil` / `cxp_tm` | Balde Transfermóvil — `0` si no le toca a esta fila |
+| Órdenes Saldo Mandao / CXP SM | `ordenes_saldo_mandao` / `cxp_sm` | Balde Saldo Mandao — `0` si no le toca a esta fila |
+| Órdenes Tarjeta / CXP US | `ordenes_tarjeta` / `cxp_us` | Balde Tarjeta — `0` si no le toca a esta fila |
+| Vía de pago | `via_pago` | El riel de liquidación de ESTA fila: `"Transferencia"` / `"Efectivo"` / `"Exterior"` (no el método de pago crudo del negocio) |
+| Moneda | `moneda` | `'CUP'` o `'USD'` — ver tabla de fórmulas en 6.4 |
+| Responsable | `responsable` (+ `responsable_id`) | Usuario autenticado que ejecuta la acción |
+| Conciliación | `conciliacion` | `"[Negocio] ([Riel]) [FechaInicial] - [FechaFinal]"`, clickeable en la UI: genera un PDF real (jsPDF + autoTable) al momento, a partir de los campos ya guardados — no se persiste ningún archivo |
+| Área | `area` (+ `area_id`) | Área del negocio/orden |
+| Estado | `estado` | `'Nuevo'` siempre al insertar — ciclo de vida: `Nuevo → Enviado → Aprobado/Incorrecto → Facturado` (texto, `check` en Supabase, sección 12 tabla 19) |
+
+Facturación, Descuento, Nota, Pagado, Saldo, Estado de pago, Referencia, Fecha de pago y Prioridad quedan `null` — se completan desde los módulos de Facturación/CxC/CxP, todavía sin construir. `Estado` (el ciclo de vida) es distinto de `Estado de pago` (`estado_pago`, libre, lo completa el módulo de CxC/CxP).
+
+### 6.6 Interfaz — Historial
+
+Tabla con registro histórico de `conciliaciones_businesses`, orden descendente por `fecha`. Filtros: rango de fecha (sobre `fecha`), Área, Estado (`Nuevo`/`Enviado`/`Aprobado`/`Incorrecto`/`Facturado`), Método de Pago (`via_pago`); buscador de texto libre (establecimiento/responsable/conciliación). Cada fila es expandible para ver el resto de los campos (Responsable, desglose completo por balde, Facturación, Descuento, Nota, Pagado, Saldo, Referencia, Fecha de pago, Prioridad).
 
 ---
 
 ## 7. Módulo Mensajeros
 
-> ⏳ Pendiente de especificación — fase posterior del desarrollo. No implementar hasta que este bloque sea reemplazado con la especificación completa.
+> ✅ Submódulo **Conciliación** implementado 2026-09-30, conectado a Supabase (`src/modules/conciliacion/ConciliacionMensajerosPage.tsx`), reutilizando el motor de baldes de Negocios (`lib/conciliacion/paymentBuckets.ts`). Dashboard/Facturación/Cuentas por Pagar/Cuentas por Cobrar/Planificación de Pagos de Mensajeros siguen ⏳ pendientes de especificación. `Alquiler de Mochila` (sección 7.4) quedó confirmado y activo el mismo día.
+
+### 7.1 Submódulo Conciliación — Descripción general
+
+Mismo patrón que Negocios (sección 6): procesa y registra el balance financiero de un mensajero en un período determinado, a partir de la tabla `dispatcher` (columna `driver`, no `store`).
+
+**Parámetros de entrada:**
+- **Rango de Fechas**: Fecha Inicial y Fecha Final (filtran `dispatcher.delivery_date`).
+- **Área**: seleccionable desde `areas`; en modo Masiva admite "Todas las Áreas".
+- **Mensajero**: seleccionable desde `messengers` filtrado por el Área elegida — obligatorio solo en modo Individual.
+
+### 7.2 Tipos de Conciliación
+
+- **Individual**: procesa y muestra en pantalla el detalle de un único mensajero ya elegido en el selector.
+- **Masiva**: agrupa todas las órdenes del rango por mensajero (`dispatcher.driver`, normalizado) y calcula el desglose de cada uno por separado. **Solo se muestran y procesan los mensajeros pendientes** (sin conciliación previa en ese rango exacto) — igual que en Negocios (sección 6.2).
+
+### 7.3 Mapeo de Payment Type y cálculo de baldes
+
+Idéntico a Negocios (sección 6.3/6.4): mismo catálogo `Cash/Transfermóvil/Saldo Mandao/Card/Crédito o Débito/TropiPay Balance` → los 4 baldes, **"Saldo de una orden" = `delivery_charge`** (no `product_amount` como en Negocios — confirmado por el usuario 2026-10-01), mismo % de comisión (configurable, ver Configuración → Comisión Mandao — **valor propio para Mensajeros**, no comparte fila con Negocios en `commission_settings`, con 10% como valor inicial de referencia). Efectivo → CxC CU; Transfermóvil/Saldo Mandao/Tarjeta → CxP TM/SM/US.
+
+### 7.4 Campos propios de Mensajeros (más allá de los 4 baldes)
+
+- **Tipo de Mochila**: informativo, tomado de `messengers.backpack_type` al momento de conciliar.
+- **Disponibilidades** ✅ implementado: suma de `availabilities.amount_to_pay` del mismo mensajero (nombre normalizado) y la misma Área, dentro del mismo rango de fechas — dinero adicional que Mandao le debe (ver sección 18, módulo Disponibilidad). Se suma a Total por Pagar. **Descuento de Disponibilidad** (agregado 2026-10-01): a esa suma se le resta el % configurado en Configuración → Comisión Mandao → "Descuento de Disponibilidad (Mensajeros)" (tabla `availability_discount_settings`, arranca en 0%); el monto que se muestra, se guarda en `conciliaciones_messengers.disponibilidades` y se suma a Total por Pagar es el neto: `suma(amount_to_pay) × (1 − % / 100)`.
+- **Alquiler de Mochila** ✅ implementado (confirmado por el usuario 2026-09-30): tarifa fija por tipo de mochila (`Pequeña` / `Grande`), configurable en el mismo submódulo **Configuración → Comisión Mandao** (tabla `backpack_rental_rates`, arranca en `$0.00` para ambos tipos hasta que se les asigne un valor real). Se aplica una sola vez por conciliación, según el `messengers.backpack_type` del mensajero, y se resta de Total por Pagar. Un mensajero no registrado en `messengers` (sin tipo de mochila conocido) no tiene tarifa aplicada.
+- **Total de Órdenes**: cantidad total de órdenes del mensajero en el rango (suma de los 4 baldes + las sin clasificar).
+- **Total por Cobrar** = CxC CU (igual que Negocios).
+- **Total por Pagar** = `CxP TM + CxP SM + CxP US + Disponibilidades − Alquiler de Mochila`.
+- **Saldo CUP** ✅ implementado: `Total por Pagar − Total por Cobrar`, en CUP y **sin tasa de cambio** (corregido 2026-09-30: los mensajeros siempre cobran y pagan en CUP — vías de pago "Efectivo" y "Transferencia" —, y el dispatcher registra todo en CUP; antes se multiplicaba por la tasa activa y quedaba convertido dos veces). Puede salir negativo, indica que es "a cobrar" en vez de "a pagar". Todos los montos de Conciliación de Mensajeros se muestran en CUP.
+
+### 7.4.1 Regla — Existencia de datos, Registro en catálogo y Duplicidad
+
+Mismas 3 reglas que Negocios (secciones 6.4.1–6.4.3), aplicadas a `messengers` en vez de `businesses`: sin órdenes → bloqueado; mensajero encontrado en `dispatcher.driver` sin fila en `messengers` → alerta + botón "Registrar Mensajero(s) Faltante(s)" (solo Super Admin, política `manage_messengers`); conciliación previa para el mismo `messenger_id` y rango exacto → bloqueado/omitido de la lista de pendientes, reforzado con índice único `uq_conciliaciones_messengers_range`.
+
+### 7.5 Registro en Base de Datos (tabla `conciliaciones_messengers`, ver sección 12 tabla 20)
+
+Al ejecutar "Conciliar" se inserta en `conciliaciones_messengers`: Fecha, Mensajero, Fecha inicial/final, Área, los 4 baldes (órdenes + monto), Tipo de Mochila, Alquiler Mochila (0 por ahora), Disponibilidades, Total de Órdenes, Total por Cobrar, Total por Pagar, Saldo CUP, Vía de Pago (`messengers.payment_method`), Responsable, Conciliación (`"[Mensajero] [FechaInicial] - [FechaFinal]"`, clickeable → PDF generado al momento). Estado entra como `'Nuevo'`, mismo ciclo de vida que Negocios (sección 6.5). Facturación queda `null`.
+
+### 7.6 Interfaz — Historial
+
+Igual que Negocios (sección 6.6): tabla descendente por `fecha`, filtros (rango de fecha, Área, Estado, buscador de texto libre por mensajero/responsable/conciliación), filas expandibles con el resto de los campos (Tipo de Mochila, Disponibilidades, Alquiler Mochila, Saldo CUP, Facturación, etc.).
 
 ---
 
@@ -602,7 +735,7 @@ Una orden **no puede importarse más de una vez** para la misma Área y fecha op
 
 > 🔄 Sección reescrita 2026-09-13. **La base de datos con la que se trabaja es Supabase (Postgres)** — Firestore ya no existe en este sistema. Esta sección documenta el esquema REAL y vigente, tal como vive en `supabase_schema.sql` (raíz del repo), que es la única fuente de verdad — cualquier tabla nueva se define primero ahí (con sus políticas RLS) y luego se refleja aquí. El agente AI no debe crear tablas adicionales a las aquí documentadas sin actualizar ambos archivos.
 
-> **Alcance actual**: las 16 tablas de esta sección ya están migradas y en uso — Dispatcher, Disponibilidad y los catálogos de Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría, Data). El módulo financiero (Conciliación, Facturación, Cuentas por Cobrar/Pagar, Planificación de Pagos) sigue sin tabla propia — ver "Tablas pendientes" al final de esta sección.
+> **Alcance actual**: las 21 tablas de esta sección ya están migradas y en uso — Dispatcher, Disponibilidad, los catálogos de Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría, Data, Roles de Acceso, Comisión Mandao, Alquiler de Mochila) y **Conciliación de Negocios y de Mensajeros**. Facturación, Cuentas por Cobrar/Pagar y Planificación de Pagos (de ambas entidades) siguen sin tabla propia — ver "Tablas pendientes" al final de esta sección.
 
 ### Tablas activas — Fase actual ✅
 
@@ -615,6 +748,7 @@ Una orden **no puede importarse más de una vez** para la misma Área y fecha op
 | `email` | text |
 | `role` | enum `user_role`: `super_admin` / `supervisor` / `operador` / `visitante` |
 | `active` | boolean — si `false`, cuenta pendiente de autorización (ver sección 19.3.1) |
+| `access_role_id` | uuid (FK a `access_roles`, nullable) — Rol de Acceso opcional (agregado 2026-09-23, ver tabla 17 y sección 19.3.2) |
 | `created_at` / `updated_at` | timestamptz |
 
 **2. `public.areas`**
@@ -790,7 +924,7 @@ Una orden **no puede importarse más de una vez** para la misma Área y fecha op
 |---|---|
 | `exchange_rate_id` | uuid (PK) |
 | `name` | text |
-| `rate_cup` | numeric(12,2) |
+| `rate_cup` | numeric(18,8) — **USD por 1 CUP** (ej. 0.002 ≈ 500 CUP por USD; admite valores menores que 1, cambiado 2026-10-01) |
 | `description` | text |
 | `active` | boolean |
 | `created_at` / `updated_at` | timestamptz |
@@ -825,6 +959,89 @@ Catálogo de IDs de Google Sheet para la Importación Masiva de Gestión de Nego
 
 > **Resolución de Área (agregado 2026-09-22)**: la columna "Área"/"Provincia" de la hoja trae nombres reales de provincia (ej. "Santa Clara"), que no necesariamente coinciden con `areas.name`. `BulkImportModal.tsx` primero intenta un match exacto de nombre y, si no hay, categoriza por provincia (Habana / Holguín / Provincias — todo lo que no sea Habana ni Holguín) usando `areas.province`, igual que ya hace `VerificationPage.tsx` para el Dispatcher. Como la importación hace upsert por nombre, reimportar corrige retroactivamente los registros que hubieran quedado con `area_id` nulo.
 
+**17. `public.access_roles`** — Roles de Acceso (agregado 2026-09-23)
+
+| Campo | Tipo |
+|---|---|
+| `access_role_id` | uuid (PK) |
+| `name` | text — único |
+| `description` | text |
+| `module_keys` | text[] — ids de módulos/ítems de menú que este rol deja ver (ver `moduleCatalog.ts`) |
+| `created_at` / `updated_at` | timestamptz |
+
+> **Unificado 2026-09-24** (ver sección 19.3.2): `RolesUsuariosPage.tsx` pestaña "Roles" lista los 4 roles de sistema (Super Admin/Supervisor/Operador/Visitante, `is_system = true`, no eliminables) más los que se creen. Sigue sin reemplazar `profiles.role`/RLS: `base_role` solo decide qué valor de `profiles.role` se copia al asignar ese Rol de Acceso a un usuario.
+
+**18. `public.commission_settings`** — Comisión Mandao (agregado 2026-09-24)
+
+| Campo | Tipo |
+|---|---|
+| `entity_type` | text (PK) — `'businesses'` / `'messengers'` |
+| `percentage` | numeric(5,2) |
+| `updated_at` / `updated_by` | timestamptz / uuid (FK a `auth.users`) |
+
+Un solo valor vigente por tipo de entidad (sin historial de tasas pasadas). `businesses` = 20%, `messengers` = 10% (confirmado por el usuario 2026-09-30) — ambos ajustables desde Configuración → Comisión Mandao. Usada por Conciliación de Negocios (sección 6.4) y de Mensajeros (sección 7.3) para calcular CxC/CxP.
+
+**19. `public.conciliaciones_businesses`** — Conciliación de Negocios (agregado 2026-09-24, renombrada de `conciliaciones` 2026-09-30)
+
+| Campo | Tipo |
+|---|---|
+| `conciliacion_id` | uuid (PK) |
+| `fecha` | date — fecha de ejecución |
+| `business_id` / `establecimiento` | uuid (FK a `businesses`) / text denormalizado |
+| `fecha_inicial` / `fecha_final` | date |
+| `area_id` / `area` | uuid (FK a `areas`) / text denormalizado |
+| `ordenes_efectivo` / `cxc_cu` | integer / numeric(12,2) |
+| `ordenes_transfermovil` / `cxp_tm` | integer / numeric(12,2) |
+| `ordenes_saldo_mandao` / `cxp_sm` | integer / numeric(12,2) |
+| `ordenes_tarjeta` / `cxp_us` | integer / numeric(12,2) |
+| `via_pago` | text — riel de liquidación de ESTA fila: `"Transferencia"` / `"Efectivo"` / `"Exterior"` (agregado 2026-09-30; antes guardaba el método de pago crudo del negocio) |
+| `moneda` | text — `'CUP'` o `'USD'` (agregado 2026-09-30, ver sección 6.4) |
+| `responsable` / `responsable_id` | text / uuid (FK a `auth.users`) |
+| `conciliacion` | text — label clickeable, genera PDF al vuelo |
+| `estado` | text — ciclo de vida `Nuevo`/`Enviado`/`Aprobado`/`Incorrecto`/`Facturado` (antes boolean, corregido 2026-09-30), `'Nuevo'` al insertar |
+| `facturacion`, `descuento`, `nota`, `pagado`, `saldo`, `estado_pago`, `referencia`, `fecha_pago`, `prioridad` | nullable — los completan Facturación/CxC/CxP (sin construir aún) |
+| `created_at` / `updated_at` | timestamptz |
+
+Índice único `uq_conciliaciones_businesses_range` sobre `(business_id, fecha_inicial, fecha_final, via_pago)` (ampliado 2026-09-30 para permitir hasta 2 filas por negocio+rango) — refuerza a nivel de base de datos la regla de no-duplicidad (sección 6.4.2).
+
+**20. `public.conciliaciones_messengers`** — Conciliación de Mensajeros (agregado 2026-09-30)
+
+| Campo | Tipo |
+|---|---|
+| `conciliacion_id` | uuid (PK) |
+| `fecha` | date — fecha de ejecución |
+| `messenger_id` / `mensajero` | uuid (FK a `messengers`) / text denormalizado |
+| `fecha_inicial` / `fecha_final` | date |
+| `area_id` / `area` | uuid (FK a `areas`) / text denormalizado |
+| `ordenes_efectivo` / `cxc_cu` | integer / numeric(12,2) |
+| `ordenes_transfermovil` / `cxp_tm` | integer / numeric(12,2) |
+| `ordenes_saldo_mandao` / `cxp_sm` | integer / numeric(12,2) |
+| `ordenes_tarjeta` / `cxp_us` | integer / numeric(12,2) |
+| `tipo_mochila` | text — `messengers.backpack_type` al momento de conciliar |
+| `alquiler_mochila` | numeric(12,2) — tarifa vigente en `backpack_rental_rates` para ese tipo de mochila, ver tabla 21 y sección 7.4 |
+| `disponibilidades` | numeric(12,2) — suma de `availabilities.amount_to_pay` del mismo mensajero/rango |
+| `total_ordenes` | integer |
+| `total_por_cobrar` / `total_por_pagar` | numeric(12,2) |
+| `saldo_cup` | numeric(12,2), nullable — neto (Total por Pagar − Total por Cobrar) en CUP, sin conversión |
+| `via_pago` | text — `messengers.payment_method` |
+| `responsable` / `responsable_id` | text / uuid (FK a `auth.users`) |
+| `conciliacion` | text — label clickeable, genera PDF al vuelo |
+| `estado` | text — mismo ciclo de vida que `conciliaciones_businesses` |
+| `facturacion` | nullable |
+| `created_at` / `updated_at` | timestamptz |
+
+Índice único `uq_conciliaciones_messengers_range` sobre `(messenger_id, fecha_inicial, fecha_final)`.
+
+**21. `public.backpack_rental_rates`** — Alquiler de Mochila (agregado 2026-09-30)
+
+| Campo | Tipo |
+|---|---|
+| `backpack_type` | text (PK) — `'Pequeña'` / `'Grande'` |
+| `rate` | numeric(12,2) |
+| `updated_at` / `updated_by` | timestamptz / uuid (FK a `auth.users`) |
+
+Tarifa fija por tipo de mochila, gestionada en el mismo submódulo Configuración → Comisión Mandao (sección 7.4). Ambas filas arrancan en `$0.00` — sin valor real confirmado todavía, se configuran desde la UI antes de afectar una conciliación real. Usada por Conciliación de Mensajeros para restar de Total por Pagar según `messengers.backpack_type` (ver tabla 20, columna `alquiler_mochila`).
+
 ### Funciones auxiliares (equivalente a las "reglas de seguridad" que tenía Firestore)
 
 | Función | Uso |
@@ -846,21 +1063,23 @@ Todas las tablas tienen RLS activo. Resumen por tipo de política:
 - **Verificaciones e incidencias** (`dispatcher_verifications`, `availability_verifications`, `dispatcher_incidents`, `availability_incidents`, `dispatcher_changes`): insertar requiere `can_execute_processes()`.
 - **Importaciones** (`dispatcher`, `availabilities`, `availability_imports`): insertar requiere `is_admin_or_supervisor()`.
 - **Edición/eliminación manual** en `dispatcher` y `availabilities` (Revisión): requiere `is_admin_or_supervisor()`.
-- **Catálogos** (`areas`, `messengers`, `payment_methods`, `exchange_rates`, `businesses`): CRUD completo (`for all`) solo `super_admin`.
+- **Catálogos** (`areas`, `messengers`, `payment_methods`, `exchange_rates`, `businesses`, `import_sources`, `access_roles`, `commission_settings`, `backpack_rental_rates`): CRUD completo (`for all`) solo `super_admin`.
+- **`conciliaciones_businesses` / `conciliaciones_messengers`**: CRUD completo (`for all`) requiere `is_admin_or_supervisor()` — es un proceso que mueve dinero, mismo nivel que Importación, no de solo-lectura como Verificar (Operador no puede ejecutar Conciliación).
 
 ### Tablas pendientes — módulo financiero sin diseñar ⏳
 
-> A diferencia de la versión anterior de este documento (que listaba `Stores`/`Drivers`/`PaymentMethods`/`ExchangeRates` como pendientes — las 4 ya están implementadas arriba, como `businesses`, `messengers`, `payment_methods` y `exchange_rates`), lo que realmente queda sin construir es el **módulo financiero**: Conciliación, Facturación, Cuentas por Cobrar, Cuentas por Pagar y Planificación de Pagos.
+> Conciliación de Negocios (tabla 19, sección 6) y de Mensajeros (tabla 20, sección 7) ya se implementaron. Lo que queda sin construir es: Facturación, Cuentas por Cobrar, Cuentas por Pagar y Planificación de Pagos (de Negocios y de Mensajeros).
 
 | Módulo | Estado |
 |---|---|
-| Conciliación | ⏳ solo UI con `MOCK_DATA`, sin tabla |
+| Conciliación de Negocios | ✅ implementado (tabla `conciliaciones_businesses`) |
+| Conciliación de Mensajeros | ✅ implementado (tabla `conciliaciones_messengers` + `backpack_rental_rates` para Alquiler de Mochila, sección 7.4) |
 | Facturación | ⏳ solo UI con `MOCK_DATA`, sin tabla |
 | Cuentas por Cobrar | ⏳ solo UI con `MOCK_DATA`, sin tabla |
 | Cuentas por Pagar | ⏳ solo UI con `MOCK_DATA`, sin tabla |
 | Planificación de Pagos | ⏳ solo UI con `MOCK_DATA`, sin tabla |
 
-Ninguna de estas páginas se relaciona hoy con `dispatcher`, `businesses` o `messengers`, y no hay reglas de negocio documentadas para calcular comisiones desde las órdenes, el desglose Efectivo/Transferencia/Saldo Mandao, ni impuestos. Diseñar ese esquema requiere primero esas reglas de negocio — pospuesto explícitamente hasta contar con ellas (decisión 2026-09-10).
+Ninguna de estas páginas se relaciona hoy con `dispatcher`, `businesses` o `messengers`, y no hay reglas de negocio documentadas para calcular comisiones desde las órdenes ni impuestos. Diseñar ese esquema requiere primero esas reglas de negocio — pospuesto explícitamente hasta contar con ellas (decisión 2026-09-10), igual que se hizo para Conciliación de Negocios (sección 6) antes de construirla.
 
 ---
 
@@ -1449,7 +1668,7 @@ export const navConfig = {
 
 ### 19.1 Estado de la migración
 
-- Esquema completo definido y validado en `supabase_schema.sql`: **16 tablas** (detalle completo en la sección 12), con políticas **RLS** activas en todas ellas, más funciones auxiliares (helper functions).
+- Esquema completo definido y validado en `supabase_schema.sql`: **21 tablas** (detalle completo en la sección 12), con políticas **RLS** activas en todas ellas, más funciones auxiliares (helper functions).
 - Se retiraron del esquema las tablas `email_groups` y `email_templates` (correspondientes a las colecciones `EmailGroups`/`EmailTemplates` que documentaba la versión anterior de este documento, basada en Firestore — nunca tuvieron uso real en el código).
 - Ya migrados y en uso real sobre Supabase: Auth, Dispatcher (Verificación/Revisión), Disponibilidad (Verificación/Revisión), y todo Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría). Ningún archivo del código activo importa ya `src/lib/firebase` (esa ruta no existe).
 - Pendiente de diseñar (sin tabla propia todavía): Conciliación, Facturación, Cuentas por Cobrar, Cuentas por Pagar y Planificación de Pagos — ver "Tablas pendientes" al final de la sección 12.
@@ -1479,6 +1698,16 @@ Pertenecer al dominio `@mandao.app` (Google Workspace) permite **autenticarse**,
 - Un **Super Admin** debe encontrar a la persona en **Roles y Usuarios**, asignarle uno de los 4 roles y marcarla como **Autorizada** (`active = true`). También puede invitarla de antemano por correo con el botón "Nuevo Usuario" (sin que la persona haya iniciado sesión todavía), que la autoriza de inmediato con el rol elegido.
 - La barrera es real a nivel de base de datos, no solo de UI: `current_user_role()` devuelve `NULL` para un usuario inactivo (por lo que niega toda escritura), y las políticas de solo lectura usan `public.is_active_user()` en vez de solo comprobar "está logueado" (ver `supabase_schema.sql` y `supabase/migrations/2026-09-10_require_active_profile.sql`).
 - Antes de este cambio, cualquier cuenta `@mandao.app` que iniciara sesión ya podía **leer** todo el sistema como Visitante en cuanto Google la autenticaba — ese hueco quedó cerrado.
+
+### 19.3.2 Roles de Acceso: agrupador de menú, no de seguridad (agregado 2026-09-23)
+
+`RolesUsuariosPage.tsx` tiene dos pestañas: **Usuarios** (CRUD de `profiles`, igual que antes) y **Roles de Acceso** (CRUD de `access_roles`, tabla 17 de la sección 12). Es una capa **nueva y completamente separada** del modelo de seguridad de los 4 roles fijos:
+
+- Un Rol de Acceso es un nombre + una lista de módulos (`module_keys`, ids de `moduleCatalog.ts` — la misma fuente que arma el menú lateral en `AppShell.tsx`) que ese rol deja ver, marcados como etiquetas (click para activar/desactivar).
+- En la pestaña Usuarios, cada persona puede tener asignado opcionalmente uno de estos roles (`profiles.access_role_id`), además de su rol fijo de siempre.
+- Si un usuario **no** tiene Rol de Acceso asignado (`access_role_id = NULL`, el caso de todo usuario creado antes de este cambio), el menú se sigue filtrando exactamente como antes, según su rol fijo (`hasPermission()` en `AppShell.tsx`).
+- Si **sí** tiene uno asignado, el menú lateral muestra únicamente los módulos de `access_roles.module_keys` — sin importar el rol fijo.
+- **Esto no cambia la seguridad real del sistema**: lo que un usuario puede leer/escribir en Supabase lo siguen decidiendo exclusivamente `profiles.role` y las políticas RLS (sección 12), que no fueron tocadas. Un Rol de Acceso solo decide qué ítems de menú se muestran; si un usuario llegara a ver un módulo para el que su rol fijo no tiene permiso de escritura, Supabase seguiría rechazando esa escritura vía RLS.
 
 ### 19.4 Actores del sistema (actualización de la sección 4)
 
@@ -1541,6 +1770,8 @@ gcloud run deploy mandao-conciliaciones \
 ## 22. Integración de Razón de Cambio con la API de El Toque
 
 > 🆕 Sección agregada. `RazonCambioPage.tsx` sigue permitiendo cargar tasas manualmente, pero además puede sincronizar automáticamente la tasa informal USD/CUP publicada por El Toque (https://tasas.eltoque.com/docs/).
+>
+> **Convención (2026-10-01):** El Toque publica CUP por 1 USD (ej. 500); el sistema guarda USD por 1 CUP (ej. 0.002). La función `sync-exchange-rate` guarda el inverso (`1 / tasa_el_toque`, 8 decimales) y deja en la descripción el valor original de El Toque.
 
 ### 22.1 Piezas involucradas
 

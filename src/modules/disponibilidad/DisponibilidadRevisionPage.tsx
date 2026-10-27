@@ -12,7 +12,6 @@ import {
   Loader2,
   MoreVertical,
   X,
-  CheckCircle2,
   AlertCircle,
   FileSearch,
   ShieldCheck,
@@ -33,6 +32,9 @@ import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
 import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
+import { parseSheetDate, normalizeSheetDateStr } from '../../lib/sheetDateParser';
+import { locateHeaderRow, DISPONIBILIDAD_HEADERS } from '../../lib/sheetHeaders';
+import { toLocalISODate } from '../../lib/formatters';
 
 interface DisponibilidadRecord {
   id: string;
@@ -41,11 +43,9 @@ interface DisponibilidadRecord {
   monto: number;
   detalle: string;
   orden?: string;
-  area: string;
   areaId: string;
   importedAt?: string;
   importedBy?: string;
-  status?: string;
 }
 
 // Normalized header helper
@@ -57,17 +57,7 @@ function normalizeHeader(h: string): string {
     .replace(/[^a-z0-9]/g, ''); 
 }
 
-const buildHeaderMap = (headersRow: string[]): Record<string, number> => {
-  const map: Record<string, number> = {};
-  if (!headersRow) return map;
-  headersRow.forEach((val, idx) => {
-    const normalized = normalizeHeader(val);
-    if (normalized) {
-      map[normalized] = idx;
-    }
-  });
-  return map;
-};
+// buildHeaderMap / ubicación de la fila de encabezados: src/lib/sheetHeaders.ts
 
 // Fuzzy normalization string comparison
 function fuzzyNormalizedString(str: any): string {
@@ -127,41 +117,34 @@ function isCellEmpty(val: any): boolean {
   );
 }
 
-function parseDateString(dateStr: string): Date | null {
-  if (!dateStr) return null;
-  const str = String(dateStr).trim();
-  const dmY = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
-  if (dmY) {
-    const day = parseInt(dmY[1], 10);
-    const month = parseInt(dmY[2], 10);
-    const year = parseInt(dmY[3], 10);
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      return new Date(year, month - 1, day);
-    }
+// Parser de fechas de Sheet consolidado en src/lib/sheetDateParser.ts
+// (2026-09-30) — ver la nota equivalente en dispatcher/VerificationPage.tsx.
+const parseDateString = parseSheetDate;
+const normalizeDateStr = normalizeSheetDateStr;
+
+// El body de error de Google (JSON: { error: { code, message, status } })
+// trae el motivo real (API deshabilitada, scope insuficiente, sin acceso al
+// documento, etc.) — res.statusText casi siempre viene vacío para fetch().
+// Ver la nota equivalente en dispatcher/RevisionPage.tsx.
+async function extractGoogleApiError(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    const msg = body?.error?.message;
+    const status = body?.error?.status;
+    if (msg) return status ? `${msg} [${status}]` : msg;
+  } catch {
+    // body no era JSON o ya se consumió — se usa el fallback genérico
   }
-  const Ymd = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-  if (Ymd) {
-    const year = parseInt(Ymd[1], 10);
-    const month = parseInt(Ymd[2], 10);
-    const day = parseInt(Ymd[3], 10);
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      return new Date(year, month - 1, day);
-    }
-  }
-  const d = new Date(str);
-  return isNaN(d.getTime()) ? null : d;
+  return res.statusText || `HTTP ${res.status}`;
 }
 
-function formatDateToYYYYMMDD(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
-function normalizeDateStr(dateStr: string): string {
-  const parsed = parseDateString(dateStr);
-  return parsed ? formatDateToYYYYMMDD(parsed) : '';
+// Clave de identidad Mensajero + Fecha (no existe un ID de fila confiable
+// en la hoja "Disponibilidad" — a diferencia de Dispatcher, que usa
+// Order ID + Store). Con esta clave se localiza la fila del Sheet que le
+// corresponde a un registro de BD; Detalle y Monto se comparan aparte
+// para decidir si "Coincide" o está "Modificada en Sheets".
+function availabilityIdentityKey(r: { mensajero?: string; fecha?: string }): string {
+  return `${fuzzyNormalizedString(r.mensajero)}|${normalizeDateStr(r.fecha || '')}`;
 }
 
 export function DisponibilidadRevisionPage() {
@@ -176,25 +159,22 @@ export function DisponibilidadRevisionPage() {
   const [loading, setLoading] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
 
-  // Comparison/audit state
-  const [auditing, setAuditing] = useState(false);
-  const [auditLogs, setAuditLogs] = useState<string[]>([]);
-  const [auditDiffs, setAuditDiffs] = useState<{
-    id: string;
-    type: 'sheets_only' | 'db_only' | 'amount_mismatch';
-    mensajero: string;
-    fecha: string;
-    sheetMonto?: number;
-    dbMonto?: number;
-    detalle: string;
-    sheetRow?: number;
-  }[]>([]);
-  const [showAuditResult, setShowAuditResult] = useState(false);
+  // Comparación contra Google Sheets ("Detectar Cambios"). A diferencia del
+  // viejo "Auditar" (panel flotante desconectado de la tabla), el resultado
+  // se guarda aquí y se pinta directamente en la columna Estado de cada fila
+  // — igual que dispatcher/RevisionPage.tsx (externalComparison + orderKey,
+  // aquí availabilityIdentityKey por no existir un ID de fila en el Sheet).
+  const [detecting, setDetecting] = useState(false);
+  const [externalComparison, setExternalComparison] = useState<{
+    deletedInSheets: Set<string>; // ids de BD sin fila correspondiente en el Sheet
+    discrepancies: Record<string, string[]>; // id de BD -> lista de diferencias (Detalle/Monto)
+    newInSheets: { mensajero: string; fecha: string; detalle: string; monto: number }[]; // filas del Sheet sin importar aún
+  } | null>(null);
 
   // Filters state
   const [formData, setFormData] = useState({
-    fechaInicio: new Date().toISOString().split('T')[0],
-    fechaFin: new Date().toISOString().split('T')[0],
+    fechaInicio: toLocalISODate(),
+    fechaFin: toLocalISODate(),
     search: '',
   });
 
@@ -234,7 +214,6 @@ export function DisponibilidadRevisionPage() {
       monto: Number(r.amount_to_pay) || 0,
       detalle: r.reason || r.comment || 'Disponibilidad',
       orden: r.order_id || '',
-      area: '',
       areaId: r.area_id,
       emailAddress: r.email_address || '',
       requestedBy: r.requested_by || '',
@@ -358,42 +337,43 @@ export function DisponibilidadRevisionPage() {
     return null;
   };
 
-  // Compare local database against Google Sheet
-  const handleAuditCompare = async () => {
+  // Compara los registros de BD (ya filtrados por Área/rango de fechas en
+  // pantalla) contra la hoja "Disponibilidad" del Google Sheet del Área
+  // seleccionada, y guarda el resultado en `externalComparison` — de ahí
+  // lo lee cada fila de la tabla para pintar su Estado real (Coincide /
+  // No Coincide / Eliminada en Sheets). Mismo patrón que "Detectar
+  // Cambios" en dispatcher/RevisionPage.tsx.
+  const handleDetectChanges = async () => {
     if (!spreadsheetId.trim()) {
-      alert("Por favor, selecciona un Dispatcher con Spreadsheet ID configurado.");
+      alert("Por favor, selecciona un Dispatcher (Área) con Spreadsheet ID configurado.");
       return;
     }
 
-    setAuditing(true);
-    setShowAuditResult(true);
-    setAuditDiffs([]);
-    setAuditLogs(['Iniciando auditoría cruzada de Disponibilidad...', 'Paso 1: Estableciendo conexión con Google Sheets API...']);
+    setDetecting(true);
+    setExternalComparison(null);
 
     let activeToken = googleToken;
     if (!activeToken) {
-      setAuditLogs(prev => [...prev, 'Token de Google no disponible o expirado. Redirigiendo para reconectar...']);
+      alert('Token de Google no disponible o expirado. Serás redirigido para reconectar — vuelve a pulsar "Detectar Cambios" al regresar.');
       await handleConnectGoogle();
-      setAuditing(false);
+      setDetecting(false);
       return;
     }
 
     try {
-      setAuditLogs(prev => [...prev, '✓ Token de Google G-Suite verificado.', 'Paso 2: Descargando pestañas del documento...']);
-      
       let metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`, {
         headers: { Authorization: `Bearer ${activeToken}` }
       });
 
       if (!metaRes.ok) {
         if (metaRes.status === 401) {
-          setAuditLogs(prev => [...prev, 'La sesión o el token de acceso de Google ha expirado (401). Redirigiendo para reconectar...']);
           setGoogleToken(null);
           sessionStorage.removeItem('google_access_token');
           await handleConnectGoogle();
-          throw new Error("Sesión de Google expirada. Serás redirigido para reconectar — vuelve a intentar la auditoría al regresar.");
+          throw new Error("Sesión de Google expirada. Serás redirigido para reconectar — vuelve a pulsar Detectar Cambios al regresar.");
         } else {
-          throw new Error(`Fallo consulta de metadatos de Google Sheets (Status: ${metaRes.status})`);
+          const detail = await extractGoogleApiError(metaRes);
+          throw new Error(`Google Sheets API Error: ${detail}`);
         }
       }
 
@@ -401,14 +381,13 @@ export function DisponibilidadRevisionPage() {
       const sheetTitles = metaData.sheets?.map((s: any) => s.properties?.title) || [];
       const dispsTab = sheetTitles.find((name: string) => name.toLowerCase().includes('disponib')) || 'Disponibilidades';
 
-      setAuditLogs(prev => [...prev, `✓ Hoja localizada: "${dispsTab}"`, 'Paso 3: Recuperando filas de la hoja de cálculo...']);
-
       const sheetRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(dispsTab)}!A:Z`, {
         headers: { Authorization: `Bearer ${activeToken}` }
       });
 
       if (!sheetRes.ok) {
-        throw new Error(`Fallo consulta de celdas en la hoja "${dispsTab}"`);
+        const detail = await extractGoogleApiError(sheetRes);
+        throw new Error(`Fallo consulta de celdas en la hoja "${dispsTab}": ${detail}`);
       }
 
       const sheetData = await sheetRes.json();
@@ -418,12 +397,14 @@ export function DisponibilidadRevisionPage() {
         throw new Error('La hoja está vacía.');
       }
 
-      const headers = rows[0] || [];
-      const dispsMap = buildHeaderMap(headers);
+      // Misma ubicación de encabezados que la Verificación (puede haber una
+      // segunda fila de encabezados; los datos empiezan después).
+      const headerInfo = locateHeaderRow(rows, DISPONIBILIDAD_HEADERS);
+      const dispsMap = headerInfo.headerMap;
 
-      setAuditLogs(prev => [...prev, `✓ ${rows.length - 1} filas cargadas desde Google Sheets.`, 'Paso 4: Mapeando registros de la hoja...']);
-
-      const allSheetDisps = rows.slice(1).map((row: any[], idx: number) => {
+      const allSheetDisps = rows.slice(headerInfo.headerIndex + 1)
+        .filter((row: any[]) => !headerInfo.isHeaderLike(row))
+        .map((row: any[]) => {
         const getVal = (keys: string[]) => {
           for (const key of keys) {
             const idxKey = dispsMap[key];
@@ -431,112 +412,86 @@ export function DisponibilidadRevisionPage() {
           }
           return '';
         };
-        const getNum = (keys: string[]) => {
-          const val = getVal(keys);
-          return parseCellNumber(val);
-        };
+        const getNum = (keys: string[]) => parseCellNumber(getVal(keys));
+        // Mismas columnas reales (ya normalizadas) que usa la importación en
+        // DisponibilidadVerificationPage.tsx — "Monto a pagar" → montoapagar,
+        // "Motivo" → motivo, "Comentario" → comentario, con el mismo orden
+        // de fallback reason||comment que usa loadRecords() para la BD. La
+        // lista anterior aquí ('monto', 'detalle', etc.) no correspondía a
+        // ninguna columna real del Sheet, por eso Monto siempre leía 0 y
+        // TODA fila daba "No Coincide" sin importar el rango de fechas.
+        const reason = getVal(['motivo']);
+        const comment = getVal(['comentario']);
         return {
-          mensajero: getVal(['driver', 'mensajero', 'repartidor', 'conductor']) || '',
-          monto: getNum(['monto', 'amount', 'pago', 'montoextra']),
-          detalle: getVal(['detalle', 'descripcion', 'nota', 'motivo']) || 'Disponibilidad',
+          mensajero: getVal(['mensajero', 'driver', 'repartidor', 'conductor']) || '',
+          monto: getNum(['montoapagar', 'monto', 'amount', 'pago', 'montoextra']),
+          detalle: reason || comment || 'Disponibilidad',
           fecha: getVal(['fechadeladisponibilidad', 'fechadisponibilidad', 'fecha', 'date']) || '',
-          orden: getVal(['noorden', 'orderid', 'orden']) || '',
-          sheetRow: idx + 2
         };
       }).filter((d: any) => !isCellEmpty(d.mensajero));
 
-      // Filter sheet records matching selected date range
-      const startDateStr = formData.fechaInicio;
-      const endDateStr = formData.fechaFin;
-
+      // Solo se compara contra el rango de fechas activo en pantalla —
+      // mismo criterio que ya usa `filteredRecords` para la BD.
       const filteredSheetDisps = allSheetDisps.filter((d: any) => {
         const norm = normalizeDateStr(d.fecha);
-        return norm && norm >= startDateStr && norm <= endDateStr;
+        return norm && norm >= formData.fechaInicio && norm <= formData.fechaFin;
       });
 
-      setAuditLogs(prev => [
-        ...prev, 
-        `✓ ${filteredSheetDisps.length} registros del rango en Google Sheets.`, 
-        `✓ ${filteredRecords.length} registros del rango en Base de Datos (Firestore).`,
-        'Paso 5: Iniciando comparación de correspondencias uno-a-uno...'
-      ]);
+      // Índice por clave Mensajero+Fecha — puede haber más de una fila del
+      // Sheet por mensajero/día (varias disponibilidades el mismo día).
+      const sheetByKey = new Map<string, typeof filteredSheetDisps>();
+      filteredSheetDisps.forEach((item: any) => {
+        const key = availabilityIdentityKey(item);
+        if (!sheetByKey.has(key)) sheetByKey.set(key, []);
+        sheetByKey.get(key)!.push(item);
+      });
 
-      const diffs: any[] = [];
+      const deletedInSheets = new Set<string>();
+      const discrepancies: Record<string, string[]> = {};
+      const matchedSheetItems = new Set<any>();
 
-      // 1. Check for records that exist in Sheets but are MISSING in Firestore, or have mismatching amounts
-      filteredSheetDisps.forEach((sheetItem: any) => {
-        const matchingDbItem = filteredRecords.find(dbItem => {
-          const sameDriver = (dbItem.mensajero || '').trim() === (sheetItem.mensajero || '').trim();
-          const sameDate = dbItem.fecha && sheetItem.fecha && (normalizeDateStr(dbItem.fecha) === normalizeDateStr(sheetItem.fecha));
-          const sameDetalle = (dbItem.detalle || '').trim() === (sheetItem.detalle || '').trim();
-          return sameDriver && sameDate && sameDetalle;
-        });
+      filteredRecords.forEach(dbItem => {
+        const candidates = sheetByKey.get(availabilityIdentityKey(dbItem)) || [];
+        if (candidates.length === 0) {
+          deletedInSheets.add(dbItem.id);
+          return;
+        }
+        // Entre las candidatas del mismo mensajero/día, la de Detalle más
+        // parecido es la que probablemente corresponde a este registro.
+        const match = candidates.find((c: any) => fuzzyNormalizedString(c.detalle) === fuzzyNormalizedString(dbItem.detalle)) || candidates[0];
+        matchedSheetItems.add(match);
 
-        if (!matchingDbItem) {
-          diffs.push({
-            id: `sheet-${sheetItem.sheetRow}`,
-            type: 'sheets_only',
-            mensajero: sheetItem.mensajero,
-            fecha: normalizeDateStr(sheetItem.fecha) || sheetItem.fecha,
-            sheetMonto: sheetItem.monto,
-            detalle: sheetItem.detalle,
-            sheetRow: sheetItem.sheetRow
-          });
-        } else if (Math.abs((matchingDbItem.monto || 0) - (sheetItem.monto || 0)) > 0.02) {
-          diffs.push({
-            id: `mismatch-${matchingDbItem.id}`,
-            type: 'amount_mismatch',
-            mensajero: sheetItem.mensajero,
-            fecha: normalizeDateStr(sheetItem.fecha) || sheetItem.fecha,
-            sheetMonto: sheetItem.monto,
-            dbMonto: matchingDbItem.monto,
-            detalle: sheetItem.detalle,
-            sheetRow: sheetItem.sheetRow
-          });
+        const diffs: string[] = [];
+        if (fuzzyNormalizedString(match.detalle) !== fuzzyNormalizedString(dbItem.detalle)) {
+          diffs.push(`Detalle: Sheet "${match.detalle}" vs BD "${dbItem.detalle}"`);
+        }
+        if (Math.abs((match.monto || 0) - (dbItem.monto || 0)) > 0.02) {
+          diffs.push(`Monto: Sheet $${match.monto.toFixed(2)} vs BD $${dbItem.monto.toFixed(2)}`);
+        }
+        if (diffs.length > 0) {
+          discrepancies[dbItem.id] = diffs;
         }
       });
 
-      // 2. Check for records that exist in Firestore but are MISSING in Google Sheets
-      filteredRecords.forEach((dbItem: any) => {
-        const matchingSheetItem = filteredSheetDisps.some(sheetItem => {
-          const sameDriver = (sheetItem.mensajero || '').trim() === (dbItem.mensajero || '').trim();
-          const sameDate = sheetItem.fecha && dbItem.fecha && (normalizeDateStr(sheetItem.fecha) === normalizeDateStr(dbItem.fecha));
-          const sameDetalle = (sheetItem.detalle || '').trim() === (dbItem.detalle || '').trim();
-          return sameDriver && sameDate && sameDetalle;
-        });
+      // Filas del Sheet que no corresponden a ningún registro ya importado.
+      const newInSheets = filteredSheetDisps.filter((item: any) => !matchedSheetItems.has(item));
 
-        if (!matchingSheetItem) {
-          diffs.push({
-            id: `db-${dbItem.id}`,
-            type: 'db_only',
-            mensajero: dbItem.mensajero,
-            fecha: normalizeDateStr(dbItem.fecha) || dbItem.fecha,
-            dbMonto: dbItem.monto,
-            detalle: dbItem.detalle
-          });
-        }
-      });
+      setExternalComparison({ deletedInSheets, discrepancies, newInSheets });
 
-      setAuditDiffs(diffs);
-      setAuditLogs(prev => [
-        ...prev, 
-        '✓ Análisis finalizado.', 
-        `✓ Auditoría completada. Se detectaron ${diffs.length} discrepancias.`
-      ]);
-
-      // Log audit event
-      const selectedAreaName = areas.find(a => a.id === selectedAreaId)?.nombre || 'Habana';
-      logAuditEvent('Revision', 'Auditoría de Disponibilidades Completada', {
+      const selectedAreaName = areas.find(a => a.id === selectedAreaId)?.nombre || 'N/A';
+      logAuditEvent('Revision', 'Detección de Cambios de Disponibilidad Completada', {
         area: selectedAreaName,
         rangoFechas: `${formData.fechaInicio} - ${formData.fechaFin}`,
-        totalDiferencias: diffs.length
+        eliminadasEnSheets: deletedInSheets.size,
+        modificadasEnSheets: Object.keys(discrepancies).length,
+        nuevasSinImportar: newInSheets.length
       });
 
     } catch (err: any) {
-      console.error("Audit error:", err);
-      setAuditLogs(prev => [...prev, `✖ Fallo de auditoría: ${err.message}`]);
+      console.error("Detect changes error:", err);
+      alert('Error al detectar cambios: ' + err.message);
     } finally {
-      setAuditing(false);
+      setDetecting(false);
     }
   };
 
@@ -655,99 +610,77 @@ export function DisponibilidadRevisionPage() {
         </div>
 
         <div className="flex gap-2">
-          <Button 
-            variant="ghost" 
+          <Button
+            variant="ghost"
             className="h-10 text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50"
-            onClick={handleAuditCompare}
-            disabled={auditing || !selectedAreaId}
+            onClick={handleDetectChanges}
+            disabled={detecting || !selectedAreaId}
           >
-            {auditing ? (
+            {detecting ? (
               <>
                 <Loader2 size={14} className="animate-spin mr-2" />
-                AUDITANDO...
+                DETECTANDO...
               </>
             ) : (
               <>
                 <Database size={14} className="mr-2" />
-                AUDITAR CON GOOGLE SHEET
+                DETECTAR CAMBIOS
               </>
             )}
           </Button>
         </div>
       </div>
 
-      {/* Audit Drawer Compare (collapsible) */}
-      {showAuditResult && (
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4 shadow-inner relative">
-          <button 
-            onClick={() => setShowAuditResult(false)}
-            className="absolute top-4 right-4 p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg"
+      {/* Resumen de la última comparación — el detalle por fila vive en la
+          columna Estado de la tabla; aquí solo se avisa de las filas nuevas
+          en el Sheet que todavía no se han importado (no aparecen abajo
+          porque no tienen registro de BD que las muestre). */}
+      {externalComparison && (
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3 relative">
+          <button
+            onClick={() => setExternalComparison(null)}
+            className="absolute top-3 right-3 p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg"
           >
             <X size={16} />
           </button>
-
           <h3 className="text-xs font-black uppercase tracking-widest text-slate-700 flex items-center gap-2">
             <ShieldCheck size={16} className="text-teal-600" />
-            Resultado de Auditoría vs Google Sheet
+            Resultado: Detectar Cambios vs Google Sheet
           </h3>
+          <div className="flex flex-wrap gap-2 text-[11px] font-bold">
+            <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+              {filteredRecords.length - externalComparison.deletedInSheets.size - Object.keys(externalComparison.discrepancies).length} coinciden
+            </span>
+            {Object.keys(externalComparison.discrepancies).length > 0 && (
+              <span className="px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                {Object.keys(externalComparison.discrepancies).length} modificadas en Sheets
+              </span>
+            )}
+            {externalComparison.deletedInSheets.size > 0 && (
+              <span className="px-2.5 py-1 rounded-full bg-red-50 text-red-700 border border-red-200">
+                {externalComparison.deletedInSheets.size} eliminadas en Sheets
+              </span>
+            )}
+            {externalComparison.newInSheets.length > 0 && (
+              <span className="px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                {externalComparison.newInSheets.length} nuevas en Sheets sin importar
+              </span>
+            )}
+          </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Logs console */}
-            <div className="lg:col-span-1 bg-slate-900 text-slate-300 font-mono text-[11px] p-4 rounded-lg h-44 overflow-y-auto space-y-1.5 custom-scrollbar">
-              {auditLogs.map((log, i) => (
-                <div key={i} className="leading-relaxed">{log}</div>
+          {externalComparison.newInSheets.length > 0 && (
+            <div className="pt-1 space-y-1.5 max-h-40 overflow-y-auto custom-scrollbar">
+              {externalComparison.newInSheets.slice(0, 20).map((item, i) => (
+                <div key={i} className="text-[11px] flex items-center justify-between bg-white border border-blue-100 rounded-md px-3 py-1.5">
+                  <span className="font-bold text-slate-700">{item.mensajero}</span>
+                  <span className="text-slate-500 font-mono">{normalizeDateStr(item.fecha)} • {item.detalle} • ${item.monto.toFixed(2)}</span>
+                </div>
               ))}
-            </div>
-
-            {/* Diffs list */}
-            <div className="lg:col-span-2 flex flex-col justify-center">
-              {auditing ? (
-                <div className="flex flex-col items-center py-10 opacity-60">
-                  <Loader2 size={32} className="animate-spin text-slate-400 mb-2" />
-                  <p className="text-xs font-bold font-mono">EJECUTANDO CRUCE DE DATOS...</p>
-                </div>
-              ) : auditDiffs.length === 0 ? (
-                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-5 text-emerald-900 text-center flex flex-col items-center justify-center">
-                  <CheckCircle2 size={32} className="text-emerald-600 mb-2" />
-                  <h4 className="font-bold text-sm text-emerald-800">✓ Cero Descuadres Detectados</h4>
-                  <p className="text-xs mt-1 max-w-sm">
-                    Toda la información registrada en Firestore concuerda al centavo y en filas con la pestaña de "Disponibilidad" del Google Sheet.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-3 overflow-y-auto max-h-44 pr-2 custom-scrollbar">
-                  <p className="text-xs font-black text-rose-700 uppercase tracking-widest">
-                     ⚠ Discrepancias encontradas ({auditDiffs.length}):
-                  </p>
-                  <div className="divide-y divide-slate-200/60 font-medium">
-                    {auditDiffs.map((diff, i) => (
-                      <div key={diff.id || i} className="py-2.5 flex items-center justify-between text-xs gap-4">
-                        <div className="flex flex-col gap-0.5">
-                          <span className="font-bold text-slate-800">{diff.mensajero}</span>
-                          <span className="text-[10px] text-slate-500 font-mono">Motivo: {diff.detalle} • Fecha: {diff.fecha}</span>
-                        </div>
-                        <div className="text-right">
-                          {diff.type === 'sheets_only' ? (
-                            <span className="text-[10px] bg-amber-50 text-amber-800 border border-amber-200 px-2 py-0.5 rounded-full font-bold">
-                              Sheets ($ {diff.sheetMonto?.toFixed(2)}) • No Importada
-                            </span>
-                          ) : diff.type === 'db_only' ? (
-                            <span className="text-[10px] bg-red-50 text-red-800 border border-red-200 px-2 py-0.5 rounded-full font-bold">
-                              DB ($ {diff.dbMonto?.toFixed(2)}) • Sin correlación en Sheets
-                            </span>
-                          ) : (
-                            <span className="text-[10px] bg-rose-50 text-rose-800 border border-rose-200 px-2 py-0.5 rounded-full font-bold">
-                              Diferencia: Sheets (${diff.sheetMonto?.toFixed(2)}) vs DB (${diff.dbMonto?.toFixed(2)})
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+              {externalComparison.newInSheets.length > 20 && (
+                <p className="text-[10px] text-slate-400 font-bold">+ {externalComparison.newInSheets.length - 20} más — vuelve a Verificación/Importación para traerlas a BD.</p>
               )}
             </div>
-          </div>
+          )}
         </div>
       )}
 
@@ -869,35 +802,60 @@ export function DisponibilidadRevisionPage() {
                 filteredRecords.map((r) => {
                   const isExpanded = !!expandedRows[r.id];
                   const isChecked = !!selectedRows[r.id];
+                  const areaNombre = areas.find(a => a.id === r.areaId)?.nombre || 'N/A';
+
+                  // Estado real, alimentado por "Detectar Cambios" — antes de
+                  // correrlo, no hay comparación todavía (Sin Verificar), en
+                  // vez de mostrar un falso "No Conciliado" fijo para todo.
+                  const isDeleted = externalComparison?.deletedInSheets.has(r.id) ?? false;
+                  const rowDiffs = externalComparison?.discrepancies[r.id];
+                  let estadoLabel = 'Sin Verificar';
+                  let estadoClass = 'bg-slate-100 text-slate-500 border-slate-200';
+                  if (externalComparison) {
+                    if (isDeleted) {
+                      estadoLabel = 'Eliminada en Sheets';
+                      estadoClass = 'bg-red-50 text-red-700 border-red-200';
+                    } else if (rowDiffs) {
+                      estadoLabel = 'No Coincide';
+                      estadoClass = 'bg-amber-50 text-amber-700 border-amber-200';
+                    } else {
+                      estadoLabel = 'Coincide';
+                      estadoClass = 'bg-emerald-50 text-emerald-700 border-emerald-200';
+                    }
+                  }
+
                   return (
                     <React.Fragment key={r.id}>
                       <tr className={cn(
                         "hover:bg-slate-50/50 group transition-colors border-b border-slate-100",
-                        isChecked && "bg-teal-50/30"
+                        isChecked && "bg-teal-50/30",
+                        isDeleted && "bg-red-50/50 border-l-4 border-l-rose-500",
+                        !!rowDiffs && "bg-amber-50/50 border-l-4 border-l-amber-500"
                       )}>
                         <td className="p-4 text-center">
-                          <input 
-                            type="checkbox" 
-                            className="rounded text-teal-600 focus:ring-teal-500" 
+                          <input
+                            type="checkbox"
+                            className="rounded text-teal-600 focus:ring-teal-500"
                             checked={isChecked}
                             onChange={(e) => handleSelectRow(r.id, e.target.checked)}
                           />
                         </td>
                         <td className="p-4 font-mono">{normalizeDateStr(r.fecha) || r.fecha}</td>
                         <td className="p-4 text-slate-800 font-bold">{r.mensajero}</td>
-                        <td className="p-4">{r.area}</td>
+                        <td className="p-4">{areaNombre}</td>
                         <td className="p-4 text-slate-500">{r.detalle}</td>
                         <td className="p-4 text-right font-bold text-slate-800 font-mono text-sm">
                           $ {r.monto?.toFixed(2)}
                         </td>
                         <td className="p-4">
-                          <span className={cn(
-                            "text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded border font-mono",
-                            r.status === 'conciliado' 
-                              ? "bg-emerald-50 text-emerald-700 border-emerald-200" 
-                              : "bg-amber-50 text-amber-700 border-amber-200"
-                          )}>
-                            {r.status === 'conciliado' ? 'Conciliado' : 'No Conciliado'}
+                          <span
+                            title={rowDiffs ? rowDiffs.join(' | ') : undefined}
+                            className={cn(
+                              "text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded border font-mono",
+                              estadoClass
+                            )}
+                          >
+                            {estadoLabel}
                           </span>
                         </td>
                         <td className="p-4 text-center">

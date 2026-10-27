@@ -296,6 +296,8 @@ Se agregaron `Dockerfile` + `nginx.conf` (Cloud Run), y `netlify.toml` + `vercel
 
 ## 11. Estado actual y pendientes (2026-09-22)
 
+> ⚠️ **Desactualizada.** Desde el 24/09 el módulo de Conciliación (Negocios y Mensajeros) está implementado con datos reales — ver **sección 13**, que es el estado vigente al 2026-10-15.
+
 El sistema corre en local con Supabase real. Dispatcher, Disponibilidad y Gestión (los 7 catálogos + Data) están migrados, probados en vivo, y sin bugs conocidos pendientes de esta ronda. El **módulo financiero** (Conciliación, Facturación, Cuentas por Cobrar/Pagar, Planificación de Pagos) sigue igual que en la decisión #3 original: no implementado, sin ninguna tabla, solo UI con `MOCK_DATA` — deliberadamente pospuesto hasta definir las reglas de negocio reales (cálculo de comisiones desde las órdenes, desglose Efectivo/Transferencia/Saldo Mandao, impuestos).
 
 Pendientes que **requieren una acción tuya** (no son tareas de código):
@@ -311,3 +313,70 @@ Pendientes que **requieren una acción tuya** (no son tareas de código):
 | Módulo financiero (Conciliación/Facturación/CxC/CxP/Planificación) | Definir juntos las reglas de negocio antes de diseñar el esquema |
 
 Nada de lo anterior bloquea empezar a diseñar el módulo de **Conciliación** — son pendientes de infraestructura/cuentas externas, no del código de Dispatcher/Disponibilidad/Gestión.
+
+---
+
+## 12. Roles de Acceso — agrupador de menú configurable (2026-09-23)
+
+Durante la revisión propia del sistema, se detectó que **Roles y Usuarios** no ofrecía lo que realmente hacía falta: poder crear roles nuevos, elegir qué módulos ve cada uno (como en el modelo antiguo de Firestore, con permisos configurables por checklist) y asignárselos a los usuarios. Ese modelo se había eliminado a propósito en la migración a Supabase (decisión #2: solo 4 roles fijos, ver sección 1), porque esos 4 roles son la base de **todas** las políticas RLS del sistema — no se podía simplemente "traerlo de vuelta" sin tocar la seguridad real.
+
+Se resolvió con una capa **nueva y completamente separada**, sin tocar RLS ni los 4 roles fijos:
+
+- Tabla nueva `public.access_roles` (17ª tabla del esquema): nombre, descripción y `module_keys` (lista de módulos que ese rol deja ver).
+- `profiles.access_role_id` (nullable, FK a `access_roles`): asignación opcional por usuario.
+- `RolesUsuariosPage.tsx` ahora tiene dos pestañas: **Usuarios** (igual que antes, más el nuevo selector de Rol de Acceso) y **Roles de Acceso** (CRUD nuevo, con los módulos como etiquetas clicables para marcar/desmarcar — `moduleCatalog.ts` es la lista única de módulos, compartida con el menú lateral de `AppShell.tsx`).
+- Si un usuario no tiene Rol de Acceso asignado (`NULL`, el caso de todos los usuarios existentes), el menú se comporta exactamente igual que antes de este cambio.
+- **La seguridad real no cambió**: `profiles.role` + las políticas RLS de `supabase_schema.sql` siguen siendo la única fuente de verdad de qué puede ejecutar o modificar cada usuario. Un Rol de Acceso solo decide qué ítems de menú se muestran.
+
+Migración pendiente de correr contra el proyecto Supabase real: `supabase/migrations/2026-09-23_access_roles.sql`.
+
+---
+
+## 13. Conciliación, Dispatcher, Configuración y Dashboard (2026-09-24 → 2026-10-15)
+
+Estado vigente del proyecto. Todo corre en local contra el proyecto Supabase real; las conciliaciones se vaciaron el 2026-10-15 (`conciliaciones_businesses`, `conciliaciones_messengers`, `conciliacion_consecutivos` y los PDF de Drive) para volver a registrarlas con las correcciones de fechas, consecutivo y PDF.
+
+### 13.1 Conciliación de Negocios (`ConciliacionNegociosPage.tsx`)
+- Cálculo por **vía de pago del negocio** (`businesses.payment_method`): Transferencia (1 fila CUP), Transferencia-Efectivo (2 filas CUP), Transferencia-Exterior (fila CUP + fila "Exterior" en USD). Saldo de una orden = `product_amount`; comisión configurable (Configuración → Comisión Mandao).
+- **Tasa de cambio = USD por 1 CUP** (hoy 0.002): `USD = CUP × tasa`, aplicada a saldo y CxP de la fila Exterior. Sin tasa activa la fila Exterior queda bloqueada con alerta.
+- Individual: **un solo botón** concilia todas las filas pendientes del negocio (CUP + USD).
+- **PDF "Reporte de conciliación"** (`lib/conciliacion/pdfConciliacionNegocio.ts`): encabezado, Resumen Órdenes por método de pago, total a pagar/cobrar y detalle por orden. Fila CUP con logo; fila USD (Exterior) sin logo. Ajustes del 2026-10-15: sin consecutivo en la tabla de encabezado (Establecimiento primero), Resumen solo con las columnas de esa fila (Exterior: Saldo y Tarjeta), sin la palabra "Mandao", sin responsable en el pie y "Tipo de pedido" con el `payment_type` real. Cada conciliación guarda `comision_pct` y `tasa_cambio` para regenerarlo con los mismos números.
+
+### 13.2 Conciliación de Mensajeros (`ConciliacionMensajerosPage.tsx`)
+- Saldo de una orden = **`delivery_charge`**; todo en **CUP** (vías de pago Efectivo / Transferencia).
+- Saldo CUP = Total por Pagar − Total por Cobrar (antes se multiplicaba por la tasa: doble conversión, corregido).
+- Disponibilidades con **% de descuento** configurable; Alquiler de Mochila por tipo (CUP).
+- **PDF "Reporte de conciliación"** (`lib/conciliacion/pdfConciliacionMensajero.ts`, 2026-10-15): mismo diseño que Negocios sobre Delivery Charge, con tabla de Liquidación (comisión en Efectivo, pago por órdenes electrónicas, Disponibilidades netas, Alquiler de Mochila y total). Piezas comunes de ambos PDF en `lib/conciliacion/pdfComun.ts`.
+
+### 13.3 Común a ambas conciliaciones
+- **Consecutivo** asignado por la BD (trigger + contador atómico `conciliacion_consecutivos`): `PN/CN` (Negocios) y `PM/CM` (Mensajeros) + año (2 dígitos) + número de 4 dígitos, P si se paga y C si se cobra; reinicia cada año. Las liquidaciones en **0** no se numeran y se notifican.
+- Individual: el selector solo lista negocios/mensajeros **pendientes** del Área + rango (mismo cálculo que la Masiva). Área "Todas" disponible en ambos modos.
+- Masiva: **resumen del período** por método de pago y moneda (órdenes, ventas, beneficio, comisión Mandao); ~3 s con todas las áreas (antes >1 min).
+- Progreso paso a paso de Calcular y Conciliar (`ProcesoProgreso.tsx`).
+- **PDF en Google Drive**: una carpeta para Negocios y otra para Mensajeros (Configuración → Data, tabla `app_settings`); el histórico abre el PDF de Drive o lo regenera en una pestaña nueva, con reintento de subida. Requiere scope `drive` y la Google Drive API habilitada (hecho).
+- Histórico ordenado por **consecutivo descendente** y **paginado** (20); resultados de Masiva paginados (25).
+- Correcciones: lecturas de Supabase **paginadas** (se cortaban en 1000 filas), **fechas** mostradas un día antes por zona horaria (`formatDate`) y fecha de "hoy" calculada en UTC (`toLocalISODate`).
+
+### 13.4 Dispatcher y Disponibilidad
+- **Reglas** configurables de celdas vacías permitidas por Store/condición (Configuración → Reglas, tabla `dispatcher_rules`); sin excepciones fijas en el código.
+- Importación: filtro de duplicados paginado y con la clave real de la BD — **Order ID + Área + Negocio + Delivery Date** (`uq_dispatcher_order_area_store_date`).
+- Revisión: misma lectura del Sheet que la importación (`lib/dispatcherOrders.ts`); columnas nuevas **`rate`** y **`transaction_fee`** (antes Transaction Fee se guardaba en `tax`); emparejamiento por ID + Negocio + Fecha.
+- Disponibilidad: detección de la fila real de encabezados (`lib/sheetHeaders.ts`).
+
+### 13.5 Configuración y Dashboard
+- Razón de Cambio: tasas < 1 (`numeric(18,8)`), sincronización con El Toque guardando el inverso.
+- Comisión Mandao: comisión Negocios/Mensajeros, Alquiler de Mochila y descuento de Disponibilidad.
+- **Dashboard General**: selector de período, órdenes, conciliaciones, altas, activos/total y resumen visual del monto a pagar conciliado (no hay aún registro de pagos reales).
+
+### 13.6 Migraciones de esta etapa
+`2026-09-23_access_roles` · `2026-09-24_conciliaciones_negocios` · `2026-09-24_unify_access_roles` · `2026-09-30_conciliaciones_mensajeros_y_correcciones` · `2026-09-30b`…`e` · `2026-10-01` · `2026-10-01b` · `2026-10-07` · `2026-10-07b`…`e` · `2026-10-15_conciliaciones_comision_tasa`. Todas incorporadas a `supabase_schema.sql`. **Por confirmar si se corrieron en el proyecto real:** `2026-09-30e`, `2026-10-01b`, `2026-10-07c`, `2026-10-07d`, `2026-10-07e` y `2026-10-15` (esta última, antes de volver a conciliar).
+
+### 13.7 Pendientes
+| Pendiente | Tipo |
+|---|---|
+| Probar los PDF nuevos (Negocios y Mensajeros) con conciliaciones reales | Prueba |
+| Pantallas que no se ajustan al ancho: corregido el filtro del histórico de Conciliaciones; falta identificar otras | Código — esperando capturas |
+| Facturación, Cuentas por Cobrar/Pagar, Planificación de Pagos (siguen con datos de prueba) | Código — definir reglas de negocio |
+| Fuente del título del PDF y logo en alta resolución | Código — esperando archivos |
+| Desplegar `sync-exchange-rate` y activar el cron de El Toque | Acción tuya |
+| Hosting (Vercel listo) e invitar al segundo desarrollador | Acción tuya |

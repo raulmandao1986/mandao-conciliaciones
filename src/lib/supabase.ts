@@ -18,9 +18,13 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 // Scopes de Google que el sistema necesita sobre la cuenta del usuario
 // autenticado (RN: lectura directa de Google Sheets + envío de correo
 // desde la cuenta del propio usuario, NO desde un service account).
-// Se mantienen exactamente los mismos que tenía Firebase Auth.
+// Se mantienen los mismos que tenía Firebase Auth, más `drive` (2026-10-07)
+// para guardar los PDF de Conciliación en la carpeta configurada en
+// Configuración -> Data (`drive.file` no basta: solo permite carpetas
+// creadas por la propia app). Requiere que la Google Drive API esté
+// habilitada y el scope agregado en la pantalla de consentimiento OAuth.
 export const GOOGLE_SCOPES =
-  'https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/gmail.send';
+  'https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/drive';
 
 // Dominio de Google Workspace autorizado a usar el sistema. La barrera
 // real debe estar en la pantalla de consentimiento OAuth de Google Cloud
