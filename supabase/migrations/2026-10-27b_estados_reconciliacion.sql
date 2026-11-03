@@ -13,6 +13,8 @@
 -- 2. Consecutivo por moneda ("por riel, número por moneda"): las filas en
 --    USD (riel Exterior) llevan su propia numeración con una U:
 --    PN260001 (CUP) y PNU260001 (USD). Mensajeros siempre en CUP.
+--    (Reemplazado por 2026-10-27c: series por moneda y sentido, P/C + CUP/USD,
+--    compartidas por Negocios y Mensajeros.)
 -- 3. Reconciliación: una conciliación en Nuevo o Enviado puede volver a
 --    calcularse; se actualizan los montos, se mantiene el consecutivo y la
 --    base registra los valores anteriores y nuevos en

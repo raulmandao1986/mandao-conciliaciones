@@ -2,7 +2,7 @@ import { supabase } from '../supabase';
 import { normalizeCompact } from './paymentBuckets';
 
 // Motor de clasificación de órdenes a partir del catálogo de Métodos de
-// Pago (Configuración -> Métodos de Pago / Tipología de Pago, migración
+// Pago (Configuración -> Métodos de Pago -> Órdenes, migración
 // 2026-10-27). Sustituye a la tabla fija Cash -> Efectivo, Card -> Tarjeta…
 // que había en paymentBuckets.ts: cada método trae su Tipología (Por
 // Cobrar / Por Pagar), su Moneda (CUP / USD) y su Grupo, y la conciliación

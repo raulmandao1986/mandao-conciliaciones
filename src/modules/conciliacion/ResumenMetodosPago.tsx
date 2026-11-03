@@ -5,7 +5,7 @@ import { TIPOLOGIA_LABEL, type LineaGrupo } from '../../lib/conciliacion/catalog
 
 // Resumen del período en la Conciliación Masiva (pedido por el usuario
 // 2026-10-07): órdenes, ventas, beneficio (negocio/mensajero) y comisión
-// Mandao por Grupo de pago (Configuración -> Tipología de Pago, 2026-10-27)
+// Mandao por Grupo de pago (Configuración -> Métodos de Pago -> Órdenes, 2026-10-27)
 // y por moneda. Es solo informativo: no cambia ningún cálculo.
 
 export interface ResumenFila {

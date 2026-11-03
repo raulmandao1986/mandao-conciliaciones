@@ -5,8 +5,9 @@ import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
 import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
 
-// Configuración -> Tipología de Pago -> Formato de Consecutivo (2026-10-27c).
-// Una serie por Entidad × Sentido × Moneda. La base de datos arma el código
+// Configuración -> Formato de Consecutivo (2026-10-27c).
+// Una serie por Entidad × Sentido × Moneda: cada una con su formato y su
+// numeración (rectificado 2026-11-02). La base de datos arma el código
 // con este formato al registrar cada conciliación
 // (public.next_conciliacion_consecutivo); la clave de la serie es fija, así
 // que cambiar el prefijo no reinicia la numeración.
@@ -64,9 +65,11 @@ export function FormatoConsecutivoPage() {
     const { data, error: e } = await supabase
       .from('consecutivo_series')
       .select('serie, entidad, sentido, moneda, prefijo, formato_anio, separador, digitos, reinicio')
-      .order('entidad').order('moneda').order('sentido', { ascending: false });
+      .order('entidad', { ascending: false }).order('moneda').order('sentido', { ascending: false });
     if (e) {
-      setError(/consecutivo_series/.test(e.message) ? 'Falta correr en Supabase la migración 2026-10-27c_formato_consecutivo.sql.' : e.message);
+      setError(/entidad/.test(e.message)
+        ? 'Falta correr en Supabase la migración 2026-11-02_consecutivo_por_entidad.sql.'
+        : /consecutivo_series/.test(e.message) ? 'Falta correr en Supabase la migración 2026-10-27c_formato_consecutivo.sql.' : e.message);
       setLoading(false);
       return;
     }
@@ -124,10 +127,11 @@ export function FormatoConsecutivoPage() {
       <div className="flex items-center gap-3">
         <div className="p-3 rounded-xl text-[var(--color-brand-ink)] bg-[var(--color-brand-subtle)]"><Hash className="w-6 h-6" /></div>
         <div>
-          <p className="text-xs font-semibold text-[var(--color-text-faint)]">Configuración / Tipología de Pago</p>
+          <p className="text-xs font-semibold text-[var(--color-text-faint)]">Configuración</p>
           <h1 className="text-xl font-bold text-[var(--color-text)]">Formato de Consecutivo</h1>
           <p className="text-sm text-[var(--color-text-muted)] mt-1 max-w-3xl">
-            Código que la base de datos asigna a cada conciliación con monto a pagar o a cobrar, por entidad, sentido y moneda.
+            Código que la base de datos asigna a cada conciliación con monto a pagar o a cobrar. Negocios y Mensajeros tienen
+            una serie propia para cada combinación de Por Pagar / Por Cobrar y moneda.
             Se usa para hacer el match contra caja y en el nombre del PDF.
           </p>
         </div>
@@ -159,16 +163,25 @@ export function FormatoConsecutivoPage() {
             <tbody className="divide-y divide-[var(--color-border)]">
               {series.length === 0 ? (
                 <tr><td colSpan={8} className="p-8 text-center text-sm text-[var(--color-text-muted)]">Sin series de consecutivo configuradas.</td></tr>
-              ) : series.map(s => {
+              ) : series.map((s, i) => {
                 const d = drafts[s.serie];
                 const set = (patch: Partial<Draft>) => setDrafts(prev => ({ ...prev, [s.serie]: { ...d, ...patch } }));
                 const cambiado = d.prefijo !== s.prefijo || d.formatoAnio !== s.formatoAnio || d.separador !== s.separador || d.digitos !== s.digitos || d.reinicio !== s.reinicio;
                 const err = validar(d, series.filter(o => o.serie !== s.serie));
+                const encabezado = i === 0 || series[i - 1].entidad !== s.entidad;
                 return (
-                  <tr key={s.serie} className="h-11 align-top">
+                  <React.Fragment key={s.serie}>
+                  {encabezado && (
+                    <tr className="bg-[var(--color-surface-2)]">
+                      <td colSpan={8} className="px-3 py-2 text-xs font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+                        {s.entidad === 'negocios' ? 'Negocios' : 'Mensajeros'}
+                      </td>
+                    </tr>
+                  )}
+                  <tr className="h-11 align-top">
                     <td className="p-3">
-                      <span className="block font-semibold text-[var(--color-text)]">{s.entidad === 'negocios' ? 'Negocios' : 'Mensajeros'} · {s.sentido === 'pagar' ? 'Por Pagar' : 'Por Cobrar'}</span>
-                      <span className="text-[11px] text-[var(--color-text-faint)]">Moneda {s.moneda}</span>
+                      <span className="block font-semibold text-[var(--color-text)]">{s.sentido === 'pagar' ? 'Por Pagar' : 'Por Cobrar'} · {s.moneda}</span>
+                      <span className="text-[11px] text-[var(--color-text-faint)]">{s.entidad === 'negocios' ? 'Negocios' : 'Mensajeros'}</span>
                     </td>
                     <td className="p-3"><input aria-label="Prefijo" disabled={!canWrite} value={d.prefijo} onChange={(e) => set({ prefijo: e.target.value.toUpperCase().trim() })} className={cn(fieldCls, 'font-mono uppercase')} /></td>
                     <td className="p-3">
@@ -205,6 +218,7 @@ export function FormatoConsecutivoPage() {
                       )}
                     </td>
                   </tr>
+                  </React.Fragment>
                 );
               })}
             </tbody>

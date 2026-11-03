@@ -23,7 +23,8 @@ import {
   Loader2,
   FileSpreadsheet,
   Download,
-  Printer
+  Printer,
+  Mail
 } from 'lucide-react';
 import { SlideOver } from '../../design-system/primitives/SlideOver';
 import { cn } from '../../lib/utils';
@@ -43,6 +44,7 @@ interface MessengerRecord {
   nombre: string;
   ci: string;
   telefono: string;
+  correo: string; // para enviar la conciliación por correo (migración 2026-10-27d)
   tarjetaFiscal: string;
   cuentaFiscal: string;
   viaPago: string;
@@ -102,10 +104,13 @@ export function GestionMensajerosPage() {
 
   const loadMessengers = async () => {
     setLoading(true);
-    const { data: rows, error } = await supabase
-      .from('messengers')
-      .select('messenger_id, name, ci, phone, fiscal_card, fiscal_account, payment_method, backpack_type, start_date, end_date, area_id, comments, active, areas(name)')
-      .order('name', { ascending: true });
+    const base = 'messenger_id, name, ci, phone, fiscal_card, fiscal_account, payment_method, backpack_type, start_date, end_date, area_id, comments, active, areas(name)';
+    const query = (cols: string) => supabase.from('messengers').select(cols).order('name', { ascending: true });
+    let { data: rows, error } = await query(`${base}, email`);
+    // Sin la migración 2026-10-27d la columna email no existe: se carga sin ella.
+    const sinEmail = !!error && /email/.test(error.message || '');
+    if (sinEmail) ({ data: rows, error } = await query(base));
+    setConCorreo(!sinEmail);
     if (error) {
       console.error('Error fetching messengers:', error.message);
       setLoading(false);
@@ -116,6 +121,7 @@ export function GestionMensajerosPage() {
       nombre: m.name,
       ci: m.ci || '',
       telefono: m.phone || '',
+      correo: m.email || '',
       tarjetaFiscal: m.fiscal_card || '',
       cuentaFiscal: m.fiscal_account || '',
       viaPago: m.payment_method || '',
@@ -143,6 +149,7 @@ export function GestionMensajerosPage() {
     nombre: '',
     ci: '',
     telefono: '',
+    correo: '',
     tarjetaFiscal: '',
     cuentaFiscal: '',
     viaPago: 'Transferencia',
@@ -154,6 +161,7 @@ export function GestionMensajerosPage() {
     comentarios: ''
   });
   const [formData, setFormData] = useState<any>(emptyForm());
+  const [conCorreo, setConCorreo] = useState(true);
 
   // Filter State
   const [filters, setFilters] = useState({
@@ -306,6 +314,7 @@ export function GestionMensajerosPage() {
       nombre: messenger.nombre,
       ci: messenger.ci,
       telefono: messenger.telefono,
+      correo: messenger.correo || '',
       tarjetaFiscal: messenger.tarjetaFiscal,
       cuentaFiscal: messenger.cuentaFiscal,
       viaPago: messenger.viaPago || 'Transferencia',
@@ -335,6 +344,7 @@ export function GestionMensajerosPage() {
         name: formData.nombre,
         ci: formData.ci,
         phone: formData.telefono,
+        ...(conCorreo ? { email: (formData.correo || '').trim() || null } : {}),
         fiscal_card: formData.tarjetaFiscal || null,
         fiscal_account: formData.cuentaFiscal || null,
         payment_method: formData.viaPago,
@@ -673,6 +683,7 @@ export function GestionMensajerosPage() {
                <div className="space-y-4">
                   <DetailItem icon={IdCard} label="CI" value={selectedMessenger?.ci} />
                   <DetailItem icon={Phone} label="Teléfono" value={selectedMessenger?.telefono} />
+                  <DetailItem icon={Mail} label="Correo" value={selectedMessenger?.correo} />
                   <DetailItem icon={MapPin} label="Área" value={selectedMessenger?.areaNombre} />
                   <DetailItem icon={Bike} label="Tipo de Mochila" value={selectedMessenger?.tipoMochila || 'Grande'} />
                   <DetailItem icon={Calendar} label="Fecha Alta" value={selectedMessenger?.fechaAlta} />
@@ -799,6 +810,17 @@ export function GestionMensajerosPage() {
                       required
                       placeholder="Ej: 53123456"
                    />
+                   {conCorreo && (
+                     <TextField
+                        label="Correo"
+                        type="email"
+                        value={formData.correo || ''}
+                        onChange={(e) => setFormData(prev => ({ ...prev, correo: e.target.value }))}
+                        placeholder="mensajero@correo.com"
+                        hint="Se usa para enviarle su conciliación. Varios: sepárelos con coma."
+                        containerClassName="sm:col-span-2"
+                     />
+                   )}
                 </div>
              </div>
           </FormSection>

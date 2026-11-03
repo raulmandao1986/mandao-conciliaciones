@@ -10,7 +10,7 @@ import logoUrl from '../../assets/brand/mandao-logo.jpg';
 // Piezas compartidas por los PDF "Reporte de conciliación" de Negocios y de
 // Mensajeros (mismo diseño, entregado por el usuario 2026-10-15). Desde el
 // 2026-10-27 las columnas son los Grupos de pago del catálogo (Configuración
-// -> Tipología de Pago) guardados en el desglose de cada conciliación.
+// -> Métodos de Pago -> Órdenes / Grupos de Pago) guardados en el desglose de cada conciliación.
 
 // Etiquetas sin la palabra "Mandao" (pedido del usuario 2026-10-15).
 export const sinMandao = (t: string) => t.replace(/\s*\bmandao\b\s*/gi, ' ').replace(/\s+/g, ' ').trim();

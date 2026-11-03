@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_IMPORT, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
-import { formatCurrency, formatDate, toLocalISODate } from '../../lib/formatters';
+import { formatCurrency, formatDate, formatDatetime, toLocalISODate } from '../../lib/formatters';
 // El dispatcher siempre registra los montos en CUP (confirmado por el usuario
 // 2026-09-30) — mismo criterio que Conciliación de Negocios y Dispatcher.
 const formatCUP = (value: number) => formatCurrency(value, 'CUP');
@@ -16,6 +16,7 @@ import {
 import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
 import { EstadoConciliacionControl, ReconciliacionesLog } from '../../lib/conciliacion/EstadoBadge';
 import { puedeReconciliar, parseEstado, cambiarEstadoConciliacion } from '../../lib/conciliacion/estados';
+import { useEnvioConciliaciones, puedeEnviar, type EnvioItem } from './EnvioCorreo';
 import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn } from '../../lib/conciliacion/drivePdf';
 import { ResumenMetodosPago, ResumenBuilder } from './ResumenMetodosPago';
 import { loadCatalogoPagos, computeDesglose, columnasLegado, parseDesglose, type LineaGrupo } from '../../lib/conciliacion/catalogoPagos';
@@ -24,7 +25,7 @@ import { buildPdfMensajero, loadOrdenesMensajero } from '../../lib/conciliacion/
 import { ProcesoProgreso, useProcessSteps, trackStep, type StepStatus } from './ProcesoProgreso';
 import {
   Send, Loader2, Search, Calculator, AlertTriangle, CheckCircle2, XCircle,
-  ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud, RotateCcw
+  ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud, RotateCcw, Mail
 } from 'lucide-react';
 
 // =====================================================================
@@ -72,7 +73,7 @@ interface MensajeroCalculo {
   // Conciliación ya registrada para este rango (null = pendiente).
   previa: PreviaConciliacion | null;
   ordenes: OrderRow[];
-  grupos: LineaGrupo[]; // desglose por Grupo de pago (Configuración -> Tipología de Pago)
+  grupos: LineaGrupo[]; // desglose por Grupo de pago (Configuración -> Métodos de Pago -> Órdenes)
   sinClasificar: { ordenes: number; saldo: number; tipos: Set<string> };
   totalCxC: number;
   totalCxPBaldes: number;
@@ -100,12 +101,16 @@ type StepUpdater = (key: string, status: StepStatus, detail?: string) => void;
 
 interface ConciliacionRecord {
   id: string;
-  // Consecutivo para el match contra caja (PN/CN/PM/CM + año + número), asignado
+  // Consecutivo para el match contra caja (serie por entidad, sentido y moneda, ej. PM260001 / CMU260003), asignado
   // por la base de datos al registrar (ver migración 2026-10-07b).
   consecutivo: string | null;
   // PDF guardado en Google Drive al registrar la conciliación (null si no se subió).
   pdfDriveUrl: string | null;
   areaId: string | null;
+  messengerId: string | null;
+  // Último envío por correo (migración 2026-10-27d).
+  enviadoAt: string | null;
+  enviadoA: string | null;
   // Desglose por Grupo de pago guardado al conciliar (migración 2026-10-27).
   desglose: LineaGrupo[];
   // % de comisión con que se calculó (null antes de la migración 2026-10-15).
@@ -131,6 +136,7 @@ interface ConciliacionRecord {
   totalPorPagar: number;
   saldoCup: number | null;
   viaPago: string;
+  moneda: 'CUP' | 'USD'; // hoy siempre CUP; abierto a USD (migración 2026-10-27c)
   responsable: string;
   conciliacion: string;
   estado: EstadoConciliacion;
@@ -138,13 +144,16 @@ interface ConciliacionRecord {
   facturacion: string | null;
 }
 
-const HISTORY_SELECT_BASE = 'conciliacion_id, area_id, fecha, mensajero, fecha_inicial, fecha_final, area, ordenes_efectivo, cxc_cu, ordenes_transfermovil, cxp_tm, ordenes_saldo_mandao, cxp_sm, ordenes_tarjeta, cxp_us, tipo_mochila, alquiler_mochila, disponibilidades, total_ordenes, total_por_cobrar, total_por_pagar, saldo_cup, via_pago, responsable, conciliacion, estado, facturacion';
-const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct, desglose, reconciliaciones`;
+const HISTORY_SELECT_BASE = 'conciliacion_id, area_id, messenger_id, fecha, mensajero, fecha_inicial, fecha_final, area, ordenes_efectivo, cxc_cu, ordenes_transfermovil, cxp_tm, ordenes_saldo_mandao, cxp_sm, ordenes_tarjeta, cxp_us, tipo_mochila, alquiler_mochila, disponibilidades, total_ordenes, total_por_cobrar, total_por_pagar, saldo_cup, via_pago, responsable, conciliacion, estado, facturacion';
+const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct, desglose, reconciliaciones, enviado_at, enviado_a, moneda`;
 
 function mapHistoryRow(r: any): ConciliacionRecord {
   return {
     pdfDriveUrl: r.pdf_drive_url || null,
     areaId: r.area_id || null,
+    messengerId: r.messenger_id || null,
+    enviadoAt: r.enviado_at || null,
+    enviadoA: r.enviado_a || null,
     desglose: parseDesglose(r.desglose),
     comisionPct: r.comision_pct !== null && r.comision_pct !== undefined ? Number(r.comision_pct) : null,
     consecutivo: r.consecutivo || null,
@@ -170,6 +179,7 @@ function mapHistoryRow(r: any): ConciliacionRecord {
     totalPorPagar: Number(r.total_por_pagar),
     saldoCup: r.saldo_cup !== null ? Number(r.saldo_cup) : null,
     viaPago: r.via_pago || 'N/D',
+    moneda: r.moneda === 'USD' ? 'USD' : 'CUP',
     responsable: r.responsable,
     conciliacion: r.conciliacion,
     estado: parseEstado(r.estado),
@@ -189,6 +199,10 @@ function mensajeConfirmacion(nuevas: number, reconciliar: number): string {
   if (reconciliar > 0) partes.push(`Se va${reconciliar === 1 ? '' : 'n'} a reconciliar ${reconciliar} conciliación(es) ya registrada(s): se actualizan los montos, se mantiene el consecutivo, vuelven a estado Nuevo (para reenviar el PDF corregido) y queda registro de los valores anteriores.`);
   return partes.join(' ');
 }
+
+// Nombre del PDF adjunto al correo del mensajero: sin consecutivo (es interno).
+const pdfAdjuntoMensajero = (rec: ConciliacionRecord) =>
+  `conciliacion-${rec.mensajero.replace(/[^a-z0-9]/gi, '-')}-${rec.fechaInicial}_${rec.fechaFinal}.pdf`;
 
 // Liquidación en 0 (Total por Pagar = Total por Cobrar): no se paga ni se
 // cobra y la base de datos no le asigna consecutivo (migración 2026-10-07c).
@@ -247,9 +261,12 @@ export function ConciliacionMensajerosPage() {
   const [historySearch, setHistorySearch] = useState('');
   const [historyAreaFilter, setHistoryAreaFilter] = useState('');
   const [historyEstadoFilter, setHistoryEstadoFilter] = useState('');
+  const [historyMonedaFilter, setHistoryMonedaFilter] = useState('');
   const [historyFechaInicio, setHistoryFechaInicio] = useState('');
   const [historyFechaFin, setHistoryFechaFin] = useState('');
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
+  // Conciliaciones en Nuevo marcadas para el envío masivo por correo.
+  const [seleccionEnvio, setSeleccionEnvio] = useState<Record<string, boolean>>({});
 
   const loadAreas = async () => {
     const { data, error } = await supabase.from('areas').select('area_id, name, active').eq('active', true).order('name');
@@ -628,6 +645,7 @@ export function ConciliacionMensajerosPage() {
         total_por_pagar: c.totalPorPagar,
         saldo_cup: c.saldoCup,
         via_pago: c.viaPago,
+        moneda: 'CUP',
         responsable,
         responsable_id: userData?.user?.id || null,
         conciliacion: `${c.mensajeroNombre} ${fechaInicio} - ${fechaFin}`,
@@ -720,6 +738,31 @@ export function ConciliacionMensajerosPage() {
     }
   };
 
+  // Envío por correo (Fase 3): un correo por mensajero y período con su PDF.
+  const envio = useEnvioConciliaciones<ConciliacionRecord>({
+    entidad: 'mensajeros',
+    construirPdfs: async recs => {
+      const ordenes = await loadOrdenesMensajero(recs);
+      return Promise.all(recs.map(async r => ({
+        nombre: pdfAdjuntoMensajero(r),
+        blob: (await buildPdfMensajero(r, ordenes.get(r.id) || [], pdfDefaults)).output('blob'),
+      })));
+    },
+    onTerminado: async () => { setSeleccionEnvio({}); await loadHistory(); },
+  });
+  const envioItem = (r: ConciliacionRecord): EnvioItem<ConciliacionRecord> => {
+    const neto = r.totalPorPagar - r.totalPorCobrar;
+    return {
+      rec: r, id: r.id, entidadId: r.messengerId, nombre: r.mensajero, area: r.area,
+      fechaInicial: r.fechaInicial, fechaFinal: r.fechaFinal, consecutivo: r.consecutivo, estado: r.estado,
+      linea: `Conciliación: ${neto > 0.005 ? 'a pagar al mensajero' : neto < -0.005 ? 'a cobrar al mensajero' : 'en 0'} ${formatCUP(Math.abs(neto))}`,
+    };
+  };
+  const enviarMensajero = (r: ConciliacionRecord) => envio.solicitar(
+    history.filter(h => (h.messengerId ? h.messengerId === r.messengerId : h.mensajero === r.mensajero)
+      && h.fechaInicial === r.fechaInicial && h.fechaFinal === r.fechaFinal).map(envioItem)
+  );
+
   const handleCambiarEstado = async (rec: ConciliacionRecord, nuevo: EstadoConciliacion) => {
     try {
       await cambiarEstadoConciliacion('conciliaciones_messengers', { id: rec.id, estado: rec.estado, nombre: rec.conciliacion, consecutivo: rec.consecutivo }, nuevo);
@@ -789,6 +832,7 @@ export function ConciliacionMensajerosPage() {
     return history.filter(r => {
       if (historyAreaFilter && r.area !== historyAreaFilter) return false;
       if (historyEstadoFilter && r.estado !== historyEstadoFilter) return false;
+      if (historyMonedaFilter && r.moneda !== historyMonedaFilter) return false;
       if (historyFechaInicio && r.fecha < historyFechaInicio) return false;
       if (historyFechaFin && r.fecha > historyFechaFin) return false;
       if (q) {
@@ -797,8 +841,12 @@ export function ConciliacionMensajerosPage() {
       }
       return true;
     }).sort(compareConsecutivoDesc);
-  }, [history, historySearch, historyAreaFilter, historyEstadoFilter, historyFechaInicio, historyFechaFin]);
-  const historyPag = usePagination(filteredHistory, 20, [history, historySearch, historyAreaFilter, historyEstadoFilter, historyFechaInicio, historyFechaFin]);
+  }, [history, historySearch, historyAreaFilter, historyEstadoFilter, historyMonedaFilter, historyFechaInicio, historyFechaFin]);
+  const historyPag = usePagination(filteredHistory, 20, [history, historySearch, historyAreaFilter, historyEstadoFilter, historyMonedaFilter, historyFechaInicio, historyFechaFin]);
+  const nuevasFiltradas = useMemo(() => filteredHistory.filter(h => h.estado === 'Nuevo'), [filteredHistory]);
+  const seleccionadas = nuevasFiltradas.filter(h => seleccionEnvio[h.id]);
+  const todasMarcadas = nuevasFiltradas.length > 0 && seleccionadas.length === nuevasFiltradas.length;
+  const marcarTodas = (marcar: boolean) => setSeleccionEnvio(marcar ? Object.fromEntries(nuevasFiltradas.map(h => [h.id, true])) : {});
 
   return (
     <div className="space-y-6">
@@ -947,6 +995,7 @@ export function ConciliacionMensajerosPage() {
         />
       )}
 
+      {envio.modal}
       <ConfirmDialog
         isOpen={confirmOpen}
         title="¿Confirmar Conciliación?"
@@ -979,7 +1028,22 @@ export function ConciliacionMensajerosPage() {
 
       <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)] shadow-sm overflow-hidden">
         <div className="p-4 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] space-y-3">
-          <h3 className="text-xs font-black uppercase tracking-widest text-slate-500">Histórico de Conciliaciones ({filteredHistory.length})</h3>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-black uppercase tracking-widest text-slate-500">Histórico de Conciliaciones ({filteredHistory.length})</h3>
+            {canExecute && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                disabled={envio.ocupado || seleccionadas.length === 0}
+                onClick={() => envio.solicitar(seleccionadas.map(envioItem))}
+                title="Envía por correo, a cada mensajero, las conciliaciones marcadas (un correo por mensajero y período)"
+              >
+                {envio.preparando ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} />}
+                Enviar seleccionadas ({seleccionadas.length})
+              </Button>
+            )}
+          </div>
           {/* Filtros: se acomodan en varias líneas según el ancho disponible. */}
           <div className="flex flex-wrap gap-3">
             <div className="relative flex-[2_1_16rem] min-w-[14rem]">
@@ -996,6 +1060,11 @@ export function ConciliacionMensajerosPage() {
             <select value={historyAreaFilter} onChange={(e) => setHistoryAreaFilter(e.target.value)} aria-label="Todas las Áreas" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
               <option value="">Todas las Áreas</option>
               {areas.map(a => <option key={a.id} value={a.nombre}>{a.nombre}</option>)}
+            </select>
+            <select value={historyMonedaFilter} onChange={(e) => setHistoryMonedaFilter(e.target.value)} aria-label="Todas las Monedas" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
+              <option value="">Todas las Monedas</option>
+              <option value="CUP">CUP</option>
+              <option value="USD">USD</option>
             </select>
             <select value={historyEstadoFilter} onChange={(e) => setHistoryEstadoFilter(e.target.value)} aria-label="Todos los Estados" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
               <option value="">Todos los Estados</option>
@@ -1018,6 +1087,19 @@ export function ConciliacionMensajerosPage() {
           <table className="w-full text-left border-collapse">
             <thead className="bg-slate-50 border-b border-[var(--color-border)]">
               <tr className="text-[10px] font-black text-[var(--color-text-faint)] uppercase tracking-wider">
+                <th className="w-10 pl-4 py-4">
+                  {canExecute && (
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 align-middle"
+                      aria-label="Marcar todas las conciliaciones en Nuevo"
+                      title={`Marcar las ${nuevasFiltradas.length} conciliación(es) en Nuevo del filtro`}
+                      disabled={nuevasFiltradas.length === 0}
+                      checked={todasMarcadas}
+                      onChange={(e) => marcarTodas(e.target.checked)}
+                    />
+                  )}
+                </th>
                 <th className="w-5 p-4"></th>
                 <th className="p-4">Mensajero</th>
                 <th className="p-4">Período</th>
@@ -1029,15 +1111,26 @@ export function ConciliacionMensajerosPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {historyLoading ? (
-                <tr><td colSpan={7} className="py-16 text-center"><Loader2 className="animate-spin mx-auto text-[var(--color-primary)]" /></td></tr>
+                <tr><td colSpan={8} className="py-16 text-center"><Loader2 className="animate-spin mx-auto text-[var(--color-primary)]" /></td></tr>
               ) : filteredHistory.length === 0 ? (
-                <tr><td colSpan={7} className="py-16 text-center text-sm text-slate-400 font-bold">No hay conciliaciones registradas.</td></tr>
+                <tr><td colSpan={8} className="py-16 text-center text-sm text-slate-400 font-bold">No hay conciliaciones registradas.</td></tr>
               ) : (
                 historyPag.pageItems.map(r => {
                   const isExpanded = expandedHistoryId === r.id;
                   return (
                     <React.Fragment key={r.id}>
                       <tr className="hover:bg-slate-50 cursor-pointer group" onClick={() => setExpandedHistoryId(isExpanded ? null : r.id)}>
+                        <td className="pl-4 py-4" onClick={(e) => e.stopPropagation()}>
+                          {canExecute && r.estado === 'Nuevo' && (
+                            <input
+                              type="checkbox"
+                              className="w-4 h-4 align-middle"
+                              aria-label={`Marcar para enviar por correo`}
+                              checked={!!seleccionEnvio[r.id]}
+                              onChange={(e) => setSeleccionEnvio(prev => ({ ...prev, [r.id]: e.target.checked }))}
+                            />
+                          )}
+                        </td>
                         <td className="p-4 text-center">{isExpanded ? <ChevronUp size={14} className="text-[var(--color-primary)]" /> : <ChevronDown size={14} className="text-slate-400" />}</td>
                         <td className="p-4">
                           <div className="flex flex-col">
@@ -1081,6 +1174,17 @@ export function ConciliacionMensajerosPage() {
                                 {subiendoId === r.id ? <Loader2 size={13} className="animate-spin" /> : <UploadCloud size={13} />}
                               </button>
                             )}
+                            {canExecute && puedeEnviar(r.estado) && (
+                              <button
+                                onClick={() => enviarMensajero(r)}
+                                disabled={envio.ocupado}
+                                aria-label="Enviar por correo"
+                                title={r.estado === 'Enviado' ? 'Reenviar por correo al mensajero' : 'Enviar por correo al mensajero (pasa a Enviado)'}
+                                className="p-1 text-slate-400 hover:text-[var(--color-primary)] disabled:opacity-50"
+                              >
+                                <Mail size={13} />
+                              </button>
+                            )}
                             {canExecute && puedeReconciliar(r.estado) && (
                               <button
                                 onClick={() => handleReconciliarDesdeHistorico(r)}
@@ -1096,7 +1200,7 @@ export function ConciliacionMensajerosPage() {
                       </tr>
                       {isExpanded && (
                         <tr className="bg-slate-50/60">
-                          <td colSpan={7} className="p-5">
+                          <td colSpan={8} className="p-5">
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
                               <FieldMini label="Responsable" value={r.responsable} />
                               <FieldMini label="Fecha de Conciliación" value={formatDate(r.fecha)} />
@@ -1108,6 +1212,7 @@ export function ConciliacionMensajerosPage() {
                               <FieldMini label="Alquiler Mochila" value={formatCUP(r.alquilerMochila)} />
                               <FieldMini label="Saldo CUP" value={r.saldoCup !== null ? formatCUP(r.saldoCup) : '—'} />
                               <FieldMini label="Facturación" value={r.facturacion || 'Pendiente'} />
+                              <FieldMini label="Último envío" value={r.enviadoAt ? `${formatDatetime(r.enviadoAt)} · ${r.enviadoA || ''}` : 'No enviado'} />
                               {r.desglose.length > 0 && (
                                 <div className="col-span-2 md:col-span-4">
                                   <span className="block text-[10px] font-bold uppercase text-slate-400 mb-1">Desglose por grupo de pago</span>

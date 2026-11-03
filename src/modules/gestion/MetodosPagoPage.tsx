@@ -55,6 +55,9 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
   const [grupos, setGrupos] = useState<GrupoOption[]>([]);
   // false = la migración 2026-10-27 todavía no se corrió (sin columnas de clasificación).
   const [conClasificacion, setConClasificacion] = useState(true);
+  // Tipología / Moneda / Grupo solo aplican a los métodos de Órdenes
+  // (rectificado con el equipo 2026-10-28): Negocios y Mensajeros no la usan.
+  const clasifica = conClasificacion && type === 'ordenes';
 
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [methodIdToDelete, setMethodIdToDelete] = useState<string | null>(null);
@@ -153,7 +156,7 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
         applies_to_orders: formData.aplicaOrdenes,
         active: formData.estado === 'activo',
         updated_at: new Date().toISOString(),
-        ...(conClasificacion ? {
+        ...(clasifica ? {
           tipologia: formData.tipologia,
           currency: formData.moneda,
           group_id: formData.grupoId || null,
@@ -259,9 +262,8 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
     });
   }
 
-  // Clasificación: Tipología · Moneda · Grupo (también editable en
-  // Configuración -> Tipología de Pago).
-  if (conClasificacion) {
+  // Clasificación (solo Órdenes): Tipología · Moneda · Grupo.
+  if (clasifica) {
     tableColumns.push({
       header: 'Clasificación',
       accessor: (item: PaymentMethodRecord) => (
@@ -451,7 +453,7 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
               </div>
             )}
 
-            {conClasificacion && (
+            {clasifica && (
               <div className="space-y-3 border-t border-[var(--color-border)] pt-4">
                 <div>
                   <span className="text-xs font-bold text-[var(--color-text)] block">Clasificación para la Conciliación</span>

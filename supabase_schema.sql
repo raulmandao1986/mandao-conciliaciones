@@ -380,6 +380,7 @@ alter table public.messengers
   add column end_date date,
   add column area_id uuid references public.areas(area_id),
   add column comments text,
+  add column email text,          -- envío de la conciliación por correo (2026-10-27d)
   add column created_at timestamptz not null default now(),
   add column updated_at timestamptz not null default now();
 
@@ -564,13 +565,13 @@ insert into public.access_roles (name, description, base_role, is_system, module
     'dashboard','dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision',
     'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cuentas-pagar-negocio','cuentas-cobrar-negocio','planificacion-pagos-negocio','gestion-negocios',
     'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cuentas-pagar-mensajero','cuentas-cobrar-mensajero','planificacion-pagos-mensajero','gestion-mensajeros',
-    'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','tipologia-cobrar','tipologia-pagar','grupos-pago','formato-consecutivo','razon-cambio','comision-mandao','documentos-importacion','config-logs'
+    'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','grupos-pago','formato-consecutivo','razon-cambio','comision-mandao','correo-conciliacion','documentos-importacion','config-logs'
   ]),
   ('Supervisor', 'Acceso total a todos los módulos del sistema.', 'supervisor', true, array[
     'dashboard','dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision',
     'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cuentas-pagar-negocio','cuentas-cobrar-negocio','planificacion-pagos-negocio','gestion-negocios',
     'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cuentas-pagar-mensajero','cuentas-cobrar-mensajero','planificacion-pagos-mensajero','gestion-mensajeros',
-    'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','tipologia-cobrar','tipologia-pagar','grupos-pago','formato-consecutivo','razon-cambio','comision-mandao','documentos-importacion','config-logs'
+    'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','grupos-pago','formato-consecutivo','razon-cambio','comision-mandao','correo-conciliacion','documentos-importacion','config-logs'
   ]),
   ('Operador', 'Puede ejecutar Verificación en Dispatcher y Disponibilidad. Sin acceso a Gestión ni Configuración.', 'operador', true, array[
     'dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision'
@@ -649,6 +650,14 @@ create table public.app_settings (
   updated_at timestamptz not null default now(),
   updated_by uuid references auth.users(id)
 );
+
+-- Plantilla del correo de conciliación (Configuración -> Correo de
+-- Conciliación, 2026-10-27d).
+insert into public.app_settings (setting_key, value) values
+  ('conciliacion_correo_asunto', 'Conciliación {periodo} · {nombre}'),
+  ('conciliacion_correo_cuerpo', E'Hola {nombre}:\n\nAdjuntamos la conciliación del período {periodo}:\n\n{detalle}\n\nPor favor revise los documentos y confírmenos su conformidad respondiendo a este correo.\n\nSaludos,\nEquipo de Conciliaciones'),
+  ('conciliacion_correo_cc', '')
+on conflict (setting_key) do nothing;
 
 -- % de descuento sobre Disponibilidades en Conciliación de Mensajeros
 -- (Configuración -> Comisión Mandao). Ver migración 2026-10-01b.
@@ -767,6 +776,8 @@ create table public.conciliaciones_businesses (
   desglose jsonb,                -- desglose por grupo de pago (2026-10-27)
   reconciliaciones integer not null default 0, -- veces reconciliada (2026-10-27b)
   reconciliado_at timestamptz,
+  enviado_at timestamptz,        -- último envío por correo (2026-10-27d)
+  enviado_a text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -811,6 +822,7 @@ create table public.conciliaciones_messengers (
   total_por_pagar numeric(12,2) not null default 0,
   saldo_cup numeric(12,2),
   via_pago text,
+  moneda text not null default 'CUP' check (moneda in ('CUP', 'USD')), -- hoy siempre CUP; abierto a USD (2026-10-27c)
   responsable text not null,
   responsable_id uuid references auth.users(id),
   conciliacion text not null,
@@ -825,6 +837,8 @@ create table public.conciliaciones_messengers (
   desglose jsonb,                -- desglose por grupo de pago (2026-10-27)
   reconciliaciones integer not null default 0, -- veces reconciliada (2026-10-27b)
   reconciliado_at timestamptz,
+  enviado_at timestamptz,        -- último envío por correo (2026-10-27d)
+  enviado_a text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -1046,7 +1060,8 @@ alter default privileges in schema public
   grant execute on functions to anon, authenticated;
 
 -- =====================================================================
--- CONSECUTIVO DE CONCILIACIONES (PN/CN/PM/CM + año + número) — agregado
+-- CONSECUTIVO DE CONCILIACIONES (desde 2026-11-02: una serie por entidad,
+-- sentido y moneda, formato configurable) — agregado
 -- 2026-10-07, ver migraciones 2026-10-07b y 2026-10-07c (las liquidaciones
 -- en 0 no se numeran).
 -- Va al final porque revoca el execute que otorgan los GRANT de arriba.
@@ -1078,13 +1093,20 @@ create table public.consecutivo_series (
   constraint consecutivo_series_reinicio_sin_anio check (formato_anio <> 'ninguno' or reinicio = 'nunca')
 );
 
+-- Una serie por Entidad × Sentido × Moneda (rectificado 2026-11-02,
+-- migración 2026-11-02_consecutivo_por_entidad.sql).
+create unique index uq_consecutivo_series_entidad_sentido_moneda
+  on public.consecutivo_series(entidad, sentido, moneda);
+
 insert into public.consecutivo_series (serie, entidad, sentido, moneda, prefijo) values
   ('PN',  'negocios',   'pagar',  'CUP', 'PN'),
   ('CN',  'negocios',   'cobrar', 'CUP', 'CN'),
   ('PNU', 'negocios',   'pagar',  'USD', 'PNU'),
   ('CNU', 'negocios',   'cobrar', 'USD', 'CNU'),
   ('PM',  'mensajeros', 'pagar',  'CUP', 'PM'),
-  ('CM',  'mensajeros', 'cobrar', 'CUP', 'CM')
+  ('CM',  'mensajeros', 'cobrar', 'CUP', 'CM'),
+  ('PMU', 'mensajeros', 'pagar',  'USD', 'PMU'),
+  ('CMU', 'mensajeros', 'cobrar', 'USD', 'CMU')
 on conflict (serie) do nothing;
 
 alter table public.consecutivo_series enable row level security;
@@ -1153,8 +1175,9 @@ declare
 begin
   if new.consecutivo is null and round(v_cxp - v_cxc, 2) <> 0 then
     new.consecutivo := public.next_conciliacion_consecutivo(
-      case when v_cxp > v_cxc then 'PN' else 'CN' end
-        || case when new.moneda = 'USD' then 'U' else '' end, -- numeración propia en USD (2026-10-27b)
+      -- serie = sentido (P/C) + entidad (N) + U si es USD (2026-11-02)
+      case when v_cxp > v_cxc then 'P' else 'C' end || 'N'
+        || case when new.moneda = 'USD' then 'U' else '' end,
       new.fecha);
   end if;
   return new;
@@ -1173,7 +1196,10 @@ declare
 begin
   if new.consecutivo is null and round(v_pagar - v_cobrar, 2) <> 0 then
     new.consecutivo := public.next_conciliacion_consecutivo(
-      case when v_pagar > v_cobrar then 'PM' else 'CM' end, new.fecha);
+      -- serie = sentido (P/C) + entidad (M) + U si es USD (2026-11-02)
+      case when v_pagar > v_cobrar then 'P' else 'C' end || 'M'
+        || case when new.moneda = 'USD' then 'U' else '' end,
+      new.fecha);
   end if;
   return new;
 end;

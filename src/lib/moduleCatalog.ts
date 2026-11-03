@@ -15,7 +15,8 @@ import {
   Percent,
   FileSpreadsheet,
   ListChecks,
-  Layers,
+  Hash,
+  Mail,
 } from 'lucide-react';
 
 export interface NavItem {
@@ -97,21 +98,13 @@ export const NAV_SECTIONS: NavSection[] = [
           { id: 'metodos-pago-negocios', label: 'Negocios' },
           { id: 'metodos-pago-mensajeros', label: 'Mensajeros' },
           { id: 'metodos-pago-ordenes', label: 'Órdenes' },
-        ]
-      },
-      {
-        id: 'tipologia-pago',
-        label: 'Tipología de Pago',
-        icon: Layers,
-        subItems: [
-          { id: 'tipologia-cobrar', label: 'Cuentas por Cobrar' },
-          { id: 'tipologia-pagar', label: 'Cuentas por Pagar' },
           { id: 'grupos-pago', label: 'Grupos de Pago' },
-          { id: 'formato-consecutivo', label: 'Formato de Consecutivo' },
         ]
       },
+      { id: 'formato-consecutivo', label: 'Formato de Consecutivo', icon: Hash },
       { id: 'razon-cambio', label: 'Razón de Cambio', icon: DollarSign },
       { id: 'comision-mandao', label: 'Comisión Mandao', icon: Percent },
+      { id: 'correo-conciliacion', label: 'Correo de Conciliación', icon: Mail },
       {
         id: 'reglas',
         label: 'Reglas',

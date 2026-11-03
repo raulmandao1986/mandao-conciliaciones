@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_IMPORT, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
-import { formatCurrency, formatDate, toLocalISODate } from '../../lib/formatters';
+import { formatCurrency, formatDate, formatDatetime, toLocalISODate } from '../../lib/formatters';
 import { cn } from '../../lib/utils';
 import { Button } from '../../design-system/primitives/Button';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
@@ -18,13 +18,14 @@ import { GruposDesglose } from './GruposDesglose';
 import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
 import { EstadoConciliacionControl, ReconciliacionesLog } from '../../lib/conciliacion/EstadoBadge';
 import { puedeReconciliar, parseEstado, cambiarEstadoConciliacion } from '../../lib/conciliacion/estados';
+import { useEnvioConciliaciones, puedeEnviar, type EnvioItem } from './EnvioCorreo';
 import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn } from '../../lib/conciliacion/drivePdf';
 import { ResumenMetodosPago, ResumenBuilder } from './ResumenMetodosPago';
 import { buildPdfNegocio, loadOrdenesNegocio } from '../../lib/conciliacion/pdfConciliacionNegocio';
 import { ProcesoProgreso, useProcessSteps, trackStep, type StepStatus } from './ProcesoProgreso';
 import {
   GitMerge, Loader2, Search, Calculator, AlertTriangle, CheckCircle2, XCircle,
-  ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud, RotateCcw
+  ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud, RotateCcw, Mail
 } from 'lucide-react';
 
 // =====================================================================
@@ -103,13 +104,17 @@ type StepUpdater = (key: string, status: StepStatus, detail?: string) => void;
 
 interface ConciliacionRecord {
   id: string;
-  // Consecutivo para el match contra caja (PN/CN + año + número), asignado
+  // Consecutivo para el match contra caja (serie por entidad, sentido y moneda, ej. PN260001 / CNU260003), asignado
   // por la base de datos al registrar (ver migración 2026-10-07b).
   consecutivo: string | null;
   // PDF guardado en Google Drive al registrar la conciliación (null si no
   // se subió: sin carpeta configurada, sin sesión de Google o error).
   pdfDriveUrl: string | null;
   areaId: string | null;
+  businessId: string | null;
+  // Último envío por correo (migración 2026-10-27d).
+  enviadoAt: string | null;
+  enviadoA: string | null;
   // Desglose por Grupo de pago guardado al conciliar (migración 2026-10-27).
   desglose: LineaGrupo[];
   // % de comisión y tasa (USD por 1 CUP, solo filas Exterior) con que se
@@ -242,13 +247,16 @@ function buildSettlements(params: {
   return settlements;
 }
 
-const HISTORY_SELECT_BASE = 'conciliacion_id, area_id, fecha, establecimiento, fecha_inicial, fecha_final, area, ordenes_efectivo, cxc_cu, ordenes_transfermovil, cxp_tm, ordenes_saldo_mandao, cxp_sm, ordenes_tarjeta, cxp_us, via_pago, moneda, responsable, conciliacion, estado, estado_pago, facturacion, descuento, nota, pagado, saldo, referencia, fecha_pago, prioridad';
-const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct, tasa_cambio, desglose, reconciliaciones`;
+const HISTORY_SELECT_BASE = 'conciliacion_id, area_id, business_id, fecha, establecimiento, fecha_inicial, fecha_final, area, ordenes_efectivo, cxc_cu, ordenes_transfermovil, cxp_tm, ordenes_saldo_mandao, cxp_sm, ordenes_tarjeta, cxp_us, via_pago, moneda, responsable, conciliacion, estado, estado_pago, facturacion, descuento, nota, pagado, saldo, referencia, fecha_pago, prioridad';
+const HISTORY_SELECT = `${HISTORY_SELECT_BASE}, pdf_drive_url, consecutivo, comision_pct, tasa_cambio, desglose, reconciliaciones, enviado_at, enviado_a`;
 
 function mapHistoryRow(r: any): ConciliacionRecord {
   return {
     pdfDriveUrl: r.pdf_drive_url || null,
     areaId: r.area_id || null,
+    businessId: r.business_id || null,
+    enviadoAt: r.enviado_at || null,
+    enviadoA: r.enviado_a || null,
     desglose: parseDesglose(r.desglose),
     comisionPct: r.comision_pct !== null && r.comision_pct !== undefined ? Number(r.comision_pct) : null,
     tasaCambio: r.tasa_cambio !== null && r.tasa_cambio !== undefined ? Number(r.tasa_cambio) : null,
@@ -289,6 +297,10 @@ function mapHistoryRow(r: any): ConciliacionRecord {
 // PDF: diseño "Reporte de conciliación" en src/lib/conciliacion/pdfConciliacionNegocio.ts.
 const pdfFileNameNegocio = (rec: ConciliacionRecord) =>
   `${rec.consecutivo ? `${rec.consecutivo}-` : ''}conciliacion-${rec.establecimiento.replace(/[^a-z0-9]/gi, '-')}-${rec.viaPago}-${rec.fechaInicial}_${rec.fechaFinal}.pdf`;
+
+// Nombre del PDF adjunto al correo del negocio: sin consecutivo (es interno).
+const pdfAdjuntoNegocio = (rec: ConciliacionRecord) =>
+  `conciliacion-${rec.establecimiento.replace(/[^a-z0-9]/gi, '-')}-${rec.viaPago}-${rec.fechaInicial}_${rec.fechaFinal}.pdf`;
 
 // Histórico ordenado por consecutivo descendente (año y número, ej.
 // PN260012 antes que CNU260011 antes que PN250099; U = numeración en USD). Las conciliaciones sin
@@ -349,9 +361,12 @@ export function ConciliacionNegociosPage() {
   const [historyAreaFilter, setHistoryAreaFilter] = useState('');
   const [historyViaFilter, setHistoryViaFilter] = useState('');
   const [historyEstadoFilter, setHistoryEstadoFilter] = useState('');
+  const [historyMonedaFilter, setHistoryMonedaFilter] = useState('');
   const [historyFechaInicio, setHistoryFechaInicio] = useState('');
   const [historyFechaFin, setHistoryFechaFin] = useState('');
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
+  // Conciliaciones en Nuevo marcadas para el envío masivo por correo.
+  const [seleccionEnvio, setSeleccionEnvio] = useState<Record<string, boolean>>({});
 
   const loadAreas = async () => {
     const { data, error } = await supabase.from('areas').select('area_id, name, active').eq('active', true).order('name');
@@ -775,6 +790,32 @@ export function ConciliacionNegociosPage() {
     }
   };
 
+  // Envío por correo (Fase 3): un correo por negocio y período con sus PDF.
+  const envio = useEnvioConciliaciones<ConciliacionRecord>({
+    entidad: 'negocios',
+    construirPdfs: async recs => {
+      const ordenes = await loadOrdenesNegocio(recs);
+      return Promise.all(recs.map(async r => ({
+        nombre: pdfAdjuntoNegocio(r),
+        blob: (await buildPdfNegocio(r, ordenes.get(r.id) || [], pdfDefaults)).output('blob'),
+      })));
+    },
+    onTerminado: async () => { setSeleccionEnvio({}); await loadHistory(); },
+  });
+  const envioItem = (r: ConciliacionRecord): EnvioItem<ConciliacionRecord> => {
+    const neto = r.cxpTM + r.cxpSM + r.cxpUS - r.cxcCU;
+    return {
+      rec: r, id: r.id, entidadId: r.businessId, nombre: r.establecimiento, area: r.area,
+      fechaInicial: r.fechaInicial, fechaFinal: r.fechaFinal, consecutivo: r.consecutivo, estado: r.estado,
+      linea: `${r.viaPago} (${r.moneda}): ${neto > 0.005 ? 'a pagar al negocio' : neto < -0.005 ? 'a cobrar al negocio' : 'en 0'} ${formatCurrency(Math.abs(neto), r.moneda)}`,
+    };
+  };
+  // Todas las conciliaciones enviables del mismo negocio y período van en un solo correo.
+  const enviarNegocio = (r: ConciliacionRecord) => envio.solicitar(
+    history.filter(h => (h.businessId ? h.businessId === r.businessId : h.establecimiento === r.establecimiento)
+      && h.fechaInicial === r.fechaInicial && h.fechaFinal === r.fechaFinal).map(envioItem)
+  );
+
   const handleCambiarEstado = async (rec: ConciliacionRecord, nuevo: EstadoConciliacion) => {
     try {
       await cambiarEstadoConciliacion('conciliaciones_businesses', { id: rec.id, estado: rec.estado, nombre: rec.conciliacion, consecutivo: rec.consecutivo }, nuevo);
@@ -846,6 +887,7 @@ export function ConciliacionNegociosPage() {
       if (historyAreaFilter && r.area !== historyAreaFilter) return false;
       if (historyViaFilter && r.viaPago !== historyViaFilter) return false;
       if (historyEstadoFilter && r.estado !== historyEstadoFilter) return false;
+      if (historyMonedaFilter && r.moneda !== historyMonedaFilter) return false;
       if (historyFechaInicio && r.fecha < historyFechaInicio) return false;
       if (historyFechaFin && r.fecha > historyFechaFin) return false;
       if (q) {
@@ -854,8 +896,12 @@ export function ConciliacionNegociosPage() {
       }
       return true;
     }).sort(compareConsecutivoDesc);
-  }, [history, historySearch, historyAreaFilter, historyViaFilter, historyEstadoFilter, historyFechaInicio, historyFechaFin]);
-  const historyPag = usePagination(filteredHistory, 20, [history, historySearch, historyAreaFilter, historyViaFilter, historyEstadoFilter, historyFechaInicio, historyFechaFin]);
+  }, [history, historySearch, historyAreaFilter, historyViaFilter, historyEstadoFilter, historyMonedaFilter, historyFechaInicio, historyFechaFin]);
+  const historyPag = usePagination(filteredHistory, 20, [history, historySearch, historyAreaFilter, historyViaFilter, historyEstadoFilter, historyMonedaFilter, historyFechaInicio, historyFechaFin]);
+  const nuevasFiltradas = useMemo(() => filteredHistory.filter(h => h.estado === 'Nuevo'), [filteredHistory]);
+  const seleccionadas = nuevasFiltradas.filter(h => seleccionEnvio[h.id]);
+  const todasMarcadas = nuevasFiltradas.length > 0 && seleccionadas.length === nuevasFiltradas.length;
+  const marcarTodas = (marcar: boolean) => setSeleccionEnvio(marcar ? Object.fromEntries(nuevasFiltradas.map(h => [h.id, true])) : {});
 
   const viasDisponibles = useMemo(() => Array.from(new Set(history.map(h => h.viaPago))).filter(Boolean), [history]);
 
@@ -1046,6 +1092,7 @@ export function ConciliacionNegociosPage() {
         />
       )}
 
+      {envio.modal}
       <ConfirmDialog
         isOpen={confirmOpen}
         title="¿Confirmar Conciliación?"
@@ -1079,7 +1126,22 @@ export function ConciliacionNegociosPage() {
       {/* Historial */}
       <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)] shadow-sm overflow-hidden">
         <div className="p-4 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] space-y-3">
-          <h3 className="text-xs font-black uppercase tracking-widest text-slate-500">Histórico de Conciliaciones ({filteredHistory.length})</h3>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-black uppercase tracking-widest text-slate-500">Histórico de Conciliaciones ({filteredHistory.length})</h3>
+            {canExecute && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                disabled={envio.ocupado || seleccionadas.length === 0}
+                onClick={() => envio.solicitar(seleccionadas.map(envioItem))}
+                title="Envía por correo, a cada negocio, las conciliaciones marcadas (un correo por negocio y período)"
+              >
+                {envio.preparando ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} />}
+                Enviar seleccionadas ({seleccionadas.length})
+              </Button>
+            )}
+          </div>
           {/* Filtros: se acomodan en varias líneas según el ancho disponible. */}
           <div className="flex flex-wrap gap-3">
             <div className="relative flex-[2_1_16rem] min-w-[14rem]">
@@ -1100,6 +1162,11 @@ export function ConciliacionNegociosPage() {
             <select value={historyViaFilter} onChange={(e) => setHistoryViaFilter(e.target.value)} aria-label="Todos los Rieles" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
               <option value="">Todos los Rieles</option>
               {viasDisponibles.map(v => <option key={v} value={v}>{v}</option>)}
+            </select>
+            <select value={historyMonedaFilter} onChange={(e) => setHistoryMonedaFilter(e.target.value)} aria-label="Todas las Monedas" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
+              <option value="">Todas las Monedas</option>
+              <option value="CUP">CUP</option>
+              <option value="USD">USD</option>
             </select>
             <select value={historyEstadoFilter} onChange={(e) => setHistoryEstadoFilter(e.target.value)} aria-label="Todos los Estados" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
               <option value="">Todos los Estados</option>
@@ -1122,6 +1189,19 @@ export function ConciliacionNegociosPage() {
           <table className="w-full text-left border-collapse">
             <thead className="bg-slate-50 border-b border-[var(--color-border)]">
               <tr className="text-[10px] font-black text-[var(--color-text-faint)] uppercase tracking-wider">
+                <th className="w-10 pl-4 py-4">
+                  {canExecute && (
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 align-middle"
+                      aria-label="Marcar todas las conciliaciones en Nuevo"
+                      title={`Marcar las ${nuevasFiltradas.length} conciliación(es) en Nuevo del filtro`}
+                      disabled={nuevasFiltradas.length === 0}
+                      checked={todasMarcadas}
+                      onChange={(e) => marcarTodas(e.target.checked)}
+                    />
+                  )}
+                </th>
                 <th className="w-5 p-4"></th>
                 <th className="p-4">Establecimiento</th>
                 <th className="p-4">Período</th>
@@ -1133,9 +1213,9 @@ export function ConciliacionNegociosPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {historyLoading ? (
-                <tr><td colSpan={7} className="py-16 text-center"><Loader2 className="animate-spin mx-auto text-[var(--color-primary)]" /></td></tr>
+                <tr><td colSpan={8} className="py-16 text-center"><Loader2 className="animate-spin mx-auto text-[var(--color-primary)]" /></td></tr>
               ) : filteredHistory.length === 0 ? (
-                <tr><td colSpan={7} className="py-16 text-center text-sm text-slate-400 font-bold">No hay conciliaciones registradas.</td></tr>
+                <tr><td colSpan={8} className="py-16 text-center text-sm text-slate-400 font-bold">No hay conciliaciones registradas.</td></tr>
               ) : (
                 historyPag.pageItems.map(r => {
                   const totalCxP = r.cxpTM + r.cxpSM + r.cxpUS;
@@ -1143,6 +1223,17 @@ export function ConciliacionNegociosPage() {
                   return (
                     <React.Fragment key={r.id}>
                       <tr className="hover:bg-slate-50 cursor-pointer group" onClick={() => setExpandedHistoryId(isExpanded ? null : r.id)}>
+                        <td className="pl-4 py-4" onClick={(e) => e.stopPropagation()}>
+                          {canExecute && r.estado === 'Nuevo' && (
+                            <input
+                              type="checkbox"
+                              className="w-4 h-4 align-middle"
+                              aria-label={`Marcar para enviar por correo`}
+                              checked={!!seleccionEnvio[r.id]}
+                              onChange={(e) => setSeleccionEnvio(prev => ({ ...prev, [r.id]: e.target.checked }))}
+                            />
+                          )}
+                        </td>
                         <td className="p-4 text-center">{isExpanded ? <ChevronUp size={14} className="text-[var(--color-primary)]" /> : <ChevronDown size={14} className="text-slate-400" />}</td>
                         <td className="p-4">
                           <div className="flex flex-col">
@@ -1190,6 +1281,17 @@ export function ConciliacionNegociosPage() {
                                 {subiendoId === r.id ? <Loader2 size={13} className="animate-spin" /> : <UploadCloud size={13} />}
                               </button>
                             )}
+                            {canExecute && puedeEnviar(r.estado) && (
+                              <button
+                                onClick={() => enviarNegocio(r)}
+                                disabled={envio.ocupado}
+                                aria-label="Enviar por correo"
+                                title={r.estado === 'Enviado' ? 'Reenviar por correo al negocio' : 'Enviar por correo al negocio (pasa a Enviado)'}
+                                className="p-1 text-slate-400 hover:text-[var(--color-primary)] disabled:opacity-50"
+                              >
+                                <Mail size={13} />
+                              </button>
+                            )}
                             {canExecute && puedeReconciliar(r.estado) && (
                               <button
                                 onClick={() => handleReconciliarDesdeHistorico(r)}
@@ -1205,7 +1307,7 @@ export function ConciliacionNegociosPage() {
                       </tr>
                       {isExpanded && (
                         <tr className="bg-slate-50/60">
-                          <td colSpan={7} className="p-5">
+                          <td colSpan={8} className="p-5">
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
                               <FieldMini label="Responsable" value={r.responsable} />
                               <FieldMini label="Fecha de Conciliación" value={formatDate(r.fecha)} />
@@ -1225,6 +1327,7 @@ export function ConciliacionNegociosPage() {
                               <FieldMini label="Referencia" value={r.referencia || '—'} />
                               <FieldMini label="Fecha de Pago" value={r.fechaPago ? formatDate(r.fechaPago) : '—'} />
                               <FieldMini label="Prioridad" value={r.prioridad || '—'} />
+                              <FieldMini label="Último envío" value={r.enviadoAt ? `${formatDatetime(r.enviadoAt)} · ${r.enviadoA || ''}` : 'No enviado'} />
                               <ReconciliacionesLog conciliacionId={r.id} moneda={r.moneda} cantidad={r.reconciliaciones} />
                             </div>
                           </td>
