@@ -6,14 +6,22 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = process.env.SUPABASE_URL as string;
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY as string;
 
-if (!supabaseUrl || !supabaseAnonKey) {
+// En Netlify se definen como variables de entorno del sitio (se inyectan al
+// compilar, ver vite.config.ts). Sin ellas, main.tsx muestra un aviso en
+// vez de una página en blanco.
+export const SUPABASE_CONFIGURADO = !!(supabaseUrl && supabaseAnonKey);
+
+if (!SUPABASE_CONFIGURADO) {
   console.error(
-    '[Supabase] Faltan SUPABASE_URL / SUPABASE_ANON_KEY en el .env.local. ' +
+    '[Supabase] Faltan SUPABASE_URL / SUPABASE_ANON_KEY (.env.local en local, variables de entorno en Netlify). ' +
     'El cliente no podrá conectar hasta que se configuren.'
   );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const supabase = createClient(
+  SUPABASE_CONFIGURADO ? supabaseUrl : 'https://sin-configurar.supabase.co',
+  SUPABASE_CONFIGURADO ? supabaseAnonKey : 'sin-configurar'
+);
 
 // Scopes de Google que el sistema necesita sobre la cuenta del usuario
 // autenticado (RN: lectura directa de Google Sheets + envío de correo
