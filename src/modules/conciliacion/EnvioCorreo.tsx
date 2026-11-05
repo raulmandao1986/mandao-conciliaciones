@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { supabase } from '../../lib/supabase';
+import { supabase, reconnectGoogle } from '../../lib/supabase';
+import { getGoogleToken } from '../../lib/googleDrive';
 import { formatDate } from '../../lib/formatters';
 import { cn } from '../../lib/utils';
 import { Button } from '../../design-system/primitives/Button';
@@ -49,6 +50,7 @@ export function useEnvioConciliaciones<R>({ entidad, construirPdfs, onTerminado 
   const [modalOpen, setModalOpen] = useState(false);
   const [enviando, setEnviando] = useState(false);
   const [resultado, setResultado] = useState<{ ok: boolean; message: string } | null>(null);
+  const [sinGoogle, setSinGoogle] = useState(false);
   const etiqueta = entidad === 'negocios' ? 'negocio' : 'mensajero';
   const table = entidad === 'negocios' ? 'conciliaciones_businesses' : 'conciliaciones_messengers';
 
@@ -56,6 +58,11 @@ export function useEnvioConciliaciones<R>({ entidad, construirPdfs, onTerminado 
     const enviables = items.filter(i => puedeEnviar(i.estado));
     if (enviables.length === 0) {
       alert('No hay conciliaciones en estado Nuevo o Enviado para enviar.');
+      return;
+    }
+    // El permiso de Gmail viene del login con Google y vence en 1 h.
+    if (!getGoogleToken()) {
+      setSinGoogle(true);
       return;
     }
     setPreparando(true);
@@ -185,6 +192,15 @@ export function useEnvioConciliaciones<R>({ entidad, construirPdfs, onTerminado 
         confirmText="Enviar"
         onConfirm={confirmar}
         onCancel={() => setPendiente(null)}
+        isDanger={false}
+      />
+      <ConfirmDialog
+        isOpen={sinGoogle}
+        title="Reconectar Google"
+        message="Para enviar los correos se usa su cuenta de Google, y la conexión venció (dura 1 hora). Al reconectar volverá a esta pantalla; luego marque de nuevo las conciliaciones y pulse Enviar."
+        confirmText="Reconectar Google"
+        onConfirm={() => { setSinGoogle(false); void reconnectGoogle(); }}
+        onCancel={() => setSinGoogle(false)}
         isDanger={false}
       />
       {modalOpen && (

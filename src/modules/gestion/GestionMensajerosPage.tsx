@@ -27,6 +27,15 @@ import {
   Mail
 } from 'lucide-react';
 import { SlideOver } from '../../design-system/primitives/SlideOver';
+import { diffCambios, datosLegibles } from '../../lib/auditDiff';
+import { tomarEdicionPendiente } from '../../lib/conciliacion/catalogoEntidad';
+
+// Etiquetas de los campos para el Log de Auditoría (antes / después).
+const ETIQUETAS_LOG: Record<string, string> = {
+  name: 'Nombre', ci: 'CI', phone: 'Teléfono', email: 'Correo', fiscal_card: 'Tarjeta Fiscal',
+  fiscal_account: 'Cuenta Fiscal', payment_method: 'Vía de Pago', backpack_type: 'Tipo de Mochila',
+  start_date: 'Fecha Alta', end_date: 'Fecha Baja', area_id: 'Área', comments: 'Comentarios', active: 'Estado',
+};
 import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
@@ -329,6 +338,18 @@ export function GestionMensajerosPage() {
     setIsFormOpen(true);
   };
 
+  // Valores legibles en el Log: nombre del Área y Activo/Bloqueado.
+  const valorLog = (campo: string, v: unknown) =>
+    campo === 'area_id' ? (areas.find(a => a.id === v)?.nombre || v) : campo === 'active' ? (v ? 'Activo' : 'Bloqueado') : v;
+
+  // Llegada desde Conciliación ("Modificar información"): abre su formulario.
+  useEffect(() => {
+    if (data.length === 0) return;
+    const id = tomarEdicionPendiente('mensajeros');
+    const rec = id ? data.find(m => m.id === id) : null;
+    if (rec) handleEdit(rec);
+  }, [data]);
+
   const handleNew = () => {
     setSelectedMessenger(null);
     setFormData(emptyForm());
@@ -358,12 +379,13 @@ export function GestionMensajerosPage() {
       };
 
       if (selectedMessenger) {
+        const { data: previo } = await supabase.from('messengers').select('*').eq('messenger_id', selectedMessenger.id).maybeSingle();
         const { error } = await supabase.from('messengers').update(payload).eq('messenger_id', selectedMessenger.id);
         if (error) throw error;
         logAuditEvent('Gestion_Mensajeros', 'Mensajero Actualizado', {
           id: selectedMessenger.id,
           nombre: formData.nombre,
-          area: formData.areaId
+          cambios: diffCambios(previo, payload, ETIQUETAS_LOG, valorLog),
         });
       } else {
         const { data: inserted, error } = await supabase.from('messengers').insert(payload).select('messenger_id').single();
@@ -371,7 +393,7 @@ export function GestionMensajerosPage() {
         logAuditEvent('Gestion_Mensajeros', 'Mensajero Creado', {
           id: inserted?.messenger_id,
           nombre: formData.nombre,
-          area: formData.areaId
+          datos: datosLegibles(payload, ETIQUETAS_LOG, valorLog),
         });
       }
       setIsFormOpen(false);
@@ -393,11 +415,13 @@ export function GestionMensajerosPage() {
     if (!messengerIdToDelete) return;
     try {
       const target = data.find(m => m.id === messengerIdToDelete);
+      const { data: previo } = await supabase.from('messengers').select('*').eq('messenger_id', messengerIdToDelete).maybeSingle();
       const { error } = await supabase.from('messengers').delete().eq('messenger_id', messengerIdToDelete);
       if (error) throw error;
       logAuditEvent('Gestion_Mensajeros', 'Mensajero Eliminado', {
         id: messengerIdToDelete,
-        nombre: target?.nombre || messengerIdToDelete
+        nombre: target?.nombre || messengerIdToDelete,
+        datos: previo ? datosLegibles(previo, ETIQUETAS_LOG, valorLog) : undefined,
       });
       await loadMessengers();
     } catch (err: any) {

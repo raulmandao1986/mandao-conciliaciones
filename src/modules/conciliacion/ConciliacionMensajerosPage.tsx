@@ -17,7 +17,10 @@ import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
 import { EstadoConciliacionControl, ReconciliacionesLog } from '../../lib/conciliacion/EstadoBadge';
 import { puedeReconciliar, parseEstado, cambiarEstadoConciliacion } from '../../lib/conciliacion/estados';
 import { useEnvioConciliaciones, puedeEnviar, type EnvioItem } from './EnvioCorreo';
-import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn } from '../../lib/conciliacion/drivePdf';
+import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn, nombreArchivoPdf } from '../../lib/conciliacion/drivePdf';
+import { buscarEnCatalogo, leerCatalogo, activarEnCatalogo, type Coincidencia } from '../../lib/conciliacion/catalogoEntidad';
+import { EntidadNoRegistradaAviso, etiquetaNoRegistrado } from './EntidadNoRegistrada';
+import { BitacoraConciliaciones, type BitacoraRegistro } from './Bitacora';
 import { ResumenMetodosPago, ResumenBuilder } from './ResumenMetodosPago';
 import { loadCatalogoPagos, computeDesglose, columnasLegado, parseDesglose, type LineaGrupo } from '../../lib/conciliacion/catalogoPagos';
 import { GruposDesglose } from './GruposDesglose';
@@ -25,7 +28,7 @@ import { buildPdfMensajero, loadOrdenesMensajero } from '../../lib/conciliacion/
 import { ProcesoProgreso, useProcessSteps, trackStep, type StepStatus } from './ProcesoProgreso';
 import {
   Send, Loader2, Search, Calculator, AlertTriangle, CheckCircle2, XCircle,
-  ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud, RotateCcw, Mail
+  ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud, RotateCcw, Mail, History
 } from 'lucide-react';
 
 // =====================================================================
@@ -72,6 +75,8 @@ interface MensajeroCalculo {
   yaConciliado: boolean;
   // Conciliación ya registrada para este rango (null = pendiente).
   previa: PreviaConciliacion | null;
+  // Resultado de buscar el mensajero en Gestión de Mensajeros (activo, bloqueado, otra Área o inexistente).
+  coincidencia: Coincidencia;
   ordenes: OrderRow[];
   grupos: LineaGrupo[]; // desglose por Grupo de pago (Configuración -> Métodos de Pago -> Órdenes)
   sinClasificar: { ordenes: number; saldo: number; tipos: Set<string> };
@@ -94,7 +99,7 @@ const esReconciliable = (c: { yaConciliado: boolean; previa: PreviaConciliacion 
   c.yaConciliado && !!c.previa && puedeReconciliar(c.previa.estado);
 
 interface AreaOption { id: string; nombre: string; }
-interface MessengerOption { id: string; nombre: string; areaId: string; viaPago: string; tipoMochila: string; }
+interface MessengerOption { id: string; nombre: string; areaId: string; viaPago: string; tipoMochila: string; activo: boolean; }
 // Mensajero pendiente de conciliar en el Área + rango elegidos (selector Individual).
 interface PendienteOption { key: string; nombre: string; areaNombre: string; registrado: boolean; reconciliar: boolean; }
 type StepUpdater = (key: string, status: StepStatus, detail?: string) => void;
@@ -190,8 +195,8 @@ function mapHistoryRow(r: any): ConciliacionRecord {
 }
 
 // PDF: diseño "Reporte de conciliación" en src/lib/conciliacion/pdfConciliacionMensajero.ts.
-const pdfFileNameMensajero = (rec: ConciliacionRecord) =>
-  `${rec.consecutivo ? `${rec.consecutivo}-` : ''}conciliacion-${rec.mensajero.replace(/[^a-z0-9]/gi, '-')}-${rec.fechaInicial}_${rec.fechaFinal}.pdf`;
+// Nombre del archivo = texto del enlace del histórico (ver nombreArchivoPdf).
+const pdfFileNameMensajero = (rec: ConciliacionRecord) => nombreArchivoPdf(rec.conciliacion);
 
 function mensajeConfirmacion(nuevas: number, reconciliar: number): string {
   const partes: string[] = [];
@@ -199,10 +204,6 @@ function mensajeConfirmacion(nuevas: number, reconciliar: number): string {
   if (reconciliar > 0) partes.push(`Se va${reconciliar === 1 ? '' : 'n'} a reconciliar ${reconciliar} conciliación(es) ya registrada(s): se actualizan los montos, se mantiene el consecutivo, vuelven a estado Nuevo (para reenviar el PDF corregido) y queda registro de los valores anteriores.`);
   return partes.join(' ');
 }
-
-// Nombre del PDF adjunto al correo del mensajero: sin consecutivo (es interno).
-const pdfAdjuntoMensajero = (rec: ConciliacionRecord) =>
-  `conciliacion-${rec.mensajero.replace(/[^a-z0-9]/gi, '-')}-${rec.fechaInicial}_${rec.fechaFinal}.pdf`;
 
 // Liquidación en 0 (Total por Pagar = Total por Cobrar): no se paga ni se
 // cobra y la base de datos no le asigna consecutivo (migración 2026-10-07c).
@@ -274,10 +275,15 @@ export function ConciliacionMensajerosPage() {
     setAreas((data || []).map(a => ({ id: a.area_id, nombre: a.name })));
   };
 
+  // Todos los mensajeros, también los Bloqueados: así uno bloqueado no se
+  // toma por "no registrado" ni se vuelve a crear (ver catalogoEntidad.ts).
+  const messengersRef = useRef<MessengerOption[]>([]);
   const loadMessengers = async () => {
-    const { data, error } = await supabase.from('messengers').select('messenger_id, name, area_id, payment_method, backpack_type, active').eq('active', true).order('name');
+    const { data, error } = await supabase.from('messengers').select('messenger_id, name, area_id, payment_method, backpack_type, active').order('name');
     if (error) { console.error('Error loading messengers:', error.message); return; }
-    setMessengers((data || []).map(m => ({ id: m.messenger_id, nombre: m.name, areaId: m.area_id, viaPago: m.payment_method || 'N/D', tipoMochila: m.backpack_type || 'N/D' })));
+    const lista = (data || []).map(m => ({ id: m.messenger_id, nombre: m.name, areaId: m.area_id, viaPago: m.payment_method || 'N/D', tipoMochila: m.backpack_type || 'N/D', activo: !!m.active }));
+    messengersRef.current = lista;
+    setMessengers(lista);
   };
 
   const loadCommission = async () => {
@@ -406,7 +412,9 @@ export function ConciliacionMensajerosPage() {
       const driverName = ordenesGrupo[0].driver;
       const areaId = ordenesGrupo[0].areaId;
       const areaNombre = areas.find(a => a.id === areaId)?.nombre || 'N/A';
-      const matchMessenger = messengers.find(m => normalizeEntityName(m.nombre) === normalizeEntityName(driverName) && m.areaId === areaId);
+      const catalogoMensajeros = messengersRef.current;
+      const coincidencia = buscarEnCatalogo(catalogoMensajeros, driverName, areaId);
+      const matchMessenger = coincidencia.tipo === 'activo' ? catalogoMensajeros.find(m => m.id === coincidencia.id) : undefined;
       const previa = matchMessenger ? previas.get(matchMessenger.id) || null : null;
       const yaConciliado = !!previa;
 
@@ -444,6 +452,7 @@ export function ConciliacionMensajerosPage() {
         registrado: !!matchMessenger,
         yaConciliado,
         previa,
+        coincidencia,
         ordenes: ordenesGrupo,
         grupos: calc.lineas,
         sinClasificar: calc.sinClasificar,
@@ -544,19 +553,41 @@ export function ConciliacionMensajerosPage() {
     }
   };
 
+  const handleActivarMensajero = async (id: string, nombre: string) => {
+    try {
+      await activarEnCatalogo('mensajeros', id, nombre);
+      await loadMessengers();
+      setPendientesVersion(v => v + 1);
+      await handleCalcular();
+    } catch (err: any) {
+      alert('No se pudo activar el mensajero: ' + (err?.message || err));
+    }
+  };
+  const nombreArea = (areaId: string | null) => areas.find(a => a.id === areaId)?.nombre || 'N/D';
+
   const handleRegistrarFaltantes = async () => {
     if (!resultados) return;
-    const faltantes = resultados.filter(r => !r.registrado);
-    if (faltantes.length === 0) return;
+    const candidatos = resultados.filter(r => r.coincidencia.tipo === 'ninguno');
+    if (candidatos.length === 0) return;
     setRegistering(true);
     try {
-      const payload = faltantes.map(f => ({ name: f.mensajeroNombre, area_id: f.areaId, active: true }));
-      const { error } = await supabase.from('messengers').insert(payload);
-      if (error) throw error;
-      await logAuditEvent('Conciliaciones', 'Mensajeros Registrados Automáticamente desde Conciliación', {
-        cantidad: faltantes.length,
-        mensajeros: faltantes.map(f => f.mensajeroNombre),
-      });
+      // Se revalida contra la base: si ya existe (aunque esté Bloqueado o en
+      // otra Área) no se crea un duplicado; se avisa para activarlo o editarlo.
+      const actual = await leerCatalogo('mensajeros');
+      const faltantes = candidatos.filter(f => buscarEnCatalogo(actual, f.mensajeroNombre, f.areaId).tipo === 'ninguno');
+      const existentes = candidatos.filter(f => !faltantes.includes(f));
+      if (faltantes.length > 0) {
+        const payload = faltantes.map(f => ({ name: f.mensajeroNombre, area_id: f.areaId, active: true }));
+        const { error } = await supabase.from('messengers').insert(payload);
+        if (error) throw error;
+        await logAuditEvent('Conciliaciones', 'Mensajeros Registrados Automáticamente desde Conciliación', {
+          cantidad: faltantes.length,
+          mensajeros: faltantes.map(f => f.mensajeroNombre),
+        });
+      }
+      if (existentes.length > 0) {
+        alert(`${existentes.map(f => f.mensajeroNombre).join(', ')} ya existe(n) en Gestión de Mensajeros con otro estado o en otra Área: no se registró de nuevo. Revise el aviso de cada uno para activarlo o modificar su información.`);
+      }
       await loadMessengers();
       setPendientesVersion(v => v + 1);
       await handleCalcular();
@@ -744,7 +775,7 @@ export function ConciliacionMensajerosPage() {
     construirPdfs: async recs => {
       const ordenes = await loadOrdenesMensajero(recs);
       return Promise.all(recs.map(async r => ({
-        nombre: pdfAdjuntoMensajero(r),
+        nombre: pdfFileNameMensajero(r),
         blob: (await buildPdfMensajero(r, ordenes.get(r.id) || [], pdfDefaults)).output('blob'),
       })));
     },
@@ -762,6 +793,24 @@ export function ConciliacionMensajerosPage() {
     history.filter(h => (h.messengerId ? h.messengerId === r.messengerId : h.mensajero === r.mensajero)
       && h.fechaInicial === r.fechaInicial && h.fechaFinal === r.fechaFinal).map(envioItem)
   );
+
+  // Bitácora (2026-11-05): todas las conciliaciones del mensajero, o solo las
+  // del período antes de reconciliar.
+  const [bitacora, setBitacora] = useState<{ rec: ConciliacionRecord; soloPeriodo: boolean } | null>(null);
+  const mismoMensajero = (a: ConciliacionRecord, b: ConciliacionRecord) =>
+    a.messengerId && b.messengerId ? a.messengerId === b.messengerId : a.mensajero === b.mensajero && a.areaId === b.areaId;
+  const aBitacora = (r: ConciliacionRecord): BitacoraRegistro => ({
+    id: r.id, fechaInicial: r.fechaInicial, fechaFinal: r.fechaFinal, riel: r.viaPago, moneda: r.moneda,
+    consecutivo: r.consecutivo, estado: r.estado, neto: r.totalPorPagar - r.totalPorCobrar, fecha: r.fecha,
+    responsable: r.responsable, reconciliaciones: r.reconciliaciones, enviadoAt: r.enviadoAt, enviadoA: r.enviadoA,
+    desglose: r.desglose,
+    extras: [
+      { label: 'Total Órdenes', value: String(r.totalOrdenes) },
+      { label: 'Disponibilidades', value: formatCurrency(r.disponibilidades, r.moneda) },
+      { label: 'Alquiler Mochila', value: formatCurrency(r.alquilerMochila, r.moneda) },
+      { label: 'Área', value: r.area },
+    ],
+  });
 
   const handleCambiarEstado = async (rec: ConciliacionRecord, nuevo: EstadoConciliacion) => {
     try {
@@ -958,6 +1007,8 @@ export function ConciliacionMensajerosPage() {
           canRegisterMessengers={canRegisterMessengers}
           registering={registering}
           onRegistrar={handleRegistrarFaltantes}
+          onActivar={handleActivarMensajero}
+          nombreArea={nombreArea}
           onConciliar={handleConfirmConciliar}
         />
       )}
@@ -990,12 +1041,26 @@ export function ConciliacionMensajerosPage() {
           canRegisterMessengers={canRegisterMessengers}
           registering={registering}
           onRegistrar={handleRegistrarFaltantes}
+          onActivar={handleActivarMensajero}
+          nombreArea={nombreArea}
           onConciliar={handleConfirmConciliar}
           elegibles={elegiblesParaConciliar.length}
         />
       )}
 
       {envio.modal}
+      <BitacoraConciliaciones
+        abierta={!!bitacora}
+        onCerrar={() => setBitacora(null)}
+        nombre={bitacora?.rec.mensajero || ''}
+        registros={bitacora ? history.filter(h => mismoMensajero(h, bitacora.rec)).map(aBitacora) : []}
+        periodo={bitacora?.soloPeriodo ? { fechaInicial: bitacora.rec.fechaInicial, fechaFinal: bitacora.rec.fechaFinal } : null}
+        seleccionInicial={bitacora?.rec.id}
+        onAbrirPdf={id => { const rec = history.find(h => h.id === id); if (rec) void handleGenerarPDF(rec); }}
+        accion={bitacora?.soloPeriodo && canExecute && puedeReconciliar(bitacora.rec.estado)
+          ? { label: 'Continuar con la reconciliación', onClick: () => { const rec = bitacora.rec; setBitacora(null); handleReconciliarDesdeHistorico(rec); } }
+          : null}
+      />
       <ConfirmDialog
         isOpen={confirmOpen}
         title="¿Confirmar Conciliación?"
@@ -1187,7 +1252,7 @@ export function ConciliacionMensajerosPage() {
                             )}
                             {canExecute && puedeReconciliar(r.estado) && (
                               <button
-                                onClick={() => handleReconciliarDesdeHistorico(r)}
+                                onClick={() => setBitacora({ rec: r, soloPeriodo: true })}
                                 aria-label="Reconciliar"
                                 title="Reconciliar: recalcular con las órdenes actuales (mantiene el consecutivo)"
                                 className="p-1 text-slate-400 hover:text-[var(--color-primary)]"
@@ -1219,7 +1284,12 @@ export function ConciliacionMensajerosPage() {
                                   <GruposDesglose lineas={r.desglose} moneda="CUP" className="max-w-2xl" />
                                 </div>
                               )}
-                              <ReconciliacionesLog conciliacionId={r.id} moneda="CUP" cantidad={r.reconciliaciones} />
+                              <ReconciliacionesLog conciliacionId={r.id} moneda={r.moneda} cantidad={r.reconciliaciones} />
+                              <div className="col-span-2 md:col-span-4 flex justify-end">
+                                <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setBitacora({ rec: r, soloPeriodo: false })}>
+                                  <History size={13} /> Bitácora
+                                </Button>
+                              </div>
                             </div>
                           </td>
                         </tr>
@@ -1247,13 +1317,15 @@ function FieldMini({ label, value }: { label: string; value: string }) {
 }
 
 function MensajeroResultCard({
-  calculo, canExecute, canRegisterMessengers, registering, onRegistrar, onConciliar
+  calculo, canExecute, canRegisterMessengers, registering, onRegistrar, onActivar, nombreArea, onConciliar
 }: {
   calculo: MensajeroCalculo;
   canExecute: boolean;
   canRegisterMessengers: boolean;
   registering: boolean;
   onRegistrar: () => void;
+  onActivar: (id: string, nombre: string) => Promise<void>;
+  nombreArea: (areaId: string | null) => string;
   onConciliar: () => void;
 }) {
   const sinOrdenes = calculo.ordenes.length === 0;
@@ -1331,17 +1403,16 @@ function MensajeroResultCard({
       )}
 
       {!calculo.registrado && (
-        <div className="flex items-center justify-between gap-3 bg-red-50 border border-red-200 rounded-lg p-3">
-          <span className="text-xs text-red-800 font-semibold flex items-center gap-2"><AlertTriangle size={14} /> Este mensajero no está registrado en el catálogo de Mensajeros.</span>
-          {canRegisterMessengers ? (
-            <Button variant="outline" className="h-8 text-xs gap-1.5 shrink-0" onClick={onRegistrar} disabled={registering}>
-              {registering ? <Loader2 size={12} className="animate-spin" /> : <UserPlus size={12} />}
-              Registrar Mensajero
-            </Button>
-          ) : (
-            <span className="text-[10px] text-red-700 font-bold shrink-0">Requiere Super Admin</span>
-          )}
-        </div>
+        <EntidadNoRegistradaAviso
+          entidad="mensajeros"
+          nombre={calculo.mensajeroNombre}
+          coincidencia={calculo.coincidencia}
+          nombreArea={nombreArea}
+          puedeGestionar={canRegisterMessengers}
+          registrando={registering}
+          onRegistrar={onRegistrar}
+          onActivar={onActivar}
+        />
       )}
 
       {canExecute && (
@@ -1356,7 +1427,7 @@ function MensajeroResultCard({
 
 function MasivaResultTable({
   resultados, omitidosPorDuplicado, selectedKeys, setSelectedKeys, expandedKey, setExpandedKey,
-  canExecute, canRegisterMessengers, registering, onRegistrar, onConciliar, elegibles
+  canExecute, canRegisterMessengers, registering, onRegistrar, onActivar, nombreArea, onConciliar, elegibles
 }: {
   resultados: MensajeroCalculo[];
   omitidosPorDuplicado: number;
@@ -1368,11 +1439,14 @@ function MasivaResultTable({
   canRegisterMessengers: boolean;
   registering: boolean;
   onRegistrar: () => void;
+  onActivar: (id: string, nombre: string) => Promise<void>;
+  nombreArea: (areaId: string | null) => string;
   onConciliar: () => void;
   elegibles: number;
 }) {
   const pag = usePagination(resultados, 25, [resultados]);
-  const faltantes = resultados.filter(r => !r.registrado).length;
+  const faltantes = resultados.filter(r => r.coincidencia.tipo === 'ninguno').length;
+  const existentesOtroEstado = resultados.filter(r => !r.registrado && r.coincidencia.tipo !== 'ninguno').length;
 
   return (
     <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)] shadow-sm overflow-hidden">
@@ -1383,6 +1457,11 @@ function MasivaResultTable({
             {elegibles} listos para conciliar
             {omitidosPorDuplicado > 0 && ` · ${omitidosPorDuplicado} ya conciliado(s) en este rango, omitido(s) de esta lista`}
           </p>
+          {existentesOtroEstado > 0 && (
+            <p className="text-xs text-amber-700 font-semibold mt-0.5">
+              {existentesOtroEstado} mensajero(s) ya existen Bloqueados o en otra Área: despliegue la fila para activarlos o modificarlos.
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {faltantes > 0 && (
@@ -1439,7 +1518,7 @@ function MasivaResultTable({
                       {r.ordenes.length === 0 ? (
                         <span className="text-[10px] font-bold text-slate-400 uppercase">Sin órdenes</span>
                       ) : !r.registrado ? (
-                        <span className="text-[10px] font-bold text-red-600 uppercase flex items-center gap-1"><AlertTriangle size={11} /> Sin registrar</span>
+                        <span className={cn('text-[10px] font-bold uppercase flex items-center gap-1', r.coincidencia.tipo === 'ninguno' ? 'text-red-600' : 'text-amber-600')}><AlertTriangle size={11} /> {etiquetaNoRegistrado(r.coincidencia)}</span>
                       ) : esSaldoCero(r.totalPorPagar, r.totalPorCobrar) ? (
                         <span className="text-[10px] font-bold text-[var(--color-info)] uppercase flex items-center gap-1" title="No se paga ni se cobra: se registra sin consecutivo"><Info size={11} /> Saldo 0</span>
                       ) : (
@@ -1454,7 +1533,19 @@ function MasivaResultTable({
                   </tr>
                   {isExpanded && (
                     <tr className="bg-slate-50/60">
-                      <td colSpan={7} className="p-4">
+                      <td colSpan={7} className="p-4 space-y-3">
+                        {!r.registrado && (
+                          <EntidadNoRegistradaAviso
+                            entidad="mensajeros"
+                            nombre={r.mensajeroNombre}
+                            coincidencia={r.coincidencia}
+                            nombreArea={nombreArea}
+                            puedeGestionar={canRegisterMessengers}
+                            registrando={registering}
+                            onRegistrar={onRegistrar}
+                            onActivar={onActivar}
+                          />
+                        )}
                         <GruposDesglose lineas={r.grupos} moneda="CUP" className="max-w-2xl" />
                         <p className="text-[11px] text-slate-500 mt-2">Disponibilidades: {formatCUP(r.disponibilidades)} · Alquiler Mochila ({r.tipoMochila}): {formatCUP(r.alquilerMochila)}</p>
                         {r.sinClasificar.ordenes > 0 && (

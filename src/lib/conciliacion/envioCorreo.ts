@@ -1,5 +1,5 @@
 import { supabase, logAuditEvent } from '../supabase';
-import { getGoogleToken } from '../googleDrive';
+import { getGoogleToken, clearGoogleToken } from '../googleDrive';
 import type { EstadoConciliacion, TablaConciliacion } from './estados';
 
 // Envío por correo de las conciliaciones (Fase 3 "Nuevos cambios",
@@ -73,8 +73,14 @@ const encabezado = (s: string) => `=?UTF-8?B?${base64Utf8(s)}?=`;
 
 export interface Adjunto { nombre: string; blob: Blob }
 
-// Envía un correo con adjuntos (multipart/mixed) por el endpoint de subida
-// de Gmail, que admite mensajes de hasta 35 MB.
+// Nombre del adjunto en el encabezado MIME: tal cual si es ASCII; si lleva
+// tildes o ñ (ej. "Café Ñico (Transferencia) …pdf"), codificado (RFC 2047).
+const nombreAdjunto = (n: string) => (/^[\x20-\x7e]*$/.test(n) ? n.replace(/"/g, "'") : encabezado(n));
+
+// Envía un correo con adjuntos (multipart/mixed). Va por el endpoint normal
+// de Gmail con el mensaje en base64url (campo raw), igual que el reporte de
+// Verificación: el endpoint de subida (/upload/gmail/...) no permite llamadas
+// desde el navegador (CORS, "Failed to fetch", 2026-11-05).
 export async function enviarGmail(params: { to: string[]; cc: string[]; asunto: string; cuerpo: string; adjuntos: Adjunto[] }): Promise<void> {
   const token = getGoogleToken();
   if (!token) throw new Error('No hay sesión de Google activa. Use "Reconectar Google" y vuelva a intentarlo.');
@@ -96,8 +102,8 @@ export async function enviarGmail(params: { to: string[]; cc: string[]; asunto: 
   for (const a of params.adjuntos) {
     partes.push(
       `--${limite}`,
-      `Content-Type: application/pdf; name="${a.nombre}"`,
-      `Content-Disposition: attachment; filename="${a.nombre}"`,
+      `Content-Type: application/pdf; name="${nombreAdjunto(a.nombre)}"`,
+      `Content-Disposition: attachment; filename="${nombreAdjunto(a.nombre)}"`,
       'Content-Transfer-Encoding: base64',
       '',
       wrap76(await base64Blob(a.blob)),
@@ -105,15 +111,24 @@ export async function enviarGmail(params: { to: string[]; cc: string[]; asunto: 
   }
   partes.push(`--${limite}--`, '');
 
-  const res = await fetch('https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'message/rfc822' },
-    body: partes.join('\r\n'),
-  });
+  const raw = base64Utf8(partes.join('\r\n')).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  let res: Response;
+  try {
+    res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw }),
+    });
+  } catch {
+    throw new Error('No se pudo conectar con Gmail (revise la conexión a internet) y vuelva a intentarlo.');
+  }
   if (!res.ok) {
     let msg = '';
     try { msg = (await res.json())?.error?.message || ''; } catch { /* sin JSON */ }
-    if (res.status === 401) throw new Error('La sesión de Google expiró. Use "Reconectar Google" y vuelva a intentarlo.');
+    if (res.status === 401) {
+      clearGoogleToken();
+      throw new Error('La sesión de Google expiró. Use "Reconectar Google" y vuelva a intentarlo.');
+    }
     if (res.status === 403) throw new Error(`Gmail rechazó el envío${msg ? `: ${msg}` : ''}. Reconecte Google y acepte el permiso de enviar correo.`);
     throw new Error(msg || `Gmail respondió ${res.status}.`);
   }

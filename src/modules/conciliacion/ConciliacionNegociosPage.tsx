@@ -19,13 +19,16 @@ import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
 import { EstadoConciliacionControl, ReconciliacionesLog } from '../../lib/conciliacion/EstadoBadge';
 import { puedeReconciliar, parseEstado, cambiarEstadoConciliacion } from '../../lib/conciliacion/estados';
 import { useEnvioConciliaciones, puedeEnviar, type EnvioItem } from './EnvioCorreo';
-import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn } from '../../lib/conciliacion/drivePdf';
+import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn, nombreArchivoPdf } from '../../lib/conciliacion/drivePdf';
+import { buscarEnCatalogo, leerCatalogo, activarEnCatalogo, type Coincidencia } from '../../lib/conciliacion/catalogoEntidad';
+import { EntidadNoRegistradaAviso, etiquetaNoRegistrado } from './EntidadNoRegistrada';
+import { BitacoraConciliaciones, type BitacoraRegistro } from './Bitacora';
 import { ResumenMetodosPago, ResumenBuilder } from './ResumenMetodosPago';
 import { buildPdfNegocio, loadOrdenesNegocio } from '../../lib/conciliacion/pdfConciliacionNegocio';
 import { ProcesoProgreso, useProcessSteps, trackStep, type StepStatus } from './ProcesoProgreso';
 import {
   GitMerge, Loader2, Search, Calculator, AlertTriangle, CheckCircle2, XCircle,
-  ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud, RotateCcw, Mail
+  ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud, RotateCcw, Mail, History
 } from 'lucide-react';
 
 // =====================================================================
@@ -81,6 +84,8 @@ interface Settlement {
   yaConciliado: boolean;
   // Conciliación ya registrada para esta fila y rango (null = pendiente).
   previa: PreviaConciliacion | null;
+  // Resultado de buscar el negocio en Gestión de Negocios (activo, bloqueado, otra Área o inexistente).
+  coincidencia: Coincidencia;
   ordenesEnJuego: number; // cantidad de órdenes que participan en ESTA fila
   grupos: LineaGrupo[]; // desglose por Grupo de pago de ESTA fila (en la moneda de la fila)
   sinClasificar: { ordenes: number; saldo: number; tipos: Set<string> };
@@ -97,7 +102,7 @@ const esReconciliable = (s: { yaConciliado: boolean; previa: PreviaConciliacion 
   s.yaConciliado && !!s.previa && puedeReconciliar(s.previa.estado);
 
 interface AreaOption { id: string; nombre: string; }
-interface BusinessOption { id: string; nombre: string; areaId: string; metodoPago: string; }
+interface BusinessOption { id: string; nombre: string; areaId: string; metodoPago: string; activo: boolean; }
 // Negocio con liquidaciones pendientes en el Área + rango elegidos (selector Individual).
 interface PendienteOption { key: string; nombre: string; areaNombre: string; registrado: boolean; reconciliar: boolean; }
 type StepUpdater = (key: string, status: StepStatus, detail?: string) => void;
@@ -178,7 +183,7 @@ function buildSettlements(params: {
   commissionPercent: number;
   exchangeRateCup: number | null;
   catalogo: CatalogoPagos;
-}): Array<Omit<Settlement, 'yaConciliado' | 'previa'>> {
+}): Array<Omit<Settlement, 'yaConciliado' | 'previa' | 'coincidencia'>> {
   const full = computeDesglose(
     params.ordenes.map(o => ({ paymentType: o.paymentType, monto: o.productAmount })),
     params.commissionPercent,
@@ -201,7 +206,7 @@ function buildSettlements(params: {
   };
   // Fila con las líneas dadas (vacía = no se genera). Las órdenes sin
   // clasificar se informan en la primera fila del negocio.
-  const settlements: Array<Omit<Settlement, 'yaConciliado' | 'previa'>> = [];
+  const settlements: Array<Omit<Settlement, 'yaConciliado' | 'previa' | 'coincidencia'>> = [];
   const fila = (subtipo: string, moneda: 'CUP' | 'USD', lineas: LineaGrupo[], extra: Partial<Settlement> = {}) => {
     const t = totales(lineas);
     if (t.ordenes === 0) return;
@@ -295,12 +300,8 @@ function mapHistoryRow(r: any): ConciliacionRecord {
 }
 
 // PDF: diseño "Reporte de conciliación" en src/lib/conciliacion/pdfConciliacionNegocio.ts.
-const pdfFileNameNegocio = (rec: ConciliacionRecord) =>
-  `${rec.consecutivo ? `${rec.consecutivo}-` : ''}conciliacion-${rec.establecimiento.replace(/[^a-z0-9]/gi, '-')}-${rec.viaPago}-${rec.fechaInicial}_${rec.fechaFinal}.pdf`;
-
-// Nombre del PDF adjunto al correo del negocio: sin consecutivo (es interno).
-const pdfAdjuntoNegocio = (rec: ConciliacionRecord) =>
-  `conciliacion-${rec.establecimiento.replace(/[^a-z0-9]/gi, '-')}-${rec.viaPago}-${rec.fechaInicial}_${rec.fechaFinal}.pdf`;
+// Nombre del archivo = texto del enlace del histórico (ver nombreArchivoPdf).
+const pdfFileNameNegocio = (rec: ConciliacionRecord) => nombreArchivoPdf(rec.conciliacion);
 
 // Histórico ordenado por consecutivo descendente (año y número, ej.
 // PN260012 antes que CNU260011 antes que PN250099; U = numeración en USD). Las conciliaciones sin
@@ -374,10 +375,15 @@ export function ConciliacionNegociosPage() {
     setAreas((data || []).map(a => ({ id: a.area_id, nombre: a.name })));
   };
 
+  // Todos los negocios, también los Bloqueados: así un negocio bloqueado no
+  // se toma por "no registrado" ni se vuelve a crear (ver catalogoEntidad.ts).
+  const businessesRef = useRef<BusinessOption[]>([]);
   const loadBusinesses = async () => {
-    const { data, error } = await supabase.from('businesses').select('business_id, name, area_id, payment_method, active').eq('active', true).order('name');
+    const { data, error } = await supabase.from('businesses').select('business_id, name, area_id, payment_method, active').order('name');
     if (error) { console.error('Error loading businesses:', error.message); return; }
-    setBusinesses((data || []).map(b => ({ id: b.business_id, nombre: b.name, areaId: b.area_id, metodoPago: b.payment_method || '' })));
+    const lista = (data || []).map(b => ({ id: b.business_id, nombre: b.name, areaId: b.area_id, metodoPago: b.payment_method || '', activo: !!b.active }));
+    businessesRef.current = lista;
+    setBusinesses(lista);
   };
 
   const loadCommission = async () => {
@@ -484,7 +490,9 @@ export function ConciliacionNegociosPage() {
       const storeName = ordenesGrupo[0].store;
       const areaId = ordenesGrupo[0].areaId;
       const areaNombre = areas.find(a => a.id === areaId)?.nombre || 'N/A';
-      const matchBusiness = businesses.find(b => normalizeEntityName(b.nombre) === normalizeEntityName(storeName) && b.areaId === areaId);
+      const catalogoNegocios = businessesRef.current;
+      const coincidencia = buscarEnCatalogo(catalogoNegocios, storeName, areaId);
+      const matchBusiness = coincidencia.tipo === 'activo' ? catalogoNegocios.find(b => b.id === coincidencia.id) : undefined;
 
       const settlements = buildSettlements({
         negocioKey: key,
@@ -500,7 +508,7 @@ export function ConciliacionNegociosPage() {
       });
       for (const st of settlements) {
         const previa = matchBusiness ? previas.get(`${matchBusiness.id}|${st.subtipo}`) || null : null;
-        allSettlements.push({ ...st, yaConciliado: !!previa, previa });
+        allSettlements.push({ ...st, yaConciliado: !!previa, previa, coincidencia });
       }
     }
 
@@ -596,21 +604,43 @@ export function ConciliacionNegociosPage() {
     }
   };
 
+  const handleActivarNegocio = async (id: string, nombre: string) => {
+    try {
+      await activarEnCatalogo('negocios', id, nombre);
+      await loadBusinesses();
+      setPendientesVersion(v => v + 1);
+      await handleCalcular();
+    } catch (err: any) {
+      alert('No se pudo activar el negocio: ' + (err?.message || err));
+    }
+  };
+  const nombreArea = (areaId: string | null) => areas.find(a => a.id === areaId)?.nombre || 'N/D';
+
   // RN 6.4.3: registra en 'businesses' los negocios encontrados en las
   // órdenes que todavía no existen en el catálogo, luego recalcula.
   const handleRegistrarFaltantes = async () => {
     if (!resultados) return;
-    const faltantes = Array.from(new Map<string, Settlement>(resultados.filter(r => !r.registrado).map(r => [r.negocioKey, r])).values());
-    if (faltantes.length === 0) return;
+    const candidatos = Array.from(new Map<string, Settlement>(resultados.filter(r => r.coincidencia.tipo === 'ninguno').map(r => [r.negocioKey, r])).values());
+    if (candidatos.length === 0) return;
     setRegistering(true);
     try {
-      const payload = faltantes.map(f => ({ name: f.negocioNombre, area_id: f.areaId, active: true }));
-      const { error } = await supabase.from('businesses').insert(payload);
-      if (error) throw error;
-      await logAuditEvent('Conciliaciones', 'Negocios Registrados Automáticamente desde Conciliación', {
-        cantidad: faltantes.length,
-        negocios: faltantes.map(f => f.negocioNombre),
-      });
+      // Se revalida contra la base: si ya existe (aunque esté Bloqueado o en
+      // otra Área) no se crea un duplicado; se avisa para activarlo o editarlo.
+      const actual = await leerCatalogo('negocios');
+      const faltantes = candidatos.filter(f => buscarEnCatalogo(actual, f.negocioNombre, f.areaId).tipo === 'ninguno');
+      const existentes = candidatos.filter(f => !faltantes.includes(f));
+      if (faltantes.length > 0) {
+        const payload = faltantes.map(f => ({ name: f.negocioNombre, area_id: f.areaId, active: true }));
+        const { error } = await supabase.from('businesses').insert(payload);
+        if (error) throw error;
+        await logAuditEvent('Conciliaciones', 'Negocios Registrados Automáticamente desde Conciliación', {
+          cantidad: faltantes.length,
+          negocios: faltantes.map(f => f.negocioNombre),
+        });
+      }
+      if (existentes.length > 0) {
+        alert(`${existentes.map(f => f.negocioNombre).join(', ')} ya existe(n) en Gestión de Negocios con otro estado o en otra Área: no se registró de nuevo. Revise el aviso de cada uno para activarlo o modificar su información.`);
+      }
       await loadBusinesses();
       setPendientesVersion(v => v + 1);
       await handleCalcular();
@@ -796,7 +826,7 @@ export function ConciliacionNegociosPage() {
     construirPdfs: async recs => {
       const ordenes = await loadOrdenesNegocio(recs);
       return Promise.all(recs.map(async r => ({
-        nombre: pdfAdjuntoNegocio(r),
+        nombre: pdfFileNameNegocio(r),
         blob: (await buildPdfNegocio(r, ordenes.get(r.id) || [], pdfDefaults)).output('blob'),
       })));
     },
@@ -815,6 +845,23 @@ export function ConciliacionNegociosPage() {
     history.filter(h => (h.businessId ? h.businessId === r.businessId : h.establecimiento === r.establecimiento)
       && h.fechaInicial === r.fechaInicial && h.fechaFinal === r.fechaFinal).map(envioItem)
   );
+
+  // Bitácora (2026-11-05): todas las conciliaciones del negocio, o solo las
+  // del período antes de reconciliar.
+  const [bitacora, setBitacora] = useState<{ rec: ConciliacionRecord; soloPeriodo: boolean } | null>(null);
+  const mismoNegocio = (a: ConciliacionRecord, b: ConciliacionRecord) =>
+    a.businessId && b.businessId ? a.businessId === b.businessId : a.establecimiento === b.establecimiento && a.areaId === b.areaId;
+  const aBitacora = (r: ConciliacionRecord): BitacoraRegistro => ({
+    id: r.id, fechaInicial: r.fechaInicial, fechaFinal: r.fechaFinal, riel: r.viaPago, moneda: r.moneda,
+    consecutivo: r.consecutivo, estado: r.estado, neto: r.cxpTM + r.cxpSM + r.cxpUS - r.cxcCU, fecha: r.fecha,
+    responsable: r.responsable, reconciliaciones: r.reconciliaciones, enviadoAt: r.enviadoAt, enviadoA: r.enviadoA,
+    desglose: r.desglose,
+    extras: [
+      { label: 'Por Cobrar (CxC)', value: `${r.ordenesEfectivo} órdenes / ${formatCurrency(r.cxcCU, r.moneda)}` },
+      { label: 'Por Pagar (CxP)', value: `${r.ordenesTransfermovil + r.ordenesSaldoMandao + r.ordenesTarjeta} órdenes / ${formatCurrency(r.cxpTM + r.cxpSM + r.cxpUS, r.moneda)}` },
+      { label: 'Área', value: r.area },
+    ],
+  });
 
   const handleCambiarEstado = async (rec: ConciliacionRecord, nuevo: EstadoConciliacion) => {
     try {
@@ -1042,6 +1089,8 @@ export function ConciliacionNegociosPage() {
                   canRegisterBusinesses={canRegisterBusinesses}
                   registering={registering}
                   onRegistrar={() => { void handleRegistrarFaltantes(); }}
+                  onActivar={handleActivarNegocio}
+                  nombreArea={nombreArea}
                 />
               </React.Fragment>
             );
@@ -1087,12 +1136,26 @@ export function ConciliacionNegociosPage() {
           canRegisterBusinesses={canRegisterBusinesses}
           registering={registering}
           onRegistrar={handleRegistrarFaltantes}
+          onActivar={handleActivarNegocio}
+          nombreArea={nombreArea}
           onConciliar={handleConfirmConciliar}
           elegibles={elegiblesParaConciliar.length}
         />
       )}
 
       {envio.modal}
+      <BitacoraConciliaciones
+        abierta={!!bitacora}
+        onCerrar={() => setBitacora(null)}
+        nombre={bitacora?.rec.establecimiento || ''}
+        registros={bitacora ? history.filter(h => mismoNegocio(h, bitacora.rec)).map(aBitacora) : []}
+        periodo={bitacora?.soloPeriodo ? { fechaInicial: bitacora.rec.fechaInicial, fechaFinal: bitacora.rec.fechaFinal } : null}
+        seleccionInicial={bitacora?.rec.id}
+        onAbrirPdf={id => { const rec = history.find(h => h.id === id); if (rec) void handleGenerarPDF(rec); }}
+        accion={bitacora?.soloPeriodo && canExecute && puedeReconciliar(bitacora.rec.estado)
+          ? { label: 'Continuar con la reconciliación', onClick: () => { const rec = bitacora.rec; setBitacora(null); handleReconciliarDesdeHistorico(rec); } }
+          : null}
+      />
       <ConfirmDialog
         isOpen={confirmOpen}
         title="¿Confirmar Conciliación?"
@@ -1294,7 +1357,7 @@ export function ConciliacionNegociosPage() {
                             )}
                             {canExecute && puedeReconciliar(r.estado) && (
                               <button
-                                onClick={() => handleReconciliarDesdeHistorico(r)}
+                                onClick={() => setBitacora({ rec: r, soloPeriodo: true })}
                                 aria-label="Reconciliar"
                                 title="Reconciliar: recalcular con las órdenes actuales (mantiene el consecutivo)"
                                 className="p-1 text-slate-400 hover:text-[var(--color-primary)]"
@@ -1329,6 +1392,11 @@ export function ConciliacionNegociosPage() {
                               <FieldMini label="Prioridad" value={r.prioridad || '—'} />
                               <FieldMini label="Último envío" value={r.enviadoAt ? `${formatDatetime(r.enviadoAt)} · ${r.enviadoA || ''}` : 'No enviado'} />
                               <ReconciliacionesLog conciliacionId={r.id} moneda={r.moneda} cantidad={r.reconciliaciones} />
+                              <div className="col-span-2 md:col-span-4 flex justify-end">
+                                <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setBitacora({ rec: r, soloPeriodo: false })}>
+                                  <History size={13} /> Bitácora
+                                </Button>
+                              </div>
                             </div>
                           </td>
                         </tr>
@@ -1372,12 +1440,14 @@ function mensajeConfirmacion(nuevas: number, reconciliar: number): string {
 const esSaldoCero = (cxp: number, cxc: number) => Math.abs(cxp - cxc) < 0.005;
 
 function NegocioResultCard({
-  calculo, canRegisterBusinesses, registering, onRegistrar
+  calculo, canRegisterBusinesses, registering, onRegistrar, onActivar, nombreArea
 }: {
   calculo: Settlement;
   canRegisterBusinesses: boolean;
   registering: boolean;
   onRegistrar: () => void;
+  onActivar: (id: string, nombre: string) => Promise<void>;
+  nombreArea: (areaId: string | null) => string;
 }) {
   const sinOrdenes = calculo.ordenesEnJuego === 0;
   const totalCxP = calculo.totalCxP;
@@ -1452,17 +1522,16 @@ function NegocioResultCard({
       )}
 
       {!calculo.registrado && (
-        <div className="flex items-center justify-between gap-3 bg-red-50 border border-red-200 rounded-lg p-3">
-          <span className="text-xs text-red-800 font-semibold flex items-center gap-2"><AlertTriangle size={14} /> Este negocio no está registrado en el catálogo de Negocios.</span>
-          {canRegisterBusinesses ? (
-            <Button variant="outline" className="h-8 text-xs gap-1.5 shrink-0" onClick={onRegistrar} disabled={registering}>
-              {registering ? <Loader2 size={12} className="animate-spin" /> : <UserPlus size={12} />}
-              Registrar Negocio
-            </Button>
-          ) : (
-            <span className="text-[10px] text-red-700 font-bold shrink-0">Requiere Super Admin</span>
-          )}
-        </div>
+        <EntidadNoRegistradaAviso
+          entidad="negocios"
+          nombre={calculo.negocioNombre}
+          coincidencia={calculo.coincidencia}
+          nombreArea={nombreArea}
+          puedeGestionar={canRegisterBusinesses}
+          registrando={registering}
+          onRegistrar={onRegistrar}
+          onActivar={onActivar}
+        />
       )}
 
     </div>
@@ -1471,7 +1540,7 @@ function NegocioResultCard({
 
 function MasivaResultTable({
   resultados, omitidosPorDuplicado, selectedKeys, setSelectedKeys, expandedKey, setExpandedKey,
-  canExecute, canRegisterBusinesses, registering, onRegistrar, onConciliar, elegibles
+  canExecute, canRegisterBusinesses, registering, onRegistrar, onActivar, nombreArea, onConciliar, elegibles
 }: {
   resultados: Settlement[];
   omitidosPorDuplicado: number;
@@ -1483,11 +1552,14 @@ function MasivaResultTable({
   canRegisterBusinesses: boolean;
   registering: boolean;
   onRegistrar: () => void;
+  onActivar: (id: string, nombre: string) => Promise<void>;
+  nombreArea: (areaId: string | null) => string;
   onConciliar: () => void;
   elegibles: number;
 }) {
   const pag = usePagination(resultados, 25, [resultados]);
-  const faltantes = new Set(resultados.filter(r => !r.registrado).map(r => r.negocioKey)).size;
+  const faltantes = new Set(resultados.filter(r => r.coincidencia.tipo === 'ninguno').map(r => r.negocioKey)).size;
+  const existentesOtroEstado = new Set(resultados.filter(r => !r.registrado && r.coincidencia.tipo !== 'ninguno').map(r => r.negocioKey)).size;
   const sinTasa = resultados.filter(r => r.sinTasa).length;
 
   return (
@@ -1499,6 +1571,11 @@ function MasivaResultTable({
             {elegibles} listas para conciliar
             {omitidosPorDuplicado > 0 && ` · ${omitidosPorDuplicado} ya conciliada(s) en este rango, omitida(s) de esta lista`}
           </p>
+          {existentesOtroEstado > 0 && (
+            <p className="text-xs text-amber-700 font-semibold mt-0.5">
+              {existentesOtroEstado} negocio(s) ya existen Bloqueados o en otra Área: despliegue la fila para activarlos o modificarlos.
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {faltantes > 0 && (
@@ -1570,7 +1647,7 @@ function MasivaResultTable({
                       {r.ordenesEnJuego === 0 ? (
                         <span className="text-[10px] font-bold text-slate-400 uppercase">Sin órdenes</span>
                       ) : !r.registrado ? (
-                        <span className="text-[10px] font-bold text-red-600 uppercase flex items-center gap-1"><AlertTriangle size={11} /> Sin registrar</span>
+                        <span className={cn('text-[10px] font-bold uppercase flex items-center gap-1', r.coincidencia.tipo === 'ninguno' ? 'text-red-600' : 'text-amber-600')}><AlertTriangle size={11} /> {etiquetaNoRegistrado(r.coincidencia)}</span>
                       ) : r.sinTasa ? (
                         <span className="text-[10px] font-bold text-red-600 uppercase flex items-center gap-1" title="No hay Tasa de Cambio activa — no se puede convertir a USD"><AlertTriangle size={11} /> Sin tasa</span>
                       ) : !r.metodoReconocido ? (
@@ -1589,7 +1666,19 @@ function MasivaResultTable({
                   </tr>
                   {isExpanded && (
                     <tr className="bg-slate-50/60">
-                      <td colSpan={8} className="p-4">
+                      <td colSpan={8} className="p-4 space-y-3">
+                        {!r.registrado && (
+                          <EntidadNoRegistradaAviso
+                            entidad="negocios"
+                            nombre={r.negocioNombre}
+                            coincidencia={r.coincidencia}
+                            nombreArea={nombreArea}
+                            puedeGestionar={canRegisterBusinesses}
+                            registrando={registering}
+                            onRegistrar={onRegistrar}
+                            onActivar={onActivar}
+                          />
+                        )}
                         <GruposDesglose lineas={r.grupos} moneda={r.moneda} className="max-w-2xl" />
                         {r.sinClasificar.ordenes > 0 && (
                           <p className="text-[11px] text-amber-700 mt-2">{r.sinClasificar.ordenes} órdenes con método de pago no reconocido: {Array.from(r.sinClasificar.tipos).join(', ')}</p>

@@ -24,7 +24,19 @@ export function parseDriveFolderId(input: string): string {
 }
 
 export function getGoogleToken(): string | null {
-  return sessionStorage.getItem('google_access_token');
+  const token = sessionStorage.getItem('google_access_token');
+  const exp = Number(sessionStorage.getItem('google_access_token_exp') || 0);
+  if (token && exp && Date.now() > exp) {
+    clearGoogleToken();
+    return null;
+  }
+  return token;
+}
+
+// Token rechazado por Google (401) o vencido: se descarta para pedir reconectar.
+export function clearGoogleToken() {
+  sessionStorage.removeItem('google_access_token');
+  sessionStorage.removeItem('google_access_token_exp');
 }
 
 // Carpeta de un tipo de conciliación. `specific` es la definida para ese

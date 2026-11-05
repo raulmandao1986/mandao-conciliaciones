@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { DetallesLog, resumenCambios } from './components/DetallesLog';
 import { supabase } from '../../lib/supabase';
 import { FileText, Search, Calendar, RefreshCw, ChevronLeft, ChevronRight, Filter, Info, Eye, X, ClipboardList, Loader2 } from 'lucide-react';
 import { Button } from '../../design-system/primitives/Button';
@@ -426,6 +427,9 @@ export function LogsAuditoriaPage() {
                     </td>
                     <td className="py-3 px-4 text-xs text-[var(--color-text)] font-bold">
                       {log.action}
+                      {resumenCambios(log.details) && (
+                        <span className="block text-[10px] font-medium text-[var(--color-text-muted)] mt-0.5">{resumenCambios(log.details)}</span>
+                      )}
                     </td>
                     <td className="py-3 px-4 text-xs text-[var(--color-text-muted)] font-mono">
                       {log.user}
@@ -438,7 +442,7 @@ export function LogsAuditoriaPage() {
                           title="Inspeccionar detalles técnicos estructurados"
                         >
                           <Eye size={13} />
-                          Ver más
+                          Ver detalles
                         </button>
                       ) : (
                         <span className="text-slate-400 italic">Sin datos</span>
@@ -495,7 +499,7 @@ export function LogsAuditoriaPage() {
             <div className="p-5 border-b border-[var(--color-border)] flex items-center justify-between bg-slate-50">
               <h3 className="text-sm font-bold text-[var(--color-text)] flex items-center gap-2">
                 <Info size={18} className="text-[var(--color-primary)]" />
-                Detalles Técnicos Ampliados del Log
+                Detalles del registro
               </h3>
               <button
                 onClick={() => setSelectedLog(null)}
@@ -532,12 +536,16 @@ export function LogsAuditoriaPage() {
                 </div>
               </div>
 
-              <div className="space-y-1.5">
-                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">Metadatos Estructurados (Payload)</span>
-                <div className="bg-slate-950 text-emerald-400 p-4 rounded-xl font-mono text-xs overflow-x-auto max-h-[300px]">
+              <DetallesLog details={selectedLog.details} />
+
+              <details className="group">
+                <summary className="cursor-pointer text-[10px] uppercase font-bold tracking-wider text-slate-400 hover:text-slate-600">
+                  Ver datos técnicos (JSON)
+                </summary>
+                <div className="mt-2 bg-[var(--color-surface-2)] border border-[var(--color-border)] text-[var(--color-text)] p-4 rounded-[var(--radius-sm)] font-mono text-xs overflow-x-auto max-h-[300px]">
                   <pre>{JSON.stringify(selectedLog.details, null, 2)}</pre>
                 </div>
-              </div>
+              </details>
             </div>
 
             <div className="p-4 bg-slate-50 border-t border-[var(--color-border)] flex justify-end">

@@ -94,19 +94,26 @@ export const reconnectGoogle = signInWithGoogle;
 // deja en sessionStorage bajo la MISMA key que usaba Firebase, para que
 // el resto del código (que hoy hace sessionStorage.getItem('google_access_token'))
 // siga funcionando sin cambios mientras se migran esos archivos.
+//
+// Supabase solo entrega provider_token justo después del login con Google:
+// cuando renueva su propia sesión (cada ~1 h) la sesión nueva ya no lo trae.
+// Antes eso borraba el token guardado y Enviar / Drive fallaban con "No hay
+// sesión de Google activa" (2026-11-05). Ahora se conserva el último token
+// con su vencimiento (los de Google duran 1 h); se borra solo al cerrar sesión.
+export const GOOGLE_TOKEN_EXP_KEY = 'google_access_token_exp';
 export const syncGoogleTokenToSessionStorage = async () => {
   const { data } = await supabase.auth.getSession();
   const token = data.session?.provider_token;
-  if (token) {
+  if (token && token !== sessionStorage.getItem('google_access_token')) {
     sessionStorage.setItem('google_access_token', token);
-  } else {
-    sessionStorage.removeItem('google_access_token');
+    sessionStorage.setItem(GOOGLE_TOKEN_EXP_KEY, String(Date.now() + 55 * 60 * 1000));
   }
-  return token ?? null;
+  return token ?? sessionStorage.getItem('google_access_token');
 };
 
 export const logout = async () => {
   sessionStorage.removeItem('google_access_token');
+  sessionStorage.removeItem(GOOGLE_TOKEN_EXP_KEY);
   const { error } = await supabase.auth.signOut();
   if (error) throw error;
 };

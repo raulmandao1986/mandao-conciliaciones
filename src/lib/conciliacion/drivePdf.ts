@@ -79,3 +79,12 @@ export function describeDriveResult(r: DrivePdfResult): string {
 export function isMissingPdfColumn(error: { code?: string; message?: string } | null): boolean {
   return !!error && (error.code === '42703' || /pdf_drive_url|consecutivo|comision_pct|tasa_cambio|desglose|reconciliaciones|enviado_at|enviado_a|moneda/.test(error.message || ''));
 }
+
+// Nombre del archivo PDF de una conciliación: el mismo texto del enlace del
+// histórico (ej. "Burger Queen (Transferencia) 2026-09-01 - 2026-09-30.pdf"),
+// sin el consecutivo, que es interno (pedido 2026-11-05). Se usa en Drive, en
+// la descarga y en el adjunto del correo.
+export function nombreArchivoPdf(conciliacion: string): string {
+  const limpio = conciliacion.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '-').replace(/\s+/g, ' ').trim();
+  return `${limpio || 'conciliacion'}.pdf`;
+}

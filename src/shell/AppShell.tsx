@@ -43,6 +43,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     localStorage.setItem('active_tab', activeTab);
   }, [activeTab]);
+
+  // Navegación pedida desde un módulo (ej. Conciliación -> "Modificar
+  // información" abre Gestión de Negocios), ver lib/conciliacion/catalogoEntidad.ts.
+  useEffect(() => {
+    const navegar = (e: Event) => {
+      const tab = (e as CustomEvent<string>).detail;
+      if (typeof tab === 'string' && tab) setActiveTab(tab);
+    };
+    window.addEventListener('mandao:navegar', navegar);
+    return () => window.removeEventListener('mandao:navegar', navegar);
+  }, []);
   const [expandedMenus, setExpandedMenus] = useState<string[]>(['dispatcher', 'disponibilidad']);
 
   const hasPermission = (itemId: string) => {

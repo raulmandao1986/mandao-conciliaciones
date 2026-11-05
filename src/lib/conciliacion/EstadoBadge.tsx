@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Loader2, History } from 'lucide-react';
+import { Loader2, History, ChevronDown, ChevronUp } from 'lucide-react';
 import { cn } from '../utils';
 import { formatCurrency, formatDatetime } from '../formatters';
 import {
@@ -87,6 +87,7 @@ function valor(campo: string, v: unknown, moneda: 'CUP' | 'USD'): string {
 export function ReconciliacionesLog({ conciliacionId, moneda, cantidad }: { conciliacionId: string; moneda: 'CUP' | 'USD'; cantidad: number }) {
   const [items, setItems] = useState<Reconciliacion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [abiertas, setAbiertas] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     if (cantidad === 0) { setItems([]); return; }
@@ -107,14 +108,45 @@ export function ReconciliacionesLog({ conciliacionId, moneda, cantidad }: { conc
         <p className="text-xs font-medium text-[var(--color-danger)]">No se pudo cargar el registro: {error}</p>
       ) : !items ? (
         <Loader2 size={14} className="animate-spin text-[var(--color-text-faint)]" />
-      ) : items.map(it => {
-        const cambios = Object.keys(CAMPOS).filter(c => JSON.stringify(it.antes[c] ?? null) !== JSON.stringify(it.despues[c] ?? null));
-        return (
-          <div key={it.id} className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-white p-3">
-            <p className="text-[11px] text-[var(--color-text-muted)] mb-2">
-              <span className="font-semibold text-[var(--color-text)] tabular-nums">{formatDatetime(it.fecha)}</span>
-              {' · '}{it.responsable}{it.estadoAnterior ? ` · estaba ${it.estadoAnterior}` : ''}
-            </p>
+      ) : (
+        // Una fila por reconciliación; el detalle antes/después se despliega al hacer clic.
+        <div className="rounded-[var(--radius-sm)] border border-[var(--color-border)] bg-white divide-y divide-[var(--color-border)] overflow-hidden">
+          {items.map((it, i) => {
+            const cambios = Object.keys(CAMPOS).filter(c => JSON.stringify(it.antes[c] ?? null) !== JSON.stringify(it.despues[c] ?? null));
+            const abierta = abiertas[it.id] ?? false;
+            return (
+              <div key={it.id}>
+                <button
+                  type="button"
+                  onClick={() => setAbiertas(prev => ({ ...prev, [it.id]: !abierta }))}
+                  aria-expanded={abierta}
+                  className="w-full h-10 px-3 flex items-center gap-2 text-left text-[11px] hover:bg-[var(--color-surface-2)] transition-colors"
+                >
+                  {abierta ? <ChevronUp size={13} className="shrink-0 text-[var(--color-primary)]" /> : <ChevronDown size={13} className="shrink-0 text-[var(--color-text-faint)]" />}
+                  <span className="font-bold text-[var(--color-text-muted)] tabular-nums shrink-0">#{items.length - i}</span>
+                  <span className="font-semibold text-[var(--color-text)] tabular-nums shrink-0">{formatDatetime(it.fecha)}</span>
+                  <span className="text-[var(--color-text-muted)] truncate">· {it.responsable}{it.estadoAnterior ? ` · estaba ${it.estadoAnterior}` : ''}</span>
+                  <span className="ml-auto shrink-0 text-[var(--color-text-faint)]">
+                    {cambios.length === 0 ? 'solo desglose' : `${cambios.length} campo${cambios.length === 1 ? '' : 's'}`}
+                  </span>
+                </button>
+                {abierta && (
+                  <div className="px-3 pb-3 pt-1 bg-[var(--color-surface-2)]">
+                    <ReconciliacionDetalle cambios={cambios} it={it} moneda={moneda} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReconciliacionDetalle({ cambios, it, moneda }: { cambios: string[]; it: Reconciliacion; moneda: 'CUP' | 'USD' }) {
+  return (
+    <>
             {cambios.length === 0 ? (
               <p className="text-[11px] text-[var(--color-text-faint)]">Solo cambió el desglose por grupo de pago.</p>
             ) : (
@@ -133,9 +165,6 @@ export function ReconciliacionesLog({ conciliacionId, moneda, cantidad }: { conc
                 </tbody>
               </table>
             )}
-          </div>
-        );
-      })}
-    </div>
+    </>
   );
 }

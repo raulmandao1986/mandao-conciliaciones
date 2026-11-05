@@ -96,6 +96,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setProfile(null);
     setSession(null);
     sessionStorage.removeItem('google_access_token');
+    sessionStorage.removeItem('google_access_token_exp');
     await supabase.auth.signOut();
   };
 
@@ -130,6 +131,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } else {
         setProfile(null);
         sessionStorage.removeItem('google_access_token');
+        sessionStorage.removeItem('google_access_token_exp');
       }
       setIsLoading(false);
     });
@@ -151,6 +153,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     sessionStorage.removeItem('google_access_token');
+    sessionStorage.removeItem('google_access_token_exp');
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
   };
