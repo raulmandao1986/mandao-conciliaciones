@@ -30,6 +30,19 @@ import { cn } from '../../lib/utils';
 import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
 import { motion, AnimatePresence } from 'motion/react';
+import { normalizeSheetDateStr } from '../../lib/sheetDateParser';
+// Misma lectura de "Orders" y mismo armado de fila de BD que la Verificación
+// (importación): sin esto la Revisión marcaba diferencias en órdenes recién
+// importadas que coincidían con el Sheet (ver src/lib/dispatcherOrders.ts).
+import { parseCellNumber, mapOrderRow, orderToDbRow } from '../../lib/dispatcherOrders';
+import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
+// El dispatcher siempre registra los montos en CUP (confirmado por el
+// usuario 2026-09-30) — antes se mostraban con "$" crudo, dando a
+// entender que eran USD. formatCUP() los muestra correctamente
+// etiquetados; la conversión a USD solo aplica dentro de Conciliación de
+// Negocios (ver ConciliacionNegociosPage.tsx), no en estas vistas.
+import { formatCurrency, toLocalISODate } from '../../lib/formatters';
+const formatCUP = (value: number) => formatCurrency(value, 'CUP');
 
 interface OrderRecord {
   id: string;
@@ -56,6 +69,10 @@ interface OrderRecord {
   driverAdminCharge?: number;
   complementaryDelivery?: number;
   tax?: number;
+  // null = orden importada antes de 2026-10-07, cuando estas columnas no
+  // existían en la BD.
+  rate?: number | null;
+  transactionFee?: number | null;
   promocode?: string;
 }
 
@@ -79,74 +96,24 @@ function stringsFuzzyEqual(s1: any, s2: any): boolean {
 // negocios distintos (por eso RN-009 solo bloquea duplicados con MISMO Order
 // ID + MISMO Negocio, ver la regla equivalente en VerificationPage.tsx).
 // Comparar/indexar registros solo por Order ID cruzaría negocios distintos —
-// orderKey() es la clave compuesta (Order ID + Store) usada en todo el
-// análisis de Revisión (matching BD↔Sheet, Set de eliminados, mapa de
-// discrepancias, y las columnas "Estado Externo" de tabla y PDF).
-function orderKey(o: { orderId?: string; store?: string; negocio?: string }): string {
-  return `${String(o.orderId || '').trim().toLowerCase()}::${String(o.store || o.negocio || '').trim().toLowerCase()}`;
+// orderKey() es la clave compuesta (Order ID + Store + Delivery Date, igual
+// que la clave única de la BD uq_dispatcher_order_area_store_date; el Área
+// ya está filtrada) usada en todo el análisis de Revisión (matching
+// BD↔Sheet, Set de eliminados, mapa de discrepancias, y las columnas
+// "Estado Externo" de tabla y PDF). Sin la fecha, el mismo Order ID del
+// mismo negocio en días distintos se emparejaba con la orden equivocada.
+function orderKey(o: { orderId?: string; store?: string; negocio?: string; deliveryDate?: string }): string {
+  return `${String(o.orderId || '').trim().toLowerCase()}::${String(o.store || o.negocio || '').trim().toLowerCase()}::${normalizeSheetDateStr(o.deliveryDate || '')}`;
 }
 
 function sameOrder(
-  a: { orderId?: string; store?: string; negocio?: string },
-  b: { orderId?: string; store?: string; negocio?: string }
+  a: { orderId?: string; store?: string; negocio?: string; deliveryDate?: string },
+  b: { orderId?: string; store?: string; negocio?: string; deliveryDate?: string }
 ): boolean {
   return orderKey(a) === orderKey(b);
 }
 
-// Google Sheets Parsing helpers
-function parseCellNumber(val: any): number {
-  if (val === undefined || val === null) return 0;
-  if (typeof val === 'number') return val;
-  let str = String(val).trim();
-  if (str === '') return 0;
-
-  // Remove currency symbols, spaces, percent signs
-  str = str.replace(/[$€%\s]/g, '');
-
-  if (str.includes(',') && str.includes('.')) {
-    if (str.indexOf('.') < str.indexOf(',')) {
-      // Spanish style: Dot is thousands separator, comma is decimal (e.g. 1.234,56 or 2.30,00)
-      const parts = str.split(',');
-      const integerPartWithDots = parts[0];
-      const decimalPart = parts[1] || '';
-
-      const segments = integerPartWithDots.split('.');
-      let integerPart = segments[0] || '';
-      for (let i = 1; i < segments.length; i++) {
-        const seg = segments[i];
-        if (i === segments.length - 1) {
-          // Last segment before comma (e.g., "30" in "2.30"). Pad if needed to 3 digits
-          if (seg.length < 3) {
-            integerPart += seg.padEnd(3, '0');
-          } else {
-            integerPart += seg;
-          }
-        } else {
-          integerPart += seg.padStart(3, '0');
-        }
-      }
-      str = integerPart + '.' + decimalPart;
-    } else {
-      // English style: Comma is thousands separator, dot is decimal (e.g. 1,234.56)
-      str = str.replace(/,/g, '');
-    }
-  } else if (str.includes(',')) {
-    // Only comma exists (e.g. 425,00 or 1,234)
-    const parts = str.split(',');
-    const decimals = parts[parts.length - 1];
-    
-    // If the part after the last comma has 1 or 2 digits, it is a decimal separator
-    if (decimals.length === 1 || decimals.length === 2) {
-      str = parts.slice(0, -1).join('') + '.' + decimals;
-    } else {
-      // Otherwise it's thousands separator (e.g. 1,123)
-      str = str.replace(/,/g, '');
-    }
-  }
-
-  const n = parseFloat(str);
-  return isNaN(n) ? 0 : n;
-}
+// parseCellNumber: src/lib/dispatcherOrders.ts
 
 function normalizeHeader(h: string): string {
   if (!h) return '';
@@ -184,43 +151,14 @@ async function extractGoogleApiError(res: Response): Promise<string> {
   return res.statusText || `HTTP ${res.status}`;
 }
 
-function normalizeDateStr(ds: string): string | null {
-  if (!ds) return null;
-  const clean = String(ds).trim();
-  // 1. If already in YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean;
-  
-  // 2. If DD/MM/YYYY or MM/DD/YYYY
-  const parts = clean.split(/[/\-. ]+/);
-  if (parts.length === 3) {
-    let p1 = parts[0];
-    let p2 = parts[1];
-    let p3 = parts[2];
-    
-    // Check if p3 looks like a 4-digit year
-    if (p3.length === 4) {
-      const val1 = parseInt(p1, 10);
-      const val2 = parseInt(p2, 10);
-      if (!isNaN(val1) && !isNaN(val2)) {
-        if (val1 > 12) {
-          // Definitely DD/MM/YYYY
-          return `${p3}-${p2.padStart(2, '0')}-${p1.padStart(2, '0')}`;
-        } else if (val2 > 12) {
-          // MM/DD/YYYY
-          return `${p3}-${p1.padStart(2, '0')}-${p2.padStart(2, '0')}`;
-        } else {
-          // Ambiguous - assume DD/MM/YYYY for Venezuela
-          return `${p3}-${p2.padStart(2, '0')}-${p1.padStart(2, '0')}`;
-        }
-      }
-    }
-    // Check if p1 looks like a 4-digit year
-    if (p1.length === 4) {
-      return `${p1}-${p2.padStart(2, '0')}-${p3.padStart(2, '0')}`;
-    }
-  }
-  return null;
-}
+// Parser de fechas de Sheet consolidado en src/lib/sheetDateParser.ts
+// (2026-09-30) — esta versión local tenía su propia heurística
+// (dividía el string y adivinaba DD/MM vs MM/DD por rangos), distinta a
+// la que usan VerificationPage.tsx/DisponibilidadVerificationPage.tsx,
+// con riesgo real de interpretar una fecha distinto según la pantalla.
+// Ahora las 4 pantallas de Dispatcher/Disponibilidad usan el mismo
+// parser, que asume dd/mm/yyyy (confirmado por el usuario 2026-09-30).
+const normalizeDateStr = normalizeSheetDateStr;
 
 function isCellEmpty(val: any): boolean {
   if (val === undefined || val === null) return true;
@@ -250,49 +188,6 @@ function isCellEmptyOrError(val: any): boolean {
     str.startsWith('#NAME?') ||
     str.startsWith('#ERROR!')
   );
-}
-
-function mapRowToRecord(row: any[], map: Record<string, number>) {
-  const getVal = (keys: string[]) => {
-    for (const key of keys) {
-      const idx = map[key];
-      if (idx !== undefined && idx < row.length) return row[idx];
-    }
-    return '';
-  };
-
-  const getNum = (keys: string[]) => {
-    const val = getVal(keys);
-    return parseCellNumber(val);
-  };
-
-  const orderId = getVal(['orderid', 'orden', 'id', 'noorden']);
-
-  return {
-    deliveryDate: getVal(['deliverydate', 'fechadeentrega', 'fechaentrega', 'fecha', 'date']) || '',
-    orderDate: getVal(['orderdate', 'fechadeorden', 'fechaorden']) || '',
-    driver: getVal(['driver', 'mensajero', 'repartidor', 'conductor']) || '',
-    store: getVal(['store', 'negocio', 'establecimiento', 'restaurante', 'comercio']) || '',
-    negocio: getVal(['store', 'negocio', 'establecimiento', 'restaurante', 'comercio']) || '',
-    orderId: orderId,
-    orden: orderId,
-    id: orderId,
-    productAmount: getNum(['productamount', 'montoproducto', 'montoarticulos', 'articulos']),
-    deliveryCharge: getNum(['deliverycharge', 'cargodeentrega', 'costodeentrega', 'delivery']),
-    area: getVal(['area', 'zona', 'centro', 'ciudad']) || '',
-    paymentType: getVal(['paymenttype', 'tipodepago', 'metododepago', 'formadepago', 'viapago']) || '',
-    customer: getVal(['customer', 'cliente', 'nombrecliente']) || '',
-    customerNumber: getVal(['customernumber', 'telefonocliente', 'telefono', 'celular']) || '',
-    
-    storeOffer: getNum(['storeoffer', 'ofertadelestablecimiento']),
-    processingFee: getNum(['processingfee', 'costodeprocesamiento', 'fee']),
-    storeAdminCharge: getNum(['storeadmincharge', 'cargoadministrativoestablecimiento']),
-    extraDeliveryCharge: getNum(['extradeliverycharge', 'cargoentregajornada']),
-    driverAdminCharge: getNum(['driveradmincharge', 'cargorepartidorextra']),
-    complementaryDelivery: getNum(['complementarydelivery', 'entregaayuda']),
-    tax: getNum(['tax', 'impuesto', 'iva']),
-    promocode: getVal(['promocode', 'codigopromocional', 'promo']) || ''
-  };
 }
 
 const renderPageNumbers = (current: number, total: number, onChange: (p: number) => void) => {
@@ -379,8 +274,8 @@ export function RevisionPage() {
     area: 'Todos',
     store: 'Todas',
     driver: 'Todos',
-    fechaInicio: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // last 7 days
-    fechaFin: new Date().toISOString().split('T')[0]
+    fechaInicio: toLocalISODate(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)), // last 7 days
+    fechaFin: toLocalISODate()
   });
 
   const [currentPage, setCurrentPage] = useState(1);
@@ -444,12 +339,17 @@ export function RevisionPage() {
 
   const loadOrders = async () => {
     setLoading(true);
-    const { data: rows, error } = await supabase
-      .from('dispatcher')
-      .select('order_pk, delivery_date, order_date, payment_type, customer, customer_number, driver, store, order_id, product_amount, store_offer, processing_fee, store_admin_charge, delivery_charge, extra_delivery_charge, driver_admin_charge, complementary_delivery, tax, promocode, area_id, areas(name)')
-      .order('delivery_date', { ascending: false });
-
-    if (error) {
+    // Paginado: sin esto Supabase devolvía solo 1000 de las órdenes y el
+    // resto aparecía como "ausente en BD" al comparar.
+    let rows: any[] = [];
+    try {
+      rows = await fetchAllRows<any>((from, to) => supabase
+        .from('dispatcher')
+        .select('order_pk, delivery_date, order_date, payment_type, customer, customer_number, driver, store, order_id, product_amount, store_offer, processing_fee, store_admin_charge, delivery_charge, extra_delivery_charge, driver_admin_charge, complementary_delivery, tax, rate, transaction_fee, promocode, area_id, areas(name)')
+        .order('delivery_date', { ascending: false })
+        .order('order_pk')
+        .range(from, to));
+    } catch (error: any) {
       console.error('Error loading dispatcher records:', error.message);
       setLoading(false);
       return;
@@ -480,6 +380,8 @@ export function RevisionPage() {
       driverAdminCharge: Number(r.driver_admin_charge) || 0,
       complementaryDelivery: Number(r.complementary_delivery) || 0,
       tax: Number(r.tax) || 0,
+      rate: r.rate === null || r.rate === undefined ? null : Number(r.rate),
+      transactionFee: r.transaction_fee === null || r.transaction_fee === undefined ? null : Number(r.transaction_fee),
       promocode: r.promocode || ''
     })) as OrderRecord[];
 
@@ -797,7 +699,7 @@ export function RevisionPage() {
       const headers = rows[0] || [];
       const headerMap = buildHeaderMap(headers);
       const allSheetOrders = rows.slice(1)
-        .map((r: any[]) => mapRowToRecord(r, headerMap))
+        .map((r: any[], idx: number) => mapOrderRow(r, headerMap, idx + 2))
         .filter((o: any) => !isCellEmptyOrError(o.orderId));
 
       // Filter spreadsheet rows by selected range matches
@@ -871,15 +773,15 @@ export function RevisionPage() {
             const parsedSheet = parseFloat(String(vSheet || 0));
             const parsedDb = parseFloat(String(vDb || 0));
             if (Math.abs(parsedSheet - parsedDb) > 0.01) {
-              const diffStr = `Sheets: $${parsedSheet.toFixed(2)} vs BD: $${parsedDb.toFixed(2)}`;
-              
+              const diffStr = `Sheets: ${formatCUP(parsedSheet)} vs BD: ${formatCUP(parsedDb)}`;
+
               discrepanciesList.push({
                 id: `${dbOrder.id}-${label}`,
                 orderId: dbOrder.orderId,
                 campo: label,
-                valorBD: `$${parsedDb.toFixed(2)}`,
-                valorDispatcher: `$${parsedSheet.toFixed(2)}`,
-                diferencia: `Variación de $${Math.abs(parsedSheet - parsedDb).toFixed(2)}`,
+                valorBD: formatCUP(parsedDb),
+                valorDispatcher: formatCUP(parsedSheet),
+                diferencia: `Variación de ${formatCUP(Math.abs(parsedSheet - parsedDb))}`,
                 tipo: 'discrepancia_valor',
                 severity: 'critica',
                 dbRecord: dbOrder,
@@ -887,7 +789,7 @@ export function RevisionPage() {
                 dbValue: parsedDb
               });
 
-              diffs.push(`${label}: Sheets $${parsedSheet.toFixed(2)} vs BD $${parsedDb.toFixed(2)}`);
+              diffs.push(`${label}: Sheets ${formatCUP(parsedSheet)} vs BD ${formatCUP(parsedDb)}`);
               console.warn(`[DIFERENCIA: VALOR] Orden ID ${dbOrder.orderId} -> Campo: ${label} | Sheets: ${parsedSheet} vs BD: ${parsedDb}`);
             }
           };
@@ -926,6 +828,33 @@ export function RevisionPage() {
           compareNumeric('Driver Admin Charge', match.driverAdminCharge, dbOrder.driverAdminCharge);
           compareNumeric('Complementary Delivery', match.complementaryDelivery, dbOrder.complementaryDelivery);
           compareNumeric('Tax/Impuesto', match.tax, dbOrder.tax);
+          // Rate y Transaction Fee: columnas nuevas (2026-10-07). Una orden
+          // importada antes no las tiene (null): se informa como advertencia
+          // "sin dato en BD", que se completa con "Sincronizar".
+          (['Rate', 'Transaction Fee'] as const).forEach(label => {
+            const vSheet = label === 'Rate' ? match.rate : match.transactionFee;
+            const vDb = label === 'Rate' ? dbOrder.rate : dbOrder.transactionFee;
+            if (vDb === null || vDb === undefined) {
+              if (Math.abs(vSheet || 0) > 0.0001) {
+                discrepanciesList.push({
+                  id: `${dbOrder.id}-${label}`,
+                  orderId: dbOrder.orderId,
+                  campo: label,
+                  valorBD: 'Sin dato',
+                  valorDispatcher: String(vSheet),
+                  diferencia: 'Orden importada antes de que existiera esta columna en la BD',
+                  tipo: 'discrepancia_valor',
+                  severity: 'advertencia',
+                  dbRecord: dbOrder,
+                  sheetValue: vSheet,
+                  dbValue: null
+                });
+                diffs.push(`${label}: Sheets ${vSheet} vs BD sin dato`);
+              }
+            } else {
+              compareNumeric(label, vSheet, vDb);
+            }
+          });
 
           compareString('Mensajero/Driver', match.driver, dbOrder.driver);
           compareString('Método de Pago', match.paymentType, dbOrder.paymentType);
@@ -1036,27 +965,7 @@ export function RevisionPage() {
           }
           else if (item.tipo === 'solo_sheets') {
             const rd = item.rawData;
-            const { error } = await supabase.from('dispatcher').insert({
-              delivery_date: normalizeDateStr(rd.deliveryDate) || null,
-              order_date: normalizeDateStr(rd.orderDate) || null,
-              payment_type: rd.paymentType,
-              customer: rd.customer,
-              customer_number: rd.customerNumber,
-              driver: rd.driver,
-              store: rd.store || rd.negocio,
-              order_id: rd.orderId,
-              product_amount: rd.productAmount,
-              store_offer: rd.storeOffer,
-              processing_fee: rd.processingFee,
-              store_admin_charge: rd.storeAdminCharge,
-              delivery_charge: rd.deliveryCharge,
-              extra_delivery_charge: rd.extraDeliveryCharge,
-              driver_admin_charge: rd.driverAdminCharge,
-              complementary_delivery: String(rd.complementaryDelivery ?? ''),
-              tax: rd.tax,
-              promocode: rd.promocode,
-              area_id: selectedAreaId || null
-            });
+            const { error } = await supabase.from('dispatcher').insert(orderToDbRow(rd, selectedAreaId || null));
             if (error) throw new Error(error.message);
             addComparisonLog('success', `✓ Creada en BD (nueva en Dispatcher): Orden ID ${item.orderId}`);
             console.log(`[SYNC: CREACIÓN INTENCIONADA] Creado nuevo registro para Orden: ${item.orderId}`);
@@ -1072,6 +981,8 @@ export function RevisionPage() {
               'Driver Admin Charge': 'driver_admin_charge',
               'Complementary Delivery': 'complementary_delivery',
               'Tax/Impuesto': 'tax',
+              'Rate': 'rate',
+              'Transaction Fee': 'transaction_fee',
               'Mensajero/Driver': 'driver',
               'Método de Pago': 'payment_type',
               'Establecimiento/Store': 'store',
@@ -1190,8 +1101,8 @@ export function RevisionPage() {
             item.driver || 'N/A',
             item.store || 'N/A',
             item.orderId || 'N/A',
-            `$${(item.productAmount || 0).toFixed(2)}`,
-            `$${(item.deliveryCharge || 0).toFixed(2)}`,
+            formatCUP(item.productAmount || 0),
+            formatCUP(item.deliveryCharge || 0),
             item.paymentType || 'N/A',
             item.customer || 'N/A',
             extStatus
@@ -1226,8 +1137,8 @@ export function RevisionPage() {
             x.deliveryDate || 'N/A',
             x.driver || 'N/A',
             x.store || 'N/A',
-            `$${(x.productAmount || 0).toFixed(2)}`,
-            `$${(x.deliveryCharge || 0).toFixed(2)}`,
+            formatCUP(x.productAmount || 0),
+            formatCUP(x.deliveryCharge || 0),
             x.paymentType || 'N/A'
           ]);
 
@@ -1518,8 +1429,8 @@ export function RevisionPage() {
               area: 'Todos',
               store: 'Todas',
               driver: 'Todos',
-              fechaInicio: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-              fechaFin: new Date().toISOString().split('T')[0]
+              fechaInicio: toLocalISODate(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)),
+              fechaFin: toLocalISODate()
             })}
           >
             Limpiar Filtros
@@ -1887,10 +1798,10 @@ export function RevisionPage() {
                           </div>
                         </td>
                         <td className="px-6 py-4 text-xs font-bold text-right tabular-nums text-slate-700">
-                          ${(item.productAmount || 0).toFixed(2)}
+                          {formatCUP(item.productAmount || 0)}
                         </td>
                         <td className="px-6 py-4 text-xs font-bold text-right tabular-nums text-slate-700">
-                          ${(item.deliveryCharge || 0).toFixed(2)}
+                          {formatCUP(item.deliveryCharge || 0)}
                         </td>
                         <td className="px-6 py-4">
                           <span className="text-[10px] font-bold uppercase text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">{item.area || 'N/A'}</span>
@@ -1950,32 +1861,32 @@ export function RevisionPage() {
 
                                 <div className="border-t border-slate-100 pt-2">
                                   <span className="text-slate-400 block font-medium">Store Offer</span>
-                                  <span className="font-bold text-slate-700 tabular-nums">${(item.storeOffer || 0).toFixed(2)}</span>
+                                  <span className="font-bold text-slate-700 tabular-nums">{formatCUP(item.storeOffer || 0)}</span>
                                 </div>
                                 <div className="border-t border-slate-100 pt-2">
                                   <span className="text-slate-400 block font-medium">Processing Fee</span>
-                                  <span className="font-bold text-slate-700 tabular-nums">${(item.processingFee || 0).toFixed(2)}</span>
+                                  <span className="font-bold text-slate-700 tabular-nums">{formatCUP(item.processingFee || 0)}</span>
                                 </div>
                                 <div className="border-t border-slate-100 pt-2">
                                   <span className="text-slate-400 block font-medium">Store Admin Charge</span>
-                                  <span className="font-bold text-slate-700 tabular-nums">${(item.storeAdminCharge || 0).toFixed(2)}</span>
+                                  <span className="font-bold text-slate-700 tabular-nums">{formatCUP(item.storeAdminCharge || 0)}</span>
                                 </div>
                                 <div className="border-t border-slate-100 pt-2">
                                   <span className="text-slate-400 block font-medium">Extra Delivery Charge</span>
-                                  <span className="font-bold text-slate-700 tabular-nums">${(item.extraDeliveryCharge || 0).toFixed(2)}</span>
+                                  <span className="font-bold text-slate-700 tabular-nums">{formatCUP(item.extraDeliveryCharge || 0)}</span>
                                 </div>
 
                                 <div className="border-t border-slate-100 pt-2">
                                   <span className="text-slate-400 block font-medium">Driver Admin Charge</span>
-                                  <span className="font-bold text-slate-700 tabular-nums">${(item.driverAdminCharge || 0).toFixed(2)}</span>
+                                  <span className="font-bold text-slate-700 tabular-nums">{formatCUP(item.driverAdminCharge || 0)}</span>
                                 </div>
                                 <div className="border-t border-slate-100 pt-2">
                                   <span className="text-slate-400 block font-medium">Complementary Delivery</span>
-                                  <span className="font-bold text-slate-700 tabular-nums">${(item.complementaryDelivery || 0).toFixed(2)}</span>
+                                  <span className="font-bold text-slate-700 tabular-nums">{formatCUP(item.complementaryDelivery || 0)}</span>
                                 </div>
                                 <div className="border-t border-slate-100 pt-2">
                                   <span className="text-slate-400 block font-medium">Tax / Impuestos</span>
-                                  <span className="font-bold text-slate-700 tabular-nums">${(item.tax || 0).toFixed(2)}</span>
+                                  <span className="font-bold text-slate-700 tabular-nums">{formatCUP(item.tax || 0)}</span>
                                 </div>
                                 <div className="border-t border-slate-100 pt-2">
                                   <span className="text-slate-400 block font-medium">Promocode (Código Promo)</span>
@@ -2054,8 +1965,8 @@ export function RevisionPage() {
                       <td className="p-3">{x.deliveryDate}</td>
                       <td className="p-3 font-semibold">{x.driver}</td>
                       <td className="p-3">{x.store || x.negocio}</td>
-                      <td className="p-3 text-right font-bold">${x.productAmount?.toFixed(2)}</td>
-                      <td className="p-3 text-right font-bold">${x.deliveryCharge?.toFixed(2)}</td>
+                      <td className="p-3 text-right font-bold">{formatCUP(x.productAmount || 0)}</td>
+                      <td className="p-3 text-right font-bold">{formatCUP(x.deliveryCharge || 0)}</td>
                     </tr>
                   ))}
                 </tbody>

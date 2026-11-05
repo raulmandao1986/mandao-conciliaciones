@@ -23,13 +23,24 @@ import {
   Loader2,
   FileSpreadsheet,
   Download,
-  Printer
+  Printer,
+  Mail
 } from 'lucide-react';
 import { SlideOver } from '../../design-system/primitives/SlideOver';
+import { diffCambios, datosLegibles } from '../../lib/auditDiff';
+import { tomarEdicionPendiente } from '../../lib/conciliacion/catalogoEntidad';
+
+// Etiquetas de los campos para el Log de Auditoría (antes / después).
+const ETIQUETAS_LOG: Record<string, string> = {
+  name: 'Nombre', ci: 'CI', phone: 'Teléfono', email: 'Correo', fiscal_card: 'Tarjeta Fiscal',
+  fiscal_account: 'Cuenta Fiscal', payment_method: 'Vía de Pago', backpack_type: 'Tipo de Mochila',
+  start_date: 'Fecha Alta', end_date: 'Fecha Baja', area_id: 'Área', comments: 'Comentarios', active: 'Estado',
+};
 import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
 import { BulkImportModal } from './components/BulkImportModal';
+import { toLocalISODate } from '../../lib/formatters';
 
 interface AreaOption {
   id: string;
@@ -42,6 +53,7 @@ interface MessengerRecord {
   nombre: string;
   ci: string;
   telefono: string;
+  correo: string; // para enviar la conciliación por correo (migración 2026-10-27d)
   tarjetaFiscal: string;
   cuentaFiscal: string;
   viaPago: string;
@@ -101,10 +113,13 @@ export function GestionMensajerosPage() {
 
   const loadMessengers = async () => {
     setLoading(true);
-    const { data: rows, error } = await supabase
-      .from('messengers')
-      .select('messenger_id, name, ci, phone, fiscal_card, fiscal_account, payment_method, backpack_type, start_date, end_date, area_id, comments, active, areas(name)')
-      .order('name', { ascending: true });
+    const base = 'messenger_id, name, ci, phone, fiscal_card, fiscal_account, payment_method, backpack_type, start_date, end_date, area_id, comments, active, areas(name)';
+    const query = (cols: string) => supabase.from('messengers').select(cols).order('name', { ascending: true });
+    let { data: rows, error } = await query(`${base}, email`);
+    // Sin la migración 2026-10-27d la columna email no existe: se carga sin ella.
+    const sinEmail = !!error && /email/.test(error.message || '');
+    if (sinEmail) ({ data: rows, error } = await query(base));
+    setConCorreo(!sinEmail);
     if (error) {
       console.error('Error fetching messengers:', error.message);
       setLoading(false);
@@ -115,6 +130,7 @@ export function GestionMensajerosPage() {
       nombre: m.name,
       ci: m.ci || '',
       telefono: m.phone || '',
+      correo: m.email || '',
       tarjetaFiscal: m.fiscal_card || '',
       cuentaFiscal: m.fiscal_account || '',
       viaPago: m.payment_method || '',
@@ -142,17 +158,19 @@ export function GestionMensajerosPage() {
     nombre: '',
     ci: '',
     telefono: '',
+    correo: '',
     tarjetaFiscal: '',
     cuentaFiscal: '',
     viaPago: 'Transferencia',
     tipoMochila: 'Grande',
-    fechaAlta: new Date().toISOString().split('T')[0],
+    fechaAlta: toLocalISODate(),
     fechaBaja: '',
     estado: 'activo' as 'activo' | 'bloqueado',
     areaId: areas[0]?.id || '',
     comentarios: ''
   });
   const [formData, setFormData] = useState<any>(emptyForm());
+  const [conCorreo, setConCorreo] = useState(true);
 
   // Filter State
   const [filters, setFilters] = useState({
@@ -216,7 +234,7 @@ export function GestionMensajerosPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `listado_mensajeros_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `listado_mensajeros_${toLocalISODate()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -305,11 +323,12 @@ export function GestionMensajerosPage() {
       nombre: messenger.nombre,
       ci: messenger.ci,
       telefono: messenger.telefono,
+      correo: messenger.correo || '',
       tarjetaFiscal: messenger.tarjetaFiscal,
       cuentaFiscal: messenger.cuentaFiscal,
       viaPago: messenger.viaPago || 'Transferencia',
       tipoMochila: messenger.tipoMochila || 'Grande',
-      fechaAlta: messenger.fechaAlta || new Date().toISOString().split('T')[0],
+      fechaAlta: messenger.fechaAlta || toLocalISODate(),
       fechaBaja: messenger.fechaBaja || '',
       estado: messenger.estado,
       areaId: messenger.areaId,
@@ -318,6 +337,18 @@ export function GestionMensajerosPage() {
     setShowHelp(false);
     setIsFormOpen(true);
   };
+
+  // Valores legibles en el Log: nombre del Área y Activo/Bloqueado.
+  const valorLog = (campo: string, v: unknown) =>
+    campo === 'area_id' ? (areas.find(a => a.id === v)?.nombre || v) : campo === 'active' ? (v ? 'Activo' : 'Bloqueado') : v;
+
+  // Llegada desde Conciliación ("Modificar información"): abre su formulario.
+  useEffect(() => {
+    if (data.length === 0) return;
+    const id = tomarEdicionPendiente('mensajeros');
+    const rec = id ? data.find(m => m.id === id) : null;
+    if (rec) handleEdit(rec);
+  }, [data]);
 
   const handleNew = () => {
     setSelectedMessenger(null);
@@ -334,6 +365,7 @@ export function GestionMensajerosPage() {
         name: formData.nombre,
         ci: formData.ci,
         phone: formData.telefono,
+        ...(conCorreo ? { email: (formData.correo || '').trim() || null } : {}),
         fiscal_card: formData.tarjetaFiscal || null,
         fiscal_account: formData.cuentaFiscal || null,
         payment_method: formData.viaPago,
@@ -347,12 +379,13 @@ export function GestionMensajerosPage() {
       };
 
       if (selectedMessenger) {
+        const { data: previo } = await supabase.from('messengers').select('*').eq('messenger_id', selectedMessenger.id).maybeSingle();
         const { error } = await supabase.from('messengers').update(payload).eq('messenger_id', selectedMessenger.id);
         if (error) throw error;
         logAuditEvent('Gestion_Mensajeros', 'Mensajero Actualizado', {
           id: selectedMessenger.id,
           nombre: formData.nombre,
-          area: formData.areaId
+          cambios: diffCambios(previo, payload, ETIQUETAS_LOG, valorLog),
         });
       } else {
         const { data: inserted, error } = await supabase.from('messengers').insert(payload).select('messenger_id').single();
@@ -360,7 +393,7 @@ export function GestionMensajerosPage() {
         logAuditEvent('Gestion_Mensajeros', 'Mensajero Creado', {
           id: inserted?.messenger_id,
           nombre: formData.nombre,
-          area: formData.areaId
+          datos: datosLegibles(payload, ETIQUETAS_LOG, valorLog),
         });
       }
       setIsFormOpen(false);
@@ -382,11 +415,13 @@ export function GestionMensajerosPage() {
     if (!messengerIdToDelete) return;
     try {
       const target = data.find(m => m.id === messengerIdToDelete);
+      const { data: previo } = await supabase.from('messengers').select('*').eq('messenger_id', messengerIdToDelete).maybeSingle();
       const { error } = await supabase.from('messengers').delete().eq('messenger_id', messengerIdToDelete);
       if (error) throw error;
       logAuditEvent('Gestion_Mensajeros', 'Mensajero Eliminado', {
         id: messengerIdToDelete,
-        nombre: target?.nombre || messengerIdToDelete
+        nombre: target?.nombre || messengerIdToDelete,
+        datos: previo ? datosLegibles(previo, ETIQUETAS_LOG, valorLog) : undefined,
       });
       await loadMessengers();
     } catch (err: any) {
@@ -672,6 +707,7 @@ export function GestionMensajerosPage() {
                <div className="space-y-4">
                   <DetailItem icon={IdCard} label="CI" value={selectedMessenger?.ci} />
                   <DetailItem icon={Phone} label="Teléfono" value={selectedMessenger?.telefono} />
+                  <DetailItem icon={Mail} label="Correo" value={selectedMessenger?.correo} />
                   <DetailItem icon={MapPin} label="Área" value={selectedMessenger?.areaNombre} />
                   <DetailItem icon={Bike} label="Tipo de Mochila" value={selectedMessenger?.tipoMochila || 'Grande'} />
                   <DetailItem icon={Calendar} label="Fecha Alta" value={selectedMessenger?.fechaAlta} />
@@ -798,6 +834,17 @@ export function GestionMensajerosPage() {
                       required
                       placeholder="Ej: 53123456"
                    />
+                   {conCorreo && (
+                     <TextField
+                        label="Correo"
+                        type="email"
+                        value={formData.correo || ''}
+                        onChange={(e) => setFormData(prev => ({ ...prev, correo: e.target.value }))}
+                        placeholder="mensajero@correo.com"
+                        hint="Se usa para enviarle su conciliación. Varios: sepárelos con coma."
+                        containerClassName="sm:col-span-2"
+                     />
+                   )}
                 </div>
              </div>
           </FormSection>

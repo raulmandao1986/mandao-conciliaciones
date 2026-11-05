@@ -23,6 +23,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../../lib/utils';
 import { logAuditEvent } from '../../lib/supabase';
+import { toLocalISODate } from '../../lib/formatters';
 
 interface ScheduledPayout {
   id: string;
@@ -110,7 +111,7 @@ export function PlanificacionPagosPage() {
   // Scheduling Form
   const [schedRecipient, setSchedRecipient] = useState('');
   const [schedType, setSchedType] = useState<'negocio' | 'mensajero'>('negocio');
-  const [schedDate, setSchedDate] = useState(new Date(Date.now() + 24 * 3600 * 1000).toISOString().split('T')[0]);
+  const [schedDate, setSchedDate] = useState(toLocalISODate(new Date(Date.now() + 24 * 3600 * 1000)));
   const [schedAmount, setSchedAmount] = useState('100.00');
   const [schedAccount, setSchedAccount] = useState('');
 

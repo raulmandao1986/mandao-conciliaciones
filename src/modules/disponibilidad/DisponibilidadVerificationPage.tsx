@@ -28,6 +28,9 @@ import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
 import { useAuth } from '../../lib/auth';
+import { parseSheetDate, normalizeSheetDateStr } from '../../lib/sheetDateParser';
+import { locateHeaderRow, DISPONIBILIDAD_HEADERS, columnLetter } from '../../lib/sheetHeaders';
+import { toLocalISODate } from '../../lib/formatters';
 
 const NOTIFY_EMAILS_STORAGE_KEY = 'mandao_notify_emails';
 
@@ -52,70 +55,14 @@ function normalizeHeader(h: string): string {
     .replace(/[^a-z0-9]/g, ''); // alphanumeric only
 }
 
-const buildHeaderMap = (headersRow: string[]): Record<string, number> => {
-  const map: Record<string, number> = {};
-  if (!headersRow) return map;
-  headersRow.forEach((val, idx) => {
-    const normalized = normalizeHeader(val);
-    if (normalized) {
-      map[normalized] = idx;
-    }
-  });
-  return map;
-};
+// buildHeaderMap / ubicación de la fila de encabezados: src/lib/sheetHeaders.ts
 
-// Precise date parsing helper
-function parseDateString(dateStr: string): Date | null {
-  if (!dateStr) return null;
-  const str = String(dateStr).trim();
-  if (!str) return null;
-
-  // Try matching DD/MM/YYYY or DD-MM-YYYY first (standard Spanish/Cuban format) with optional HH:MM:SS
-  const dmY = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
-  if (dmY) {
-    const day = parseInt(dmY[1], 10);
-    const month = parseInt(dmY[2], 10);
-    const year = parseInt(dmY[3], 10);
-    const hour = dmY[4] ? parseInt(dmY[4], 10) : 0;
-    const minute = dmY[5] ? parseInt(dmY[5], 10) : 0;
-    const second = dmY[6] ? parseInt(dmY[6], 10) : 0;
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      return new Date(year, month - 1, day, hour, minute, second);
-    }
-  }
-
-  // Try matching YYYY-MM-DD or YYYY/MM/DD with optional HH:MM:SS
-  const Ymd = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
-  if (Ymd) {
-    const year = parseInt(Ymd[1], 10);
-    const month = parseInt(Ymd[2], 10);
-    const day = parseInt(Ymd[3], 10);
-    const hour = Ymd[4] ? parseInt(Ymd[4], 10) : 0;
-    const minute = Ymd[5] ? parseInt(Ymd[5], 10) : 0;
-    const second = Ymd[6] ? parseInt(Ymd[6], 10) : 0;
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      return new Date(year, month - 1, day, hour, minute, second);
-    }
-  }
-
-  // Fallback to standard JS parsing
-  const d = new Date(str);
-  if (!isNaN(d.getTime())) return d;
-
-  return null;
-}
-
-function formatDateToYYYYMMDD(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
-function normalizeDateStr(dateStr: string): string {
-  const parsed = parseDateString(dateStr);
-  return parsed ? formatDateToYYYYMMDD(parsed) : '';
-}
+// Parser de fechas de Sheet consolidado en src/lib/sheetDateParser.ts
+// (2026-09-30) — ver esa nota, y VerificationPage.tsx (Dispatcher), para
+// el detalle de por qué se centralizó (antes caía a `new Date(str)` para
+// formatos no reconocidos, ambiguo/dependiente del motor JS).
+const parseDateString = parseSheetDate;
+const normalizeDateStr = normalizeSheetDateStr;
 
 function parseCellNumber(val: any): number {
   if (val === undefined || val === null) return 0;
@@ -269,8 +216,8 @@ export function DisponibilidadVerificationPage() {
   const [selectedAreaId, setSelectedAreaId] = useState<string>('');
 
   const [formData, setFormData] = useState({
-    fechaInicio: new Date().toISOString().split('T')[0],
-    fechaFin: new Date().toISOString().split('T')[0],
+    fechaInicio: toLocalISODate(),
+    fechaFin: toLocalISODate(),
   });
 
   const loadAreas = async () => {
@@ -454,15 +401,19 @@ export function DisponibilidadVerificationPage() {
         throw new Error(`La hoja "${dispsTab}" está vacía o no tiene cabeceras.`);
       }
 
-      const headers = rows[0] || [];
       addLog('info', 'Analizando cabeceras dinámicas de Google Sheets...');
-      const dispsMap = buildHeaderMap(headers);
+      // La fila de encabezados no siempre es la 1 (hay documentos con una
+      // segunda fila de encabezados y datos desde la fila 3).
+      const headerInfo = locateHeaderRow(rows, DISPONIBILIDAD_HEADERS);
+      const dispsMap = headerInfo.headerMap;
+      const mensajeroCol = ['mensajero', 'driver'].map(k => dispsMap[k]).find(i => i !== undefined);
+      addLog('info', `Encabezados en la fila ${headerInfo.headerIndex + 1}; los datos se leen desde la fila ${headerInfo.firstDataRow}. Columna "Mensajero": ${mensajeroCol !== undefined ? columnLetter(mensajeroCol) : 'no encontrada'}.`);
 
       // Map rows to structured objects
-      const allDisps = rows.slice(1).map((row: any[], idx: number) => {
-        // Skip if the entire row is completely empty
+      const allDisps = rows.slice(headerInfo.headerIndex + 1).map((row: any[], idx: number) => {
+        // Skip if the entire row is completely empty, or repeats the headers
         const isRowCompletelyEmpty = row.every(cell => isCellEmpty(cell));
-        if (isRowCompletelyEmpty) {
+        if (isRowCompletelyEmpty || headerInfo.isHeaderLike(row)) {
           return null;
         }
 
@@ -502,7 +453,7 @@ export function DisponibilidadVerificationPage() {
           amountToPay,
           province,
           comment,
-          sheetRow: idx + 2,
+          sheetRow: idx + headerInfo.firstDataRow,
 
           // Legacy fields compatibility for existing views
           mensajero: messengerName,
@@ -533,6 +484,24 @@ export function DisponibilidadVerificationPage() {
       // Run validations
       addLog('info', 'Paso 2: Iniciando análisis de consistencia de los datos...');
       const incidencesList: any[] = [];
+
+      // DISP-002 ampliada (2026-09-30): un registro con fecha no vacía pero
+      // en formato no reconocido queda excluido de `filteredDisps` por el
+      // filtro de rango de arriba, y nunca llegaba a validarse más abajo —
+      // se perdía en silencio. Se revisa sobre `allDisps` (antes del
+      // filtro) para no perder de vista ninguno.
+      allDisps
+        .filter((d: any) => !isCellEmpty(d.rawFecha) && !normalizeDateStr(d.fecha))
+        .forEach((d: any) => {
+          incidencesList.push({
+            type: 'data_error',
+            severity: 'critica',
+            ruleCode: 'DISP-002',
+            detail: `[Fila: ${d.sheetRow}] La fecha "${d.rawFecha}" tiene un formato no reconocido (se espera dd/mm/yyyy) — el registro no se incluyó en el rango seleccionado.`,
+            id: d.orden || `Fila-${d.sheetRow}`,
+            record: d
+          });
+        });
 
       filteredDisps.forEach((d: any) => {
         // Validate date

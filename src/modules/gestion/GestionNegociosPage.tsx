@@ -30,10 +30,22 @@ import {
   X
 } from 'lucide-react';
 import { SlideOver } from '../../design-system/primitives/SlideOver';
+import { diffCambios, datosLegibles } from '../../lib/auditDiff';
+import { tomarEdicionPendiente } from '../../lib/conciliacion/catalogoEntidad';
+
+// Etiquetas de los campos para el Log de Auditoría (antes / después).
+const ETIQUETAS_LOG: Record<string, string> = {
+  name: 'Negocio', payment_method: 'Método de Pago', active: 'Estado', area_id: 'Área', contact_name: 'Contacto',
+  phone: 'Teléfono', email: 'Correo', contract_name: 'Nombre Contrato', tax_id: 'NIT', address: 'Dirección',
+  external_url: 'Enlace externo', cup_account: 'Cuenta CUP', personal_account: 'Cuenta Personal',
+  check_account: 'Cuenta Cheque', exterior_zelle: 'Zelle', exterior_tropipay: 'Tropipay',
+  exterior_transfer: 'Transferencia Exterior',
+};
 import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
 import { BulkImportModal } from './components/BulkImportModal';
+import { toLocalISODate } from '../../lib/formatters';
 
 const BANCOS = ['BANMET', 'BPA', 'BANDEC'];
 const FALLBACK_METODOS_PAGO = ['Transferencia', 'Transferencia-Exterior', 'Transferencia-Especial', 'Transferencia-Efectivo', 'Transferencia-Saldo'];
@@ -300,7 +312,7 @@ export function GestionNegociosPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `listado_negocios_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `listado_negocios_${toLocalISODate()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -408,6 +420,18 @@ export function GestionNegociosPage() {
     setIsFormOpen(true);
   };
 
+  // Valores legibles en el Log: nombre del Área y Activo/Bloqueado.
+  const valorLog = (campo: string, v: unknown) =>
+    campo === 'area_id' ? (areas.find(a => a.id === v)?.nombre || v) : campo === 'active' ? (v ? 'Activo' : 'Bloqueado') : v;
+
+  // Llegada desde Conciliación ("Modificar información"): abre su formulario.
+  useEffect(() => {
+    if (data.length === 0) return;
+    const id = tomarEdicionPendiente('negocios');
+    const rec = id ? data.find(b => b.id === id) : null;
+    if (rec) handleEdit(rec);
+  }, [data]);
+
   const handleNew = () => {
     setSelectedBusiness(null);
     setFormData(emptyForm());
@@ -441,12 +465,13 @@ export function GestionNegociosPage() {
       };
 
       if (selectedBusiness) {
+        const { data: previo } = await supabase.from('businesses').select('*').eq('business_id', selectedBusiness.id).maybeSingle();
         const { error } = await supabase.from('businesses').update(payload).eq('business_id', selectedBusiness.id);
         if (error) throw error;
         logAuditEvent('Gestion_Negocios', 'Negocio Actualizado', {
           id: selectedBusiness.id,
           negocio: formData.negocio,
-          area: formData.areaId
+          cambios: diffCambios(previo, payload, ETIQUETAS_LOG, valorLog),
         });
       } else {
         const { data: inserted, error } = await supabase.from('businesses').insert(payload).select('business_id').single();
@@ -454,7 +479,7 @@ export function GestionNegociosPage() {
         logAuditEvent('Gestion_Negocios', 'Negocio Creado', {
           id: inserted?.business_id,
           negocio: formData.negocio,
-          area: formData.areaId
+          datos: datosLegibles(payload, ETIQUETAS_LOG, valorLog),
         });
       }
       setIsFormOpen(false);
@@ -476,11 +501,13 @@ export function GestionNegociosPage() {
     if (!businessIdToDelete) return;
     try {
       const target = data.find(b => b.id === businessIdToDelete);
+      const { data: previo } = await supabase.from('businesses').select('*').eq('business_id', businessIdToDelete).maybeSingle();
       const { error } = await supabase.from('businesses').delete().eq('business_id', businessIdToDelete);
       if (error) throw error;
       logAuditEvent('Gestion_Negocios', 'Negocio Eliminado', {
         id: businessIdToDelete,
-        negocio: target?.negocio || businessIdToDelete
+        negocio: target?.negocio || businessIdToDelete,
+        datos: previo ? datosLegibles(previo, ETIQUETAS_LOG, valorLog) : undefined,
       });
       await loadBusinesses();
     } catch (err: any) {

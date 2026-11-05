@@ -4,6 +4,10 @@
 // El Toque (https://tasas.eltoque.com/docs/) contra la tabla
 // public.exchange_rates, en la fila de referencia "Tasa Informal (El Toque)".
 //
+// El Toque publica CUP por 1 USD (ej. 500); el sistema guarda la tasa en
+// USD por 1 CUP (ej. 0.002, confirmado por el usuario 2026-10-01), así que
+// se guarda el inverso: rate_cup = 1 / tasa_el_toque.
+//
 // Se invoca de dos formas:
 //   1. pg_cron (diario) -> header 'x-cron-secret' == secreto CRON_SECRET.
 //   2. Botón manual en RazonCambioPage.tsx -> JWT de sesión de un usuario
@@ -87,6 +91,9 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: 'La respuesta de El Toque no trae una tasa USD válida', raw: payload }, 502);
   }
 
+  // El Toque: CUP por 1 USD -> sistema: USD por 1 CUP.
+  const usdPorCup = Number((1 / usdRate).toFixed(8));
+
   // --- Upsert de la fila de referencia (no toca cuál tasa está "activa") ---
   const now = new Date().toISOString();
   const { data: existing } = await admin
@@ -99,17 +106,17 @@ Deno.serve(async (req) => {
     const { error } = await admin
       .from('exchange_rates')
       .update({
-        rate_cup: usdRate,
+        rate_cup: usdPorCup,
         updated_at: now,
-        description: `Sincronizado automáticamente desde la API de El Toque (tasas.eltoque.com) — ${now}.`,
+        description: `Sincronizado desde El Toque (tasas.eltoque.com): 1 USD = ${usdRate} CUP — ${now}.`,
       })
       .eq('exchange_rate_id', existing.exchange_rate_id);
     if (error) return jsonResponse({ error: error.message }, 500);
   } else {
     const { error } = await admin.from('exchange_rates').insert({
       name: RATE_NAME,
-      rate_cup: usdRate,
-      description: 'Sincronizado automáticamente desde la API de El Toque (tasas.eltoque.com).',
+      rate_cup: usdPorCup,
+      description: `Sincronizado desde El Toque (tasas.eltoque.com): 1 USD = ${usdRate} CUP — ${now}.`,
       active: false,
     });
     if (error) return jsonResponse({ error: error.message }, 500);
@@ -118,8 +125,8 @@ Deno.serve(async (req) => {
   await admin.from('audit_logs').insert({
     module: 'Configuraciones',
     action: 'Tasa El Toque Sincronizada',
-    details: { rate_cup: usdRate, trigger: isCron ? 'cron' : 'manual' },
+    details: { rate_cup: usdPorCup, eltoque_cup_por_usd: usdRate, trigger: isCron ? 'cron' : 'manual' },
   });
 
-  return jsonResponse({ ok: true, rate_cup: usdRate });
+  return jsonResponse({ ok: true, rate_cup: usdPorCup, eltoque_cup_por_usd: usdRate });
 });

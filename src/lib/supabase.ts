@@ -6,21 +6,33 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = process.env.SUPABASE_URL as string;
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY as string;
 
-if (!supabaseUrl || !supabaseAnonKey) {
+// En Netlify se definen como variables de entorno del sitio (se inyectan al
+// compilar, ver vite.config.ts). Sin ellas, main.tsx muestra un aviso en
+// vez de una página en blanco.
+export const SUPABASE_CONFIGURADO = !!(supabaseUrl && supabaseAnonKey);
+
+if (!SUPABASE_CONFIGURADO) {
   console.error(
-    '[Supabase] Faltan SUPABASE_URL / SUPABASE_ANON_KEY en el .env.local. ' +
+    '[Supabase] Faltan SUPABASE_URL / SUPABASE_ANON_KEY (.env.local en local, variables de entorno en Netlify). ' +
     'El cliente no podrá conectar hasta que se configuren.'
   );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const supabase = createClient(
+  SUPABASE_CONFIGURADO ? supabaseUrl : 'https://sin-configurar.supabase.co',
+  SUPABASE_CONFIGURADO ? supabaseAnonKey : 'sin-configurar'
+);
 
 // Scopes de Google que el sistema necesita sobre la cuenta del usuario
 // autenticado (RN: lectura directa de Google Sheets + envío de correo
 // desde la cuenta del propio usuario, NO desde un service account).
-// Se mantienen exactamente los mismos que tenía Firebase Auth.
+// Se mantienen los mismos que tenía Firebase Auth, más `drive` (2026-10-07)
+// para guardar los PDF de Conciliación en la carpeta configurada en
+// Configuración -> Data (`drive.file` no basta: solo permite carpetas
+// creadas por la propia app). Requiere que la Google Drive API esté
+// habilitada y el scope agregado en la pantalla de consentimiento OAuth.
 export const GOOGLE_SCOPES =
-  'https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/gmail.send';
+  'https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/drive';
 
 // Dominio de Google Workspace autorizado a usar el sistema. La barrera
 // real debe estar en la pantalla de consentimiento OAuth de Google Cloud
@@ -90,19 +102,26 @@ export const reconnectGoogle = signInWithGoogle;
 // deja en sessionStorage bajo la MISMA key que usaba Firebase, para que
 // el resto del código (que hoy hace sessionStorage.getItem('google_access_token'))
 // siga funcionando sin cambios mientras se migran esos archivos.
+//
+// Supabase solo entrega provider_token justo después del login con Google:
+// cuando renueva su propia sesión (cada ~1 h) la sesión nueva ya no lo trae.
+// Antes eso borraba el token guardado y Enviar / Drive fallaban con "No hay
+// sesión de Google activa" (2026-11-05). Ahora se conserva el último token
+// con su vencimiento (los de Google duran 1 h); se borra solo al cerrar sesión.
+export const GOOGLE_TOKEN_EXP_KEY = 'google_access_token_exp';
 export const syncGoogleTokenToSessionStorage = async () => {
   const { data } = await supabase.auth.getSession();
   const token = data.session?.provider_token;
-  if (token) {
+  if (token && token !== sessionStorage.getItem('google_access_token')) {
     sessionStorage.setItem('google_access_token', token);
-  } else {
-    sessionStorage.removeItem('google_access_token');
+    sessionStorage.setItem(GOOGLE_TOKEN_EXP_KEY, String(Date.now() + 55 * 60 * 1000));
   }
-  return token ?? null;
+  return token ?? sessionStorage.getItem('google_access_token');
 };
 
 export const logout = async () => {
   sessionStorage.removeItem('google_access_token');
+  sessionStorage.removeItem(GOOGLE_TOKEN_EXP_KEY);
   const { error } = await supabase.auth.signOut();
   if (error) throw error;
 };

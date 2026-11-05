@@ -26,6 +26,16 @@ import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
+import { parseSheetDate, normalizeSheetDateStr } from '../../lib/sheetDateParser';
+import { loadActiveDispatcherRules, resolveExemptions, readRuleColumns, presentRuleColumns, ORDER_COLUMNS, RULE_COLUMN_KEYS, ACTIONS, describeCondition, type DispatcherRule } from '../../lib/dispatcherRules';
+// El dispatcher siempre registra los montos en CUP (confirmado por el
+// usuario 2026-09-30) — ver la nota equivalente en dispatcher/RevisionPage.tsx.
+import { formatCurrency, toLocalISODate } from '../../lib/formatters';
+import { locateHeaderRow, DISPONIBILIDAD_HEADERS } from '../../lib/sheetHeaders';
+import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
+// Lectura de filas de "Orders" compartida con la Revisión (src/lib/dispatcherOrders.ts).
+import { parseCellNumber, mapOrderRow as mapRowToRecord, orderToDbRow } from '../../lib/dispatcherOrders';
+const formatCUP = (value: number) => formatCurrency(value, 'CUP');
 
 // Persistencia local (por navegador) de los correos de notificación.
 // Firestore tenía un doc global 'settings/dispatcher_config'; Supabase
@@ -87,47 +97,12 @@ const buildHeaderMap = (headersRow: string[]): Record<string, number> => {
   return map;
 };
 
-// Precise date parsing helper
-function parseDateString(dateStr: string): Date | null {
-  if (!dateStr) return null;
-  const str = String(dateStr).trim();
-  if (!str) return null;
-
-  // Try matching DD/MM/YYYY or DD-MM-YYYY first (standard Spanish/Cuban format)
-  const dmY = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
-  if (dmY) {
-    const day = parseInt(dmY[1], 10);
-    const month = parseInt(dmY[2], 10);
-    const year = parseInt(dmY[3], 10);
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      return new Date(year, month - 1, day);
-    }
-  }
-
-  // Try matching YYYY-MM-DD or YYYY/MM/DD
-  const Ymd = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-  if (Ymd) {
-    const year = parseInt(Ymd[1], 10);
-    const month = parseInt(Ymd[2], 10);
-    const day = parseInt(Ymd[3], 10);
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      return new Date(year, month - 1, day);
-    }
-  }
-
-  // Fallback to standard JS parsing
-  const d = new Date(str);
-  if (!isNaN(d.getTime())) return d;
-
-  return null;
-}
-
-function formatDateToYYYYMMDD(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
+// Parser de fechas de Sheet consolidado en src/lib/sheetDateParser.ts
+// (2026-09-30) — antes esta función caía a `new Date(str)` para formatos
+// no reconocidos, lo cual es ambiguo/depende del motor JS y fue la causa
+// real de que algunas órdenes del Dispatcher quedaran fuera del rango de
+// fechas seleccionado sin ningún aviso (RN corregida, ver más abajo).
+const parseDateString = parseSheetDate;
 
 // El body de error de Google (JSON: { error: { code, message, status } })
 // trae el motivo real (API deshabilitada, scope insuficiente, sin acceso al
@@ -145,64 +120,7 @@ async function extractGoogleApiError(res: Response): Promise<string> {
   return res.statusText || `HTTP ${res.status}`;
 }
 
-function normalizeDateStr(dateStr: string): string {
-  const parsed = parseDateString(dateStr);
-  return parsed ? formatDateToYYYYMMDD(parsed) : '';
-}
-
-function parseCellNumber(val: any): number {
-  if (val === undefined || val === null) return 0;
-  if (typeof val === 'number') return val;
-  let str = String(val).trim();
-  if (str === '') return 0;
-
-  // Remove currency symbols, spaces, percent signs
-  str = str.replace(/[$€%\s]/g, '');
-
-  if (str.includes(',') && str.includes('.')) {
-    if (str.indexOf('.') < str.indexOf(',')) {
-      // Spanish style: Dot is thousands separator, comma is decimal (e.g. 1.234,56 or 2.30,00)
-      const parts = str.split(',');
-      const integerPartWithDots = parts[0];
-      const decimalPart = parts[1] || '';
-
-      const segments = integerPartWithDots.split('.');
-      let integerPart = segments[0] || '';
-      for (let i = 1; i < segments.length; i++) {
-        const seg = segments[i];
-        if (i === segments.length - 1) {
-          // Last segment before comma (e.g., "30" in "2.30"). Pad if needed to 3 digits
-          if (seg.length < 3) {
-            integerPart += seg.padEnd(3, '0');
-          } else {
-            integerPart += seg;
-          }
-        } else {
-          integerPart += seg.padStart(3, '0');
-        }
-      }
-      str = integerPart + '.' + decimalPart;
-    } else {
-      // English style: Comma is thousands separator, dot is decimal (e.g. 1,234.56)
-      str = str.replace(/,/g, '');
-    }
-  } else if (str.includes(',')) {
-    // Only comma exists (e.g. 425,00 or 1,234)
-    const parts = str.split(',');
-    const decimals = parts[parts.length - 1];
-    
-    // If the part after the last comma has 1 or 2 digits, it is a decimal separator
-    if (decimals.length === 1 || decimals.length === 2) {
-      str = parts.slice(0, -1).join('') + '.' + decimals;
-    } else {
-      // Otherwise it's thousands separator (e.g. 1,123)
-      str = str.replace(/,/g, '');
-    }
-  }
-
-  const n = parseFloat(str);
-  return isNaN(n) ? 0 : n;
-}
+const normalizeDateStr = normalizeSheetDateStr;
 
 function isCellEmpty(val: any): boolean {
   if (val === undefined || val === null) return true;
@@ -234,60 +152,6 @@ function isCellEmptyOrError(val: any): boolean {
   );
 }
 
-function mapRowToRecord(row: any[], headerMap: Record<string, number>, sheetRow?: number) {
-  const getVal = (keys: string[]) => {
-    for (const key of keys) {
-      const idx = headerMap[key];
-      if (idx !== undefined && idx < row.length) {
-        return row[idx];
-      }
-    }
-    return '';
-  };
-
-  const getNum = (keys: string[]) => {
-    const val = getVal(keys);
-    return parseCellNumber(val);
-  };
-
-  const orderId = getVal(['orderid', 'orden', 'noorden', 'id', 'numeroorden', 'norden']) || '';
-  
-  return {
-    orden: orderId,
-    orderId: orderId,
-    sheetRow,
-    deliveryDate: getVal(['deliverydate', 'fechadeentrega', 'fechaentrega', 'fecha', 'date']) || '',
-    orderDate: getVal(['orderdate', 'fechadeorden', 'fechaorden']) || '',
-    driver: getVal(['driver', 'mensajero', 'repartidor', 'conductor']) || 'No asignado',
-    negocio: getVal(['store', 'negocio', 'establecimiento', 'restaurante', 'comercio']) || 'N/A',
-    cliente: getVal(['customer', 'client', 'cliente']) || '',
-    customerNumber: getVal(['customernumber', 'numerodetelefono', 'telefono', 'telefonocliente', 'tel']) || '',
-    monto: getNum(['monto', 'amount', 'total', 'montototal']),
-    deliveryCharge: getNum(['deliverycharge', 'costodeentrega', 'cargoentrega', 'delivery']),
-    extraDeliveryCharge: getNum(['extradeliverycharge', 'extradelivery', 'cargoextra', 'masdistancia']),
-    driverAdminCharge: getNum(['driveradmincharge', 'driveradmin', 'comisionmensajero']),
-    complementaryDelivery: getNum(['complementarydelivery', 'complementario', 'entregaenlacasilla']),
-    productAmount: getNum(['productamount', 'montoproducto', 'montoarticulos', 'articulos', 'products']),
-    storeOffer: getNum(['storeoffer', 'ofertaestablecimiento', 'ofertatienda', 'descuento']),
-    storeAdminCharge: getNum(['storeadmincharge', 'storeadmin', 'comisioncomercio', 'comisiontienda']),
-    processingFee: getNum(['processingfee', 'cargoprocesamiento', 'procesamiento', 'fee']),
-    transactionFee: getNum(['transactionfee', 'impuesto', 'tax', 'comisiontransaccion']),
-    promocode: getVal(['promocode', 'codigopromocional', 'promo', 'cupon']) || '0',
-    paymentType: getVal(['viapago', 'paymenttype', 'metododepago', 'formadepago', 'tipopago']) || 'Efectivo',
-    tipoOrden: getVal(['tipoorden', 'ordertype', 'tipoorden']) || 'Regular',
-    area: getVal(['area', 'zona', 'provincia', 'demarcacion']) || 'Habana',
-
-    // Raw cell strings for strict empty/dash verification
-    productAmountRaw: getVal(['productamount', 'montoproducto', 'montoarticulos', 'articulos', 'products']),
-    storeOfferRaw: getVal(['storeoffer', 'ofertaestablecimiento', 'ofertatienda', 'descuento']),
-    storeAdminChargeRaw: getVal(['storeadmincharge', 'storeadmin', 'comisioncomercio', 'comisiontienda']),
-    deliveryChargeRaw: getVal(['deliverycharge', 'costodeentrega', 'cargoentrega', 'delivery']),
-    extraDeliveryChargeRaw: getVal(['extradeliverycharge', 'extradelivery', 'cargoextra', 'masdistancia']),
-    driverAdminChargeRaw: getVal(['driveradmincharge', 'driveradmin', 'comisionmensajero']),
-    complementaryDeliveryRaw: getVal(['complementarydelivery', 'complementario', 'entregaenlacasilla'])
-  };
-}
-
 export function VerificationPage() {
   const { user } = useAuth();
   // El botón "Importar a la BD" solo puede ser visible para Super Admin/
@@ -309,6 +173,9 @@ export function VerificationPage() {
   const [history, setHistory] = useState<any[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  // Reglas de excepción vigentes (Configuración -> Reglas). Se recargan en
+  // cada verificación para que un cambio de regla aplique de inmediato.
+  const [dispatcherRules, setDispatcherRules] = useState<DispatcherRule[]>([]);
   const [logs, setLogs] = useState<{ id: string; t: string; lvl: 'info' | 'success' | 'warn' | 'error'; msg: string }[]>([]);
   const [toasts, setToasts] = useState<{ id: string; type: 'success' | 'error'; message: string }[]>([]);
 
@@ -350,8 +217,8 @@ export function VerificationPage() {
   const [orderPaymentMethods, setOrderPaymentMethods] = useState<{ nombre: string }[]>([]);
 
   const [formData, setFormData] = useState({
-    fechaInicio: new Date().toISOString().split('T')[0],
-    fechaFin: new Date().toISOString().split('T')[0],
+    fechaInicio: toLocalISODate(),
+    fechaFin: toLocalISODate(),
     tipo: 'habana'
   });
 
@@ -422,6 +289,7 @@ export function VerificationPage() {
     loadHistory();
     loadAreas();
     loadOrderPaymentMethods();
+    loadActiveDispatcherRules().then(({ rules }) => setDispatcherRules(rules));
   }, []);
 
   const handleAreaChange = (areaId: string) => {
@@ -524,6 +392,15 @@ export function VerificationPage() {
       addLog('info', `Usando catálogo de Métodos de Pago para Órdenes (${orderPaymentMethods.length} métodos activos, desde Configuración → Métodos de Pago).`);
       const activeMessengerMethods: any[] = orderPaymentMethods;
 
+      const rulesRes = await loadActiveDispatcherRules();
+      const activeRules = rulesRes.rules;
+      setDispatcherRules(activeRules);
+      if (rulesRes.fromFallback) {
+        addLog('warn', `No se pudieron leer las Reglas de excepción (${rulesRes.error}). Se aplican solo las reglas iniciales del sistema (Mandao Express, Recogida en el establecimiento, columnas opcionales).`);
+      } else {
+        addLog('info', `Aplicando ${activeRules.length} reglas de excepción activas (desde Configuración → Reglas).`);
+      }
+
       addLog('info', `Paso 1: Conectando con Google Sheets API v4. Consultando metadatos para el Spreadsheet ID: ...${spreadsheetId.slice(-8)}`);
       // 1. Fetch metadata first to get exact sheet titles
       let metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`, {
@@ -599,12 +476,22 @@ export function VerificationPage() {
       // Headers rows
       const ordersHeaders = ordersRows[0] || [];
       const cambiosHeaders = cambiosRows[0] || [];
-      const dispsHeaders = dispsRows[0] || [];
 
       addLog('info', 'Analizando y normalizando cabeceras dinámicas de Google Sheets...');
       const ordersMap = buildHeaderMap(ordersHeaders);
       const cambiosMap = buildHeaderMap(cambiosHeaders);
-      const dispsMap = buildHeaderMap(dispsHeaders);
+      // Disponibilidad puede traer una segunda fila de encabezados (datos
+      // desde la fila 3) — ver src/lib/sheetHeaders.ts.
+      const dispsHeaderInfo = locateHeaderRow(dispsRows, DISPONIBILIDAD_HEADERS);
+      const dispsMap = dispsHeaderInfo.headerMap;
+
+      // Columnas exceptuables presentes en la hoja: una columna que no existe
+      // como encabezado no se exige (evita marcar todas las filas).
+      const presentCols = presentRuleColumns(ordersMap);
+      const missingCols = RULE_COLUMN_KEYS.filter(c => !presentCols.has(c)).map(c => ORDER_COLUMNS[c].label);
+      if (missingCols.length > 0) {
+        addLog('warn', `La hoja "Orders" no tiene las columnas: ${missingCols.join(', ')}. No se validan.`);
+      }
 
       // Parse and map rows
       const allOrders = ordersRows.slice(1)
@@ -638,7 +525,8 @@ export function VerificationPage() {
         };
       }).filter((c: any) => !isCellEmptyOrError(c.orden));
 
-      const allDisps = dispsRows.slice(1).map((row: any[], idx: number) => {
+      const allDisps = dispsRows.slice(dispsHeaderInfo.headerIndex + 1).map((row: any[], idx: number) => {
+        if (dispsHeaderInfo.isHeaderLike(row)) return null;
         const getVal = (keys: string[]) => {
           for (const key of keys) {
             const idxKey = dispsMap[key];
@@ -656,9 +544,9 @@ export function VerificationPage() {
           monto: getNum(['monto', 'amount', 'pago']),
           detalle: getVal(['detalle', 'descripcion', 'nota']) || '',
           fecha: getVal(['fecha', 'date']) || '',
-          sheetRow: idx + 2
+          sheetRow: idx + dispsHeaderInfo.firstDataRow
         };
-      }).filter((d: any) => !isCellEmptyOrError(d.mensajero));
+      }).filter((d: any) => d && !isCellEmptyOrError(d.mensajero));
 
       // Filter by Date Range
       const startDateStr = formData.fechaInicio;
@@ -771,14 +659,14 @@ export function VerificationPage() {
 
             // 2. Monto de producto en Cambios vs Product Amount en Orders
             if (Math.abs(c.montoProducto - matchingOrder.productAmount) > 0.01) {
-              addLog('info', `Cambio detectado en Orden "${c.orden}": Monto de producto $${matchingOrder.productAmount.toFixed(2)} (Orders) → $${c.montoProducto.toFixed(2)} (Cambios).`);
-              addCambioDetectado(c.orden, 'Monto de Producto', `$${matchingOrder.productAmount.toFixed(2)}`, `$${c.montoProducto.toFixed(2)}`);
+              addLog('info', `Cambio detectado en Orden "${c.orden}": Monto de producto ${formatCUP(matchingOrder.productAmount)} (Orders) → ${formatCUP(c.montoProducto)} (Cambios).`);
+              addCambioDetectado(c.orden, 'Monto de Producto', formatCUP(matchingOrder.productAmount), formatCUP(c.montoProducto));
             }
 
             // 3. Monto de delivery en Cambios vs Delivery Charge en Orders
             if (Math.abs(c.montoDelivery - matchingOrder.deliveryCharge) > 0.01) {
-              addLog('info', `Cambio detectado en Orden "${c.orden}": Monto de delivery $${matchingOrder.deliveryCharge.toFixed(2)} (Orders) → $${c.montoDelivery.toFixed(2)} (Cambios).`);
-              addCambioDetectado(c.orden, 'Monto de Delivery', `$${matchingOrder.deliveryCharge.toFixed(2)}`, `$${c.montoDelivery.toFixed(2)}`);
+              addLog('info', `Cambio detectado en Orden "${c.orden}": Monto de delivery ${formatCUP(matchingOrder.deliveryCharge)} (Orders) → ${formatCUP(c.montoDelivery)} (Cambios).`);
+              addCambioDetectado(c.orden, 'Monto de Delivery', formatCUP(matchingOrder.deliveryCharge), formatCUP(c.montoDelivery));
             }
           }
         });
@@ -786,29 +674,37 @@ export function VerificationPage() {
 
       const cambiosDetectados = Object.values(cambiosDetectadosMap);
 
+      // RN-002 ampliada (2026-09-30): antes, una orden con "Delivery Date"
+      // no vacío pero en un formato no reconocido se descartaba en
+      // silencio al filtrar por rango (ni siquiera llegaba a
+      // `filteredOrders`) — esa fue la causa real de que algunas órdenes
+      // no llegaran a importarse sin ningún aviso. Se calcula sobre
+      // `allOrders` (antes del filtro de fechas) para no perder de vista
+      // ninguna, y se reporta como incidencia crítica en vez de
+      // desaparecer.
+      const dateFormatIncidences = allOrders
+        .filter((o: any) => o.orden && !isCellEmpty(o.deliveryDate) && !normalizeDateStr(o.deliveryDate))
+        .map((o: any) => ({
+          type: 'data_error' as const,
+          severity: 'critica' as const,
+          ruleCode: 'RN-002',
+          detail: `[Fila: ${o.sheetRow}] "Delivery Date" con formato no reconocido: "${o.deliveryDate}" (se espera dd/mm/yyyy) — la orden no se incluyó en el rango seleccionado.`,
+          id: o.orden,
+          record: o,
+        }));
+      dateFormatIncidences.forEach((inc: any) => {
+        addLog('warn', `Inconsistencia regla de negocio (${inc.ruleCode} - ${inc.severity.toUpperCase()}) en Orden "${inc.record.orderId}" (Fila ${inc.record.sheetRow}): ${inc.detail}`);
+      });
+
       // Lógica 2: Inconsistencias de datos en Orders
       const dataIncidences = filteredOrders.flatMap(o => {
         if (!o.orden) return [];
         const incidencesList: { type: 'data_error', severity: 'critica' | 'advertencia' | 'informativa', ruleCode: string, detail: string, id: string, record: any }[] = [];
 
-        const isMandaoExpress = o.negocio?.trim().toLowerCase() === 'mandao express';
-        // RN-003: es Recogida por Cliente solo si las 4 columnas de cargos de
-        // entrega están vacías/'-' (o en 0, mismo criterio que ya usaba el
-        // código para "Delivery Charge" antes de esta corrección) — no basta
-        // con que "Delivery Charge" por sí sola esté vacía.
-        const isFieldWaived = (raw: any, num: number) => isCellEmpty(raw) || num === 0;
-        const isPickup =
-          isFieldWaived(o.deliveryChargeRaw, o.deliveryCharge) &&
-          isFieldWaived(o.extraDeliveryChargeRaw, o.extraDeliveryCharge) &&
-          isFieldWaived(o.driverAdminChargeRaw, o.driverAdminCharge) &&
-          isFieldWaived(o.complementaryDeliveryRaw, o.complementaryDelivery);
 
         // 1. Validar campos obligatorios núcleo (No deben estar vacíos)
         if (isCellEmpty(o.deliveryDate)) {
           incidencesList.push({ type: 'data_error', severity: 'critica', ruleCode: 'RN-002', detail: `[Fila: ${o.sheetRow}] Falta "Delivery Date" en la orden.`, id: o.orden, record: o });
-        }
-        if (isCellEmpty(o.orderDate)) {
-          incidencesList.push({ type: 'data_error', severity: 'critica', ruleCode: 'RN-002', detail: `[Fila: ${o.sheetRow}] Falta "Order Date" en la orden.`, id: o.orden, record: o });
         }
         if (isCellEmpty(o.paymentType)) {
           incidencesList.push({ type: 'data_error', severity: 'critica', ruleCode: 'RN-002', detail: `[Fila: ${o.sheetRow}] Falta "Payment Type" en la orden.`, id: o.orden, record: o });
@@ -845,12 +741,6 @@ export function VerificationPage() {
             }
           }
         }
-        if (isCellEmpty(o.cliente)) {
-          incidencesList.push({ type: 'data_error', severity: 'critica', ruleCode: 'RN-002', detail: `[Fila: ${o.sheetRow}] Falta "Customer" en la orden.`, id: o.orden, record: o });
-        }
-        /*if (isCellEmpty(o.customerNumber)) {
-          incidencesList.push({ type: 'data_error', severity: 'critica', ruleCode: 'RN-002', detail: `[Fila: ${o.sheetRow}] Falta "Customer Number" en la orden.`, id: o.orden, record: o });
-        }*/
         if (isCellEmpty(o.negocio)) {
           incidencesList.push({ type: 'data_error', severity: 'critica', ruleCode: 'RN-002', detail: `[Fila: ${o.sheetRow}] Falta "Store" en la orden.`, id: o.orden, record: o });
         }
@@ -858,26 +748,32 @@ export function VerificationPage() {
           incidencesList.push({ type: 'data_error', severity: 'critica', ruleCode: 'RN-002', detail: `[Fila: ${o.sheetRow}] Falta "Order ID" en la orden.`, id: o.orden, record: o });
         }
 
-        // "Driver" puede estar vacío si es Recogida (isPickup). De lo contrario, indica falta de mensajero.
-        if (isCellEmpty(o.driver) || o.driver?.trim().toLowerCase() === 'no asignado') {
-          if (!isPickup) {
-            incidencesList.push({ type: 'data_error', severity: 'critica', ruleCode: 'RN-003', detail: `[Fila: ${o.sheetRow}] Falta "Driver" (Mensajero) para orden de envío.`, id: o.orden, record: o });
-          }
-        }
-
-        // Reglas de excepción para columnas de montos:
-        // Si es Mandao Express, se autoriza que "Product Amount", "Store Offer" y "Store Admin Charge" estén vacías.
-        if (!isMandaoExpress) {
-          if (isCellEmpty(o.productAmountRaw)) {
-            incidencesList.push({ type: 'data_error', severity: 'critica', ruleCode: 'RN-002', detail: `[Fila: ${o.sheetRow}] Falta "Product Amount" en la orden regular.`, id: o.orden, record: o });
-          }
-          if (isCellEmpty(o.storeOfferRaw)) {
-            incidencesList.push({ type: 'data_error', severity: 'critica', ruleCode: 'RN-002', detail: `[Fila: ${o.sheetRow}] Falta "Store Offer" en la orden regular.`, id: o.orden, record: o });
-          }
-          if (isCellEmpty(o.storeAdminChargeRaw)) {
-            incidencesList.push({ type: 'data_error', severity: 'critica', ruleCode: 'RN-002', detail: `[Fila: ${o.sheetRow}] Falta "Store Admin Charge" en la orden regular.`, id: o.orden, record: o });
-          }
-        }
+        // 2. Resto de columnas de "Orders": obligatorias salvo que una Regla
+        // (Configuración -> Reglas) permita el vacío para "Todos los
+        // negocios" o para el Store de esta orden (incluida Recogida en el
+        // establecimiento, RN-003: Driver vacío si los 4 cargos de entrega
+        // vienen vacíos/0 — ahora es una regla editable, no código fijo).
+        const exemptions = resolveExemptions(o.negocio, o.ruleRaw, activeRules);
+        RULE_COLUMN_KEYS.forEach(col => {
+          if (!presentCols.has(col)) return;
+          const raw = o.ruleRaw?.[col];
+          const empty = isCellEmpty(raw) || (col === 'driver' && String(raw).trim().toLowerCase() === 'no asignado');
+          if (!empty) return;
+          const ex = exemptions.get(col);
+          if (ex?.action === 'permitir') return;
+          const label = ORDER_COLUMNS[col].label;
+          const base = col === 'driver'
+            ? `[Fila: ${o.sheetRow}] Falta "Driver" (Mensajero) para orden de envío.`
+            : `[Fila: ${o.sheetRow}] Falta "${label}" en la orden.`;
+          incidencesList.push({
+            type: 'data_error',
+            severity: ex ? 'advertencia' : 'critica',
+            ruleCode: col === 'driver' ? 'RN-003' : 'RN-002',
+            detail: ex ? `${base} Permitido como advertencia por la regla "${ex.origen}".` : base,
+            id: o.orden,
+            record: o
+          });
+        });
 
         // Check for duplicate Order IDs inside Orders, unless the Store (negocio) is different
         if (o.orderId && o.negocio) {
@@ -900,7 +796,7 @@ export function VerificationPage() {
         return incidencesList;
       });
 
-      const totalIncidences = [...cambiosIncidences, ...dataIncidences];
+      const totalIncidences = [...cambiosIncidences, ...dataIncidences, ...dateFormatIncidences];
 
       if (totalIncidences.length === 0 && cambiosDetectados.length === 0) {
         addLog('success', '¡Verificación exitosa sin discrepancias! Los datos cumplen el 100% de las invariantes de Mandao.');
@@ -954,33 +850,76 @@ export function VerificationPage() {
 
     try {
       addLog('info', 'Paso 1: Consultando registros ya almacenados en Supabase para prevenir duplicados durante la importación...');
-      const [{ data: existingDbOrders, error: ordersErr }, { data: existingDbCambios, error: cambiosErr }, { data: existingDbDisps, error: dispsErr }] = await Promise.all([
-        supabase.from('dispatcher').select('order_id, delivery_date, product_amount, store'),
-        supabase.from('dispatcher_changes').select('order_id, change_date, product_amount, delivery_charge'),
-        supabase.from('availabilities').select('messenger_name, availability_date, amount_to_pay, reason')
+      // Solo los registros de esta Área y rango, y PAGINADOS: antes se pedía
+      // la tabla entera sin paginar y Supabase devolvía solo las primeras
+      // 1000 filas, así que las órdenes ya importadas fuera de esas 1000 no
+      // se detectaban como duplicadas y el insert chocaba con la clave
+      // única de dispatcher. Si esta consulta falla se aborta
+      // (antes continuaba "sin filtrado de duplicados").
+      const [existingDbOrders, existingDbCambios, existingDbDisps] = await Promise.all([
+        fetchAllRows<any>((from, to) => supabase.from('dispatcher')
+          .select('order_pk, order_id, delivery_date, product_amount, store')
+          .eq('area_id', selectedAreaId)
+          .gte('delivery_date', formData.fechaInicio)
+          .lte('delivery_date', formData.fechaFin)
+          .order('order_pk').range(from, to)),
+        fetchAllRows<any>((from, to) => supabase.from('dispatcher_changes')
+          .select('change_id, order_id, change_date, product_amount, delivery_charge')
+          .gte('change_date', formData.fechaInicio)
+          .lte('change_date', formData.fechaFin)
+          .order('change_id').range(from, to)),
+        fetchAllRows<any>((from, to) => supabase.from('availabilities')
+          .select('availability_id, messenger_name, availability_date, amount_to_pay, reason')
+          .eq('area_id', selectedAreaId)
+          .gte('availability_date', formData.fechaInicio)
+          .lte('availability_date', formData.fechaFin)
+          .order('availability_id').range(from, to)),
       ]);
-
-      if (ordersErr || cambiosErr || dispsErr) {
-        addLog('warn', `No se completó la carga de registros previos: ${(ordersErr || cambiosErr || dispsErr)?.message}. Continuando importación sin filtrado de duplicados.`);
-      } else {
-        addLog('success', `Cargados correctamente ${existingDbOrders?.length || 0} órdenes, ${existingDbCambios?.length || 0} cambios y ${existingDbDisps?.length || 0} disponibilidades registradas de la base de datos para filtrado automático.`);
-      }
+      addLog('success', `Registros ya guardados en el rango para esta Área: ${existingDbOrders.length} órdenes, ${existingDbCambios.length} cambios y ${existingDbDisps.length} disponibilidades.`);
 
       const activeAreaObj = areas.find(a => a.id === selectedAreaId);
       const activeAreaName = activeAreaObj ? activeAreaObj.nombre : 'Habana';
 
-      // Filter arrays on import
+      // Órdenes: misma clave que la BD, uq_dispatcher_order_area_store_date
+      // (Order ID + Área + Negocio + Delivery Date — el Área ya está fijada
+      // por la consulta). Dos negocios pueden repetir Order ID el mismo día
+      // (confirmado 2026-10-07, migración 2026-10-07d).
+      const orderKey = (id: any, store: any, fecha: any) =>
+        `${String(id || '').trim().toLowerCase()}|${String(store || '').trim().toLowerCase()}|${normalizeDateStr(fecha)}`;
+      const dbOrdersByKey = new Map<string, any>();
+      existingDbOrders.forEach((dbO: any) => dbOrdersByKey.set(orderKey(dbO.order_id, dbO.store, dbO.delivery_date), dbO));
+
+      const yaImportadasConCambios: string[] = [];
       const filteredOrdersToImport = result.orders.filter((o: any) => {
         if (!o.orderId) return true;
-        const isAlreadyInDb = (existingDbOrders || []).some((dbO: any) => {
-          const sameId = String(dbO.order_id || '').trim().toLowerCase() === String(o.orderId || '').trim().toLowerCase();
-          const sameDate = dbO.delivery_date && o.deliveryDate && (normalizeDateStr(dbO.delivery_date) === normalizeDateStr(o.deliveryDate));
-          const sameMonto = Math.abs((dbO.product_amount || 0) - (o.productAmount || 0)) < 0.02;
-          const sameStore = String(dbO.store || '').trim().toLowerCase() === String(o.negocio || '').trim().toLowerCase();
-          return sameId && sameDate && sameMonto && sameStore;
-        });
-        return !isAlreadyInDb;
+        const dbO = dbOrdersByKey.get(orderKey(o.orderId, o.negocio, o.deliveryDate));
+        if (!dbO) return true;
+        // Ya importada (RN-010). Si el Sheet trae otro monto no se
+        // sobrescribe: se informa para revisarla (Revisión / hoja Cambios).
+        const sameMonto = Math.abs((Number(dbO.product_amount) || 0) - (o.productAmount || 0)) < 0.02;
+        if (!sameMonto) yaImportadasConCambios.push(`${o.orderId} · ${o.negocio} (${normalizeDateStr(o.deliveryDate)})`);
+        return false;
       });
+      if (yaImportadasConCambios.length > 0) {
+        addLog('warn', `${yaImportadasConCambios.length} orden(es) ya importada(s) tienen en el Sheet otro "Product Amount"; no se reimportan (revíselas en Revisión Dispatcher): ${yaImportadasConCambios.slice(0, 10).join(', ')}${yaImportadasConCambios.length > 10 ? '…' : ''}`);
+      }
+
+      // Dos filas del Sheet con el mismo Order ID, negocio y fecha en esta
+      // Área no caben en la BD (la Verificación ya lo marca como RN-009;
+      // esto es una defensa extra): se detiene ANTES de escribir nada.
+      const porClave = new Map<string, any[]>();
+      filteredOrdersToImport.forEach((o: any) => {
+        if (!o.orderId) return;
+        const k = orderKey(o.orderId, o.negocio, o.deliveryDate);
+        porClave.set(k, [...(porClave.get(k) || []), o]);
+      });
+      const repetidas = Array.from(porClave.values()).filter(g => g.length > 1);
+      if (repetidas.length > 0) {
+        const detalle = repetidas.slice(0, 5)
+          .map(g => `"${g[0].orderId}" del ${normalizeDateStr(g[0].deliveryDate)} (filas ${g.map((o: any) => o.sheetRow).join(', ')}: ${g.map((o: any) => o.negocio).join(' / ')})`)
+          .join('; ');
+        throw new Error(`El Sheet tiene ${repetidas.length} orden(es) repetida(s) (mismo Order ID, negocio y fecha en esta Área), que la base de datos no admite: ${detalle}${repetidas.length > 5 ? '…' : ''}. Corrija el Sheet y vuelva a Verificar. No se importó nada.`);
+      }
 
       const filteredCambiosToImport = result.cambios.filter((c: any) => {
         if (!c.orden) return true;
@@ -1048,30 +987,14 @@ export function VerificationPage() {
       // 1. Insertar órdenes nuevas
       if (newOrdersCount > 0) {
         const { error } = await supabase.from('dispatcher').insert(
-          filteredOrdersToImport.map((o: any) => ({
-            delivery_date: normalizeDateStr(o.deliveryDate) || null,
-            order_date: normalizeDateStr(o.orderDate) || null,
-            payment_type: o.paymentType,
-            customer: o.cliente,
-            customer_number: o.customerNumber,
-            driver: o.driver,
-            store: o.negocio,
-            order_id: o.orderId,
-            product_amount: o.productAmount,
-            store_offer: o.storeOffer,
-            processing_fee: o.processingFee,
-            store_admin_charge: o.storeAdminCharge,
-            delivery_charge: o.deliveryCharge,
-            extra_delivery_charge: o.extraDeliveryCharge,
-            driver_admin_charge: o.driverAdminCharge,
-            complementary_delivery: String(o.complementaryDelivery ?? ''),
-            tax: o.transactionFee,
-            promocode: o.promocode,
-            area_id: selectedAreaId,
-            verification_id: verificationId
-          }))
+          filteredOrdersToImport.map((o: any) => orderToDbRow(o, selectedAreaId, verificationId))
         );
-        if (error) throw new Error(`Error importando órdenes: ${error.message}`);
+        if (error) {
+          // Sin órdenes guardadas, la corrida de verificación recién creada
+          // queda vacía: se elimina para no dejar un registro huérfano.
+          await supabase.from('dispatcher_verifications').delete().eq('verification_id', verificationId);
+          throw new Error(`Error importando órdenes: ${error.message}`);
+        }
       }
 
       // 2. Insertar cambios nuevos (dispatcher_changes = filas reales de la pestaña "Cambios")
@@ -1137,7 +1060,8 @@ export function VerificationPage() {
       }
 
       await loadHistory();
-      showToast('success', `¡Importación Exitosa! Se registraron: ${newOrdersCount} órdenes nuevas, ${newCambiosCount} cambios nuevos y ${newDispsCount} disponibilidades nuevas.`);
+      showToast('success', `¡Importación Exitosa! Se registraron: ${newOrdersCount} órdenes nuevas, ${newCambiosCount} cambios nuevos y ${newDispsCount} disponibilidades nuevas.`
+        + (yaImportadasConCambios.length > 0 ? ` ${yaImportadasConCambios.length} orden(es) ya importada(s) con datos distintos no se reimportaron (ver log).` : ''));
       setResult(null);
     } catch (error: any) {
       addLog('error', `Fallo al escribir en la base de datos Supabase: ${error.message}`);
@@ -1526,8 +1450,17 @@ export function VerificationPage() {
               <div>
                 <p className="font-bold underline mb-1">Reglas de excepción (Celdas Vacías)</p>
                 <ul className="list-disc pl-4 space-y-1">
-                  <li><strong>Negocio (Store) "Mandao Express":</strong> se exceptúa y autoriza la ausencia de "Product Amount", "Store Offer" y "Store Admin Charge" (ejemplo = 0.00 o = "-").</li>
-                  <li><strong>Recogida en el Negocio</strong> (cliente recoge en el establecimiento): se exceptúa la ausencia del Mensajero cuando "Delivery Charge", "Extra Delivery Charge", "Driver Admin Charge" y "Complementary Delivery" están vacíos/"-"/0 (RN-003).</li>
+                  <li>Toda columna de "Orders" debe tener valor, salvo las que permita una regla activa:</li>
+                  {dispatcherRules.length === 0 && (
+                    <li>No hay reglas activas: toda celda vacía es incidencia crítica.</li>
+                  )}
+                  {dispatcherRules.map(rule => (
+                    <li key={rule.id}>
+                      <strong>{rule.nombre}</strong> ({describeCondition(rule)}):{' '}
+                      {rule.columnas.map(c => `"${ORDER_COLUMNS[c.column]?.label || c.column}"${c.action === 'advertencia' ? ` (${ACTIONS.advertencia.label.toLowerCase()})` : ''}`).join(', ')}.
+                    </li>
+                  ))}
+                  <li>Las reglas se administran en Configuración → Reglas (Negocios / Mensajeros).</li>
                   <li><strong>Payment Type:</strong> debe coincidir con los métodos de pago de mensajeros registrados; se acepta coincidencia difusa (tildes, mayúsculas, guiones) como advertencia — sin ninguna coincidencia, es incidencia crítica (RN-005).</li>
                 </ul>
               </div>
@@ -1852,7 +1785,7 @@ export function VerificationPage() {
                           >
                             <option value="todos">Todas</option>
                             <option value="RN-001">RN-001: Cambios</option>
-                            <option value="RN-002">RN-002: Mandao Express & Campos</option>
+                            <option value="RN-002">RN-002: Campos obligatorios</option>
                             <option value="RN-003">RN-003: Pickup / Driver</option>
                             <option value="RN-004">RN-004: Fees y Promocode en Cero</option>
                             <option value="RN-009">RN-009: Duplicidad</option>
@@ -2154,15 +2087,15 @@ export function VerificationPage() {
                        </div>
                        <div>
                           <span className="text-slate-400 block font-medium">Monto Total</span>
-                          <span className="font-bold text-slate-700 tabular-nums">${showIncidenceDetails.record?.monto?.toFixed(2) || '0.00'}</span>
+                          <span className="font-bold text-slate-700 tabular-nums">{formatCUP(showIncidenceDetails.record?.monto || 0)}</span>
                        </div>
                        <div>
                           <span className="text-slate-400 block font-medium">Cargo de Entrega</span>
-                          <span className="font-bold text-slate-700 tabular-nums">${showIncidenceDetails.record?.deliveryCharge?.toFixed(2) || '0.00'}</span>
+                          <span className="font-bold text-slate-700 tabular-nums">{formatCUP(showIncidenceDetails.record?.deliveryCharge || 0)}</span>
                        </div>
                        <div>
                           <span className="text-slate-400 block font-medium">Monto Producto</span>
-                          <span className="font-bold text-slate-700 tabular-nums">${showIncidenceDetails.record?.productAmount?.toFixed(2) || '0.00'}</span>
+                          <span className="font-bold text-slate-700 tabular-nums">{formatCUP(showIncidenceDetails.record?.productAmount || 0)}</span>
                        </div>
                        <div>
                           <span className="text-slate-400 block font-medium">Vía de Pago</span>

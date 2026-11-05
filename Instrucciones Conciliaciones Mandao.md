@@ -15,9 +15,9 @@
 3. [Arquitectura funcional y módulos](#3-arquitectura-funcional-y-módulos)
 4. [Actores y roles del sistema](#4-actores-y-roles-del-sistema)
 5. [Módulo Dispatcher](#5-módulo-dispatcher) ✅ **FASE ACTUAL**
-6. [Módulo Negocios](#6-módulo-negocios) ⏳
-7. [Módulo Mensajeros](#7-módulo-mensajeros) ⏳
-8. [Módulo Configuración](#8-módulo-configuración) ⏳
+6. [Módulo Negocios](#6-módulo-negocios) ✅ Conciliación y Cobros y Pagos
+7. [Módulo Mensajeros](#7-módulo-mensajeros) ✅ Conciliación y Cobros y Pagos
+8. [Módulo Configuración](#8-módulo-configuración) ✅
 9. [Módulo Dashboard](#9-módulo-dashboard) ⏳
 10. [Reglas de negocio — catálogo completo](#10-reglas-de-negocio--catálogo-completo)
 11. [Estados del sistema Conciliaciones](#11-estados-del-sistema-conciliaciones)
@@ -228,6 +228,10 @@ El sistema tiene **3 roles de usuario** con matrices de acceso diferenciadas. El
 
 > ✅ **MÓDULO EN IMPLEMENTACIÓN ACTIVA.** Todo el contenido de esta sección debe respetarse y ejecutarse tal como está especificado.
 
+> **Corrección 2026-09-30 — Fechas y Moneda**:
+> - **Fechas**: el formato real de "Delivery Date"/"Fecha" en los Sheets es **dd/mm/yyyy**. Antes existían ~5 copias distintas del parser de fechas entre Verificación/Revisión de Dispatcher y Disponibilidad, todas con un `new Date(str)` de último recurso para formatos no reconocidos (ambiguo, depende del motor JS) — esa era la causa real de que algunas órdenes no se importaran, sin ningún aviso. Se consolidó en un único parser compartido (`lib/sheetDateParser.ts`) usado por las 4 pantallas, sin ese fallback: una fecha no reconocida ahora se reporta como **incidencia crítica** (RN-002 ampliada) con el valor exacto de la celda, en vez de desaparecer del rango en silencio.
+> - **Moneda**: el dispatcher siempre registra los montos en CUP — nunca en USD. Antes Verificación/Revisión de Dispatcher mostraban estos montos con un "$" crudo (`formatCUP()` ahora los etiqueta correctamente). La única conversión a USD que existe en todo el sistema ocurre **dentro de Conciliación de Negocios**, y solo para negocios con Método de Pago "Transferencia-Exterior" — ver sección 6.4.
+
 El Dispatcher es el **módulo central** del sistema. Es la puerta de entrada de toda la información que luego se concilia y factura. Toda generación de código para este módulo debe respetar el flujo exacto descrito aquí.
 
 ### Estructura de carpetas del módulo
@@ -426,19 +430,319 @@ Sistema muestra diferencias detectadas
 
 ## 6. Módulo Negocios
 
-> ⏳ Pendiente de especificación — fase posterior del desarrollo. No implementar hasta que este bloque sea reemplazado con la especificación completa.
+> ✅ Submódulo **Conciliación** implementado (`src/modules/conciliacion/ConciliacionNegociosPage.tsx`) y actualizado al **2026-11-05** con el documento "Nuevos cambios" del equipo: clasificación de órdenes por catálogo (Tipología / Moneda / Grupo), consecutivo por entidad, sentido y moneda, estados `Nuevo → Enviado → Confirmado → Pagado/Cobrado`, reconciliación con registro, envío por correo y Bitácora. Las secciones **6.7 a 6.12** describen ese ciclo y aplican igual a Mensajeros (sección 7). Dashboard, Facturación y Planificación de Pagos siguen ⏳. **Cobros y Pagos** (Fase 4, reemplaza a Cuentas por Pagar / Cuentas por Cobrar) está en la sección 6.13.
+
+### 6.1 Submódulo Conciliación — Descripción general
+
+Procesa y registra el balance financiero de los negocios en un período determinado. La fuente de las órdenes es la tabla `dispatcher` (ya verificada e importada por el Dispatcher — ver sección 5), **no** un nuevo origen de datos.
+
+**Parámetros de entrada:**
+- **Rango de Fechas**: Fecha Inicial y Fecha Final (filtran `dispatcher.delivery_date`).
+- **Área**: seleccionable desde `areas`; admite "Todas las Áreas".
+- **Negocio pendiente** (solo modo Individual): lista calculada al momento con los negocios que tienen órdenes en el Área + rango y **todavía no están conciliados**, más los ya conciliados que se pueden **reconciliar** (estado Nuevo o Enviado), marcados "(reconciliar)". El contador muestra ambos: "N pendientes · M para reconciliar".
+
+### 6.2 Tipos de Conciliación
+
+- **Individual**: calcula y muestra el detalle de un único negocio (1 o 2 tarjetas según su Método de Pago, ver 6.4). Un solo botón registra todas sus liquidaciones pendientes; si alguna ya está registrada y es reconciliable, el botón dice "Reconciliar" (ver 6.9).
+- **Masiva**: agrupa todas las órdenes del rango (de un Área o de todas) por negocio (`dispatcher.store`, normalizado sin tildes/mayúsculas) y calcula cada uno por separado. **Solo se listan los pendientes**: los ya conciliados en ese mismo rango exacto se omiten (la reconciliación se hace desde Individual o desde el histórico). Las filas elegibles vienen marcadas; "Conciliar Seleccionadas" registra todas a la vez.
+- Antes de registrar se muestra un **Resumen del período** por Grupo de pago (todas las órdenes del rango, incluidas las ya conciliadas).
+
+### 6.3 Clasificación de las órdenes — catálogo de Métodos de Pago (Órdenes)
+
+> Reemplaza la tabla fija de "4 baldes" que existía en el código (rectificado con el equipo 2026-10-27/28). **Todo se configura desde la app**, sin tocar código: Configuración → Métodos de Pago → **Órdenes** (ver sección 8.3).
+
+Cada método de pago que aplica a Órdenes (`payment_methods.applies_to_orders = true`) tiene tres datos de clasificación:
+
+| Dato | Valores | Para qué sirve |
+|---|---|---|
+| **Tipología** (`tipologia`) | `cobrar` (Cuenta por Cobrar) / `pagar` (Cuenta por Pagar) | **Por Cobrar**: el negocio/mensajero cobró al cliente y le debe a Mandao la comisión (hoy solo Efectivo). **Por Pagar**: el cliente le pagó a Mandao y Mandao le debe al negocio/mensajero su parte. |
+| **Moneda** (`currency`) | `CUP` / `USD` | Los métodos en USD forman la parte **"Exterior"** de los negocios con vía Transferencia-Exterior; para el resto de los negocios todo se liquida en CUP (confirmado 2026-10-27). |
+| **Grupo** (`group_id` → `payment_groups`) | Efectivo, Pago en Línea, Pago en Línea Exterior… (configurables) | Columna en la que aparece el método en la tabla de órdenes del **PDF** y en los resúmenes. Varios métodos pueden compartir un grupo (ej. Transfermóvil y ENZONA → "Pago en Línea"). |
+
+Clasificación vigente (cargada por la migración 2026-10-27 y confirmada por el equipo):
+
+| Método (Órdenes) | Tipología | Moneda | Grupo |
+|---|---|---|---|
+| `Cash` / Efectivo | Por Cobrar | CUP | Efectivo |
+| `Transfermóvil`, `ENZONA` | Por Pagar | CUP | Pago en Línea |
+| `Saldo Mandao`, `Card`, `Crédito o Débito`, `TropiPay Balance` | Por Pagar | USD | Pago en Línea Exterior |
+
+- La comparación entre `dispatcher.payment_type` y el nombre del método es normalizada (sin tildes, mayúsculas, espacios ni signos — `normalizeCompact()`).
+- Una orden cuyo `payment_type` no está en el catálogo de Órdenes queda **"sin clasificar"**: no entra en el cálculo y se avisa en la UI con la lista de tipos no reconocidos (nunca se fuerza a un grupo).
+- Un método sin grupo asignado aparece en el PDF en la columna "Sin grupo".
+- La clasificación de los métodos de **Negocios** y **Mensajeros** (vías de pago de la entidad) **no** usa Tipología/Moneda/Grupo — solo los de Órdenes (rectificado 2026-10-28).
+- Motor de cálculo: `src/lib/conciliacion/catalogoPagos.ts` (`loadCatalogoPagos`, `computeDesglose`, `columnasLegado`).
+
+### 6.4 Cálculo financiero — por Método de Pago del negocio
+
+- **Saldo de una orden** = `dispatcher.product_amount` (sin restar Store Offer, Processing Fee ni Store Admin Charge). **Siempre está en CUP**.
+- **% de Comisión Mandao**: Configuración → Comisión Mandao (`commission_settings`, hoy 20% Negocios). Se guarda con cada conciliación (`comision_pct`).
+- Las órdenes se agrupan en **líneas** = Grupo × Tipología × Moneda (`LineaGrupo`). Para cada línea:
+  - **Por Cobrar (CxC)** = saldo × % comisión → lo que el negocio le debe a Mandao.
+  - **Por Pagar (CxP)** = saldo × (100% − % comisión) → lo que Mandao le debe al negocio.
+- El **Método de Pago del negocio** (`businesses.payment_method`, Configuración → Métodos de Pago → Negocios) decide en cuántas filas ("rieles" de liquidación) se reparte:
+
+  | Método de Pago del negocio | Filas | Contenido de cada fila |
+  |---|---|---|
+  | `Transferencia` (o no reconocido, como respaldo) | 1, CUP | Todas las líneas. |
+  | `Transferencia-Efectivo` | 2, ambas CUP | **Transferencia** = líneas Por Pagar de métodos CUP · **Efectivo** = líneas Por Cobrar + líneas de métodos USD (en CUP). |
+  | `Transferencia-Exterior` | 2 | **Transferencia** (CUP) = líneas de métodos CUP · **Exterior** (USD) = líneas de métodos USD convertidas con la tasa activa. |
+
+- **Neto de una fila** = CxP − CxC, en la moneda de la fila: positivo = **a pagar** al negocio, negativo = **a cobrar**, 0 = liquidación en cero (se registra sin consecutivo).
+- **Conversión a USD**: solo en la fila "Exterior". La tasa activa (Configuración → Razón de Cambio) está en **USD por 1 CUP** (ej. 0.002): `USD = CUP × tasa`. Se guarda con la fila (`tasa_cambio`). Sin tasa activa la fila Exterior queda **bloqueada** ("Sin tasa") y se muestra en CUP.
+
+  > **Aclaración (2026-09-30)**: el riel "Efectivo" describe **cómo Mandao le entrega el dinero al negocio** (en mano o por transferencia, según se acuerde); no tiene relación con el método de pago "Efectivo/Cash" que usó el cliente en la orden.
+
+- **Columnas de totales** (compatibilidad): además del desglose por línea (`desglose`, jsonb), cada fila llena las columnas históricas — `ordenes_efectivo`/`cxc_cu` = todo lo Por Cobrar; `ordenes_transfermovil`/`cxp_tm` = Por Pagar en métodos CUP; `ordenes_saldo_mandao`/`cxp_sm` = Por Pagar en métodos USD; `ordenes_tarjeta`/`cxp_us` = 0. Las usan el Dashboard y el generador del consecutivo.
+
+### 6.4.1 Regla — Existencia de datos
+
+El negocio (Individual) o cada negocio iterado (Masiva) debe tener al menos una orden en el rango de fechas; si no, se informa "sin órdenes" y no se puede conciliar.
+
+### 6.4.2 Regla — Duplicidad (Filtro de Pendientes)
+
+No puede existir más de una conciliación para el mismo `business_id`, el mismo rango exacto (`fecha_inicial`/`fecha_final`) y el mismo riel (`via_pago`). Reforzado con el índice único `uq_conciliaciones_businesses_range`. Si la conciliación existente está en **Nuevo** o **Enviado**, en vez de duplicarse se **reconcilia** (actualiza la misma fila, ver 6.9); desde **Confirmado** ya no se puede volver a calcular.
+
+### 6.4.3 Regla — Existencia del negocio en el catálogo (actualizado 2026-11-05)
+
+`dispatcher.store` es texto libre del Sheet. Al conciliar se busca el negocio en **todo** el catálogo de Gestión de Negocios (activos y bloqueados), por nombre normalizado y Área (`src/lib/conciliacion/catalogoEntidad.ts`):
+
+| Resultado | Qué muestra la conciliación | Acción |
+|---|---|---|
+| Existe y está **activo** en esa Área | Normal | Se puede conciliar. |
+| Existe pero está **Bloqueado** | Aviso ámbar "ya existe… pero está Bloqueado" | **Activar negocio** (lo reactiva, queda en el Log y recalcula) o **Modificar información** (abre su formulario en Gestión de Negocios). |
+| Existe en **otra Área** | Aviso ámbar con el Área donde está | **Modificar información** (corregir el Área si es el mismo negocio). |
+| **No existe** | Aviso rojo "no está registrado" | **Registrar Negocio** (nombre + Área + activo). |
+
+- En la Masiva, la columna Estado muestra "Sin registrar" / "Bloqueado" / "Otra Área"; el aviso con los botones aparece al desplegar la fila. "Registrar N faltantes" solo cuenta los que no existen.
+- Antes de registrar se **vuelve a consultar la base**: si ya existe (aunque esté bloqueado o en otra Área) no se crea un duplicado y se avisa.
+- Activar, registrar o modificar requiere Super Admin (política `manage_businesses`).
+
+### 6.5 Registro en Base de Datos (tabla `conciliaciones_businesses`, ver sección 12 tabla 19)
+
+Al conciliar se inserta 1 fila por cada liquidación elegible (un negocio con Método de Pago dividido aporta hasta 2):
+
+| Dato | Columna | Origen |
+|---|---|---|
+| Fecha | `fecha` | Día en que se ejecuta |
+| Negocio | `business_id` / `establecimiento` | Catálogo / nombre de las órdenes |
+| Período | `fecha_inicial` / `fecha_final` | Rango seleccionado |
+| Área | `area_id` / `area` | Área de las órdenes |
+| Riel / Moneda | `via_pago` / `moneda` | `Transferencia` / `Efectivo` / `Exterior` · `CUP` / `USD` (ver 6.4) |
+| Desglose | `desglose` (jsonb) | Líneas Grupo × Tipología × Moneda con órdenes, saldo y monto — lo leen el PDF, el histórico y la Bitácora |
+| Totales | `ordenes_*`, `cxc_cu`, `cxp_*` | Ver "Columnas de totales" en 6.4 |
+| % comisión / tasa | `comision_pct` / `tasa_cambio` | Valores usados en el cálculo (la tasa solo en filas USD) |
+| Consecutivo | `consecutivo` | Lo asigna la base de datos (ver 6.7); vacío si el neto es 0 |
+| Responsable | `responsable` / `responsable_id` | Usuario que ejecuta |
+| Conciliación | `conciliacion` | `"[Negocio] ([Riel]) [AAAA-MM-DD] - [AAAA-MM-DD]"` — texto del enlace al PDF |
+| Estado | `estado` | `Nuevo` al insertar (ver 6.8) |
+
+- **PDF** (`src/lib/conciliacion/pdfConciliacionNegocio.ts`): "Reporte de conciliación" con encabezado, Resumen por Grupo de pago (columnas = grupos del desglose) y detalle de órdenes con el `payment_type` real. No muestra el consecutivo ni la palabra "Mandao".
+- **Nombre del archivo PDF** = el mismo texto del enlace del histórico, sin consecutivo (ej. `Burger Queen (Transferencia) 2026-09-01 - 2026-09-30.pdf`), en Drive, en la descarga y en el adjunto del correo (2026-11-05).
+- **Google Drive**: al conciliar, el PDF se sube a la carpeta configurada para Negocios (Configuración → Data) y se guarda el enlace (`pdf_drive_url`). Si falla (sin carpeta o sin sesión de Google) la conciliación igual queda registrada y el histórico ofrece "Subir a Drive".
+- Facturación, Descuento, Nota, Pagado, Saldo, Estado de pago, Referencia, Fecha de pago y Prioridad quedan `null` (los completarán Cobros y Pagos / Facturación).
+
+### 6.6 Interfaz — Histórico de Conciliaciones
+
+- **Orden**: por consecutivo descendente (año + número); las de saldo 0 al final.
+- **Filtros**: buscador (negocio, responsable, consecutivo, conciliación), Área, Riel, **Moneda** (CUP/USD, agregado 2026-10-28), Estado y rango de fechas de conciliación.
+- **Acciones por fila**: abrir el PDF (desde Drive o generado al momento), "Subir a Drive" si no se subió, **enviar por correo** (Nuevo/Enviado), **reconciliar** (Nuevo/Enviado — abre primero la Bitácora del período) y **cambiar estado** en línea.
+- **Selección múltiple**: casillas en las filas en estado Nuevo y casilla de encabezado para marcar todas las del filtro → **"Enviar seleccionadas (N)"** (ver 6.10).
+- **Fila desplegada**: responsable, fecha, Por Cobrar / Por Pagar, desglose por grupo, último envío (fecha y destinatarios), **Reconciliaciones** (una fila plegable por reconciliación, ver 6.9) y el botón **Bitácora** (ver 6.11).
+
+### 6.7 Consecutivo (aplica a Negocios y Mensajeros)
+
+- Código que la **base de datos** asigna a cada conciliación con monto a pagar o a cobrar (trigger `set_consecutivo_conciliacion_*` → `next_conciliacion_consecutivo`). Sirve para el match contra caja; es **información interna**: no se muestra en el PDF ni en el correo al cliente.
+- **Una serie por Entidad × Sentido × Moneda** (8 series, rectificado 2026-11-02), cada una con su propia numeración y formato:
+
+  | | Por Pagar · CUP | Por Cobrar · CUP | Por Pagar · USD | Por Cobrar · USD |
+  |---|---|---|---|---|
+  | **Negocios** | PN | CN | PNU | CNU |
+  | **Mensajeros** | PM | CM | PMU | CMU |
+
+  El sentido sale del neto de la fila (positivo = Por Pagar, negativo = Por Cobrar) y la moneda de la columna `moneda`.
+- Formato por defecto: prefijo + año (2 dígitos) + número de 4 dígitos, ej. `PN260012`. Cada serie se configura en **Configuración → Formato de Consecutivo** (ver 8.4).
+- Una liquidación en **0** no recibe consecutivo. Si una reconciliación la deja con monto, recibe uno en ese momento.
+- **Una vez asignado no cambia**, ni al reconciliar ni si cambia el sentido.
+
+### 6.8 Estados de la conciliación (aplica a Negocios y Mensajeros)
+
+`Nuevo → Enviado → Confirmado → Pagado / Cobrado` (rectificado 2026-10-27, reemplaza a Aprobado/Incorrecto/Facturado — ver sección 11).
+
+| Estado | Significado | Pasa a |
+|---|---|---|
+| **Nuevo** | Registrada; se puede reconciliar. | Enviado |
+| **Enviado** | PDF enviado al negocio/mensajero (automático al enviar por correo, o manual). Se puede reconciliar. | Confirmado · volver a Nuevo |
+| **Confirmado** | El negocio/mensajero dio su conformidad. **Montos bloqueados.** | Pagado o Cobrado (según el neto) · volver a Enviado |
+| **Pagado** | Mandao pagó el neto (fila Por Pagar). | — (final) |
+| **Cobrado** | Mandao cobró el neto (fila Por Cobrar). | — (final) |
+
+- El cambio se hace en línea desde la fila del histórico ("Cambiar…"), que solo ofrece los pasos válidos. Un neto en 0 no tiene cierre Pagado/Cobrado.
+- Si otro usuario ya cambió el estado, se avisa en vez de sobrescribirlo. Cada cambio queda en el Log (`estado_at` guarda la fecha del último cambio).
+- Pagado / Cobrado los registra la caja desde **Cobros y Pagos** ("Registrar pago / cobro", sección 6.13), o en línea desde el histórico.
+
+### 6.9 Reconciliación (aplica a Negocios y Mensajeros)
+
+- Permite **volver a calcular** una conciliación ya registrada cuando el negocio/mensajero no está de acuerdo, siempre que esté en **Nuevo** o **Enviado**.
+- Flujo: botón de reconciliar en la fila del histórico → se abre la **Bitácora del período** (conciliaciones de ese negocio/mensajero en ese período y sus reconciliaciones anteriores) → "Continuar con la reconciliación" carga la calculadora Individual con el mismo negocio/mensajero, Área y período → "Reconciliar".
+- Al reconciliar: se **actualizan los montos** de la misma fila, se **mantiene el consecutivo**, la fila vuelve a **Nuevo** (para reenviar el PDF corregido), se regenera el PDF y se sube a Drive.
+- La base de datos (trigger `reconciliacion_conciliacion`) guarda cada reconciliación en `conciliaciones_reconciliaciones` con los **valores anteriores y nuevos**, quién la hizo y el estado que tenía; cuenta las veces (`reconciliaciones`) y **rechaza** cualquier cambio de montos si la conciliación ya está Confirmada o cerrada.
+- En el histórico y en la Bitácora las reconciliaciones se ven **una por fila, plegadas** (#, fecha, responsable, estado anterior, cantidad de campos cambiados); al desplegarlas se ve la tabla Campo / Antes / Después.
+
+### 6.10 Envío por correo (aplica a Negocios y Mensajeros)
+
+- **Un correo por negocio/mensajero y período**, con todos sus PDF adjuntos (ej. la fila CUP y la USD juntas). Destinatario: `businesses.email` / `messengers.email` (admiten varios correos separados por coma o punto y coma). Los que no tienen correo se omiten y se informan.
+- Se envía por **Gmail con la cuenta de Google del usuario conectado** (permiso `gmail.send`). Al enviarse, las conciliaciones en **Nuevo** pasan a **Enviado** automáticamente y se guarda la fecha y los destinatarios (`enviado_at`, `enviado_a`). Una conciliación Enviada se puede reenviar; desde Confirmado no.
+- **Envío masivo**: marcar las conciliaciones en Nuevo (o todas las del filtro) y "Enviar seleccionadas (N)". El ícono de sobre de cada fila envía las de ese negocio/mensajero y período.
+- Texto del correo: plantilla editable en **Configuración → Correo de Conciliación** (ver 8.5). El detalle **no incluye consecutivos** (información interna).
+- **Permiso de Google**: dura 1 hora y solo se obtiene al iniciar sesión / reconectar con Google. Si falta o venció, al pulsar Enviar aparece "Reconectar Google"; al volver, se repite el envío. Detalle técnico: el token ya no se borra cuando Supabase renueva su sesión, se guarda su vencimiento, y el envío usa el endpoint `gmail/v1/users/me/messages/send` con el mensaje en base64 (el endpoint de subida `/upload/gmail/...` lo bloquea el navegador por CORS — corregido 2026-11-05).
+
+### 6.11 Bitácora (aplica a Negocios y Mensajeros)
+
+- Panel lateral con el **historial de conciliaciones de un negocio/mensajero**: período, riel y moneda, consecutivo, estado y neto. Al seleccionar una se ve su información (responsable, fecha, último envío, totales, Área), el desglose por grupo, sus reconciliaciones (plegables) y el botón "Ver PDF".
+- Se abre de dos formas: botón **"Bitácora"** en la fila desplegada del histórico (todas sus conciliaciones), o al pulsar **Reconciliar** (solo las del período a reconciliar, con la acción "Continuar con la reconciliación").
+
+### 6.12 Trazabilidad
+
+Quedan en el Log de Auditoría (Configuración → Log): registro de conciliaciones (individual/masiva, cantidad, reconciliadas), cambios de estado (antes/después), envíos por correo (destinatarios), activación/registro de negocios desde la conciliación, y los cambios en los catálogos de Configuración.
+
+### 6.13 Cobros y Pagos (aplica a Negocios y Mensajeros) — Fase 4
+
+> ✅ Implementado 2026-11-05 (`src/modules/conciliacion/CobrosPagosPage.tsx`, lógica en `src/lib/conciliacion/cobrosPagos.ts`). **Reemplaza** a los submenús "Cuentas por Pagar" y "Cuentas por Cobrar" de los módulos Negocios y Mensajeros (que eran maquetas sin datos reales y se eliminaron).
+
+**Qué muestra:** las cuentas **pendientes** de pagar o cobrar = conciliaciones en estado **Confirmado** (el negocio/mensajero dio conformidad, pero todavía no se pagó ni se cobró).
+
+**Agrupación:** un renglón por **negocio/mensajero y moneda** (CUP y USD nunca se suman). Por cada grupo:
+- **Por Cobrar** = suma de lo Por Cobrar de sus conciliaciones (Negocios: `cxc_cu`; Mensajeros: `total_por_cobrar`).
+- **Por Pagar** = suma de lo Por Pagar (Negocios: `cxp_tm + cxp_sm + cxp_us`; Mensajeros: `total_por_pagar`).
+- **Neto** = Por Pagar − Por Cobrar → **"Pagar X"** (Mandao le paga) o **"Cobrar X"** (Mandao le cobra), descontando las cuentas por cobrar contra las por pagar.
+- **Vía de pago** del negocio/mensajero (Gestión de Negocios / Mensajeros).
+- Al desplegar: las conciliaciones que lo forman (consecutivo, período, riel, Por Cobrar, Por Pagar, neto) y los **datos de pago**: en Negocios, para CUP la Cuenta CUP, Personal y Cheque; para USD Zelle, Tropipay y Transferencia Internacional (las habilitadas); en Mensajeros, Tarjeta Fiscal, Cuenta Fiscal, CI y Teléfono. Si faltan se avisa para completarlos en Gestión.
+
+**Totales:** tarjetas por moneda con el total a pagar y a cobrar de lo filtrado.
+
+**Filtros:** búsqueda por negocio/mensajero o consecutivo, Moneda, Cuenta (Por Pagar / Por Cobrar — sobre el neto del grupo), Provincia / Área y Período (desde / hasta, sobre el período conciliado).
+
+**Planificación de pagos para la caja:**
+- Casillas por grupo y casilla de encabezado para marcar todo lo filtrado; la barra muestra en vivo los **totales acumulados** de lo marcado (a pagar y a cobrar por moneda).
+- **Exportar Excel** (hoja "Planificación" por grupo con datos de pago, y hoja "Detalle" por conciliación) y **Planificación PDF** (para enviar a la cajera). Exportan lo marcado o, si no hay nada marcado, todo lo filtrado.
+- **Registrar pago / cobro** (Super Admin / Supervisor): las conciliaciones de los grupos marcados pasan a **Pagado** (las Por Pagar) o **Cobrado** (las Por Cobrar) y salen de la lista. Cada cambio queda en el Log. Las conciliaciones con neto 0 no tienen cierre.
+
+**Menú:** "Cobros y Pagos" (`cobros-pagos-negocio` / `cobros-pagos-mensajero`); la migración `2026-11-05_cobros_pagos_menu.sql` lo habilita en los Roles de Acceso que veían Cuentas por Pagar / por Cobrar o la Conciliación del módulo.
 
 ---
 
 ## 7. Módulo Mensajeros
 
-> ⏳ Pendiente de especificación — fase posterior del desarrollo. No implementar hasta que este bloque sea reemplazado con la especificación completa.
+> ✅ Submódulo **Conciliación** implementado (`src/modules/conciliacion/ConciliacionMensajerosPage.tsx`), con el mismo motor y el mismo ciclo que Negocios: clasificación por catálogo (6.3), consecutivo (6.7), estados (6.8), reconciliación (6.9), envío por correo (6.10) y Bitácora (6.11). Dashboard, Facturación y Planificación de Pagos siguen ⏳. **Cobros y Pagos**: sección 6.13.
+
+### 7.1 Submódulo Conciliación — Descripción general
+
+Mismo patrón que Negocios (sección 6): procesa y registra el balance financiero de un mensajero en un período, a partir de la tabla `dispatcher` (columna `driver`, no `store`).
+
+**Parámetros de entrada:**
+- **Rango de Fechas**: Fecha Inicial y Fecha Final (filtran `dispatcher.delivery_date`).
+- **Área**: seleccionable desde `areas`; admite "Todas las Áreas".
+- **Mensajero pendiente** (solo Individual): pendientes del Área + rango, más los reconciliables marcados "(reconciliar)" — igual que Negocios (6.1).
+
+### 7.2 Tipos de Conciliación
+
+- **Individual**: detalle de un único mensajero; botón "Conciliar" (o "Reconciliar" si ya está registrado y en Nuevo/Enviado).
+- **Masiva**: agrupa por mensajero (`dispatcher.driver`, normalizado) y solo lista los pendientes, igual que Negocios (6.2).
+
+### 7.3 Clasificación de las órdenes y cálculo
+
+Idéntico a Negocios (secciones 6.3 y 6.4) con estas diferencias:
+- **Saldo de una orden = `delivery_charge`** (no `product_amount` — confirmado 2026-10-01).
+- **% de comisión propio de Mensajeros** (Configuración → Comisión Mandao, `commission_settings` fila `messengers`, hoy 10%).
+- **Una sola fila por mensajero y período**, sin rieles. Por Cobrar = líneas de tipología `cobrar`; Por Pagar = líneas de tipología `pagar`.
+- **Moneda**: hoy los mensajeros **siempre se concilian en CUP**. La conciliación ya guarda su moneda (`conciliaciones_messengers.moneda`) y existen las series de consecutivo en USD (PMU / CMU), para poder pagarles en USD en el futuro (confirmado 2026-10-28); para eso faltaría adaptar el cálculo (conversión con la tasa).
+
+### 7.4 Campos propios de Mensajeros
+
+- **Tipo de Mochila**: tomado de `messengers.backpack_type` al conciliar.
+- **Disponibilidades**: suma de `availabilities.amount_to_pay` del mismo mensajero (nombre normalizado) y Área en el rango, menos el **Descuento de Disponibilidad** configurado (Configuración → Comisión Mandao, `availability_discount_settings`): `suma × (1 − % / 100)`. Se suma a Total por Pagar.
+- **Alquiler de Mochila**: tarifa fija por tipo (`Pequeña` / `Grande`, tabla `backpack_rental_rates`, Configuración → Comisión Mandao). Se resta de Total por Pagar una vez por conciliación. Un mensajero sin registrar no tiene tarifa.
+- **Total de Órdenes**: cantidad de órdenes del mensajero en el rango.
+- **Total por Cobrar** = Por Cobrar de las órdenes.
+- **Total por Pagar** = Por Pagar de las órdenes + Disponibilidades − Alquiler de Mochila.
+- **Saldo CUP** = Total por Pagar − Total por Cobrar (sin tasa de cambio). Positivo = a pagar al mensajero; negativo = a cobrar.
+
+### 7.4.1 Reglas — Existencia de datos, catálogo y duplicidad
+
+Mismas reglas que Negocios (6.4.1–6.4.3) aplicadas a `messengers`:
+- Sin órdenes → no se puede conciliar.
+- El mensajero se busca en **todo** el catálogo de Gestión de Mensajeros: si existe **Bloqueado** se ofrece **Activar mensajero** o **Modificar información**; si existe en **otra Área**, **Modificar información**; si no existe, **Registrar Mensajero** (revalidado contra la base para no crear duplicados). Requiere Super Admin (`manage_messengers`).
+- Una sola conciliación por `messenger_id` y rango exacto (índice `uq_conciliaciones_messengers_range`); si existe en Nuevo/Enviado se reconcilia en vez de duplicarse.
+
+### 7.5 Registro en Base de Datos (tabla `conciliaciones_messengers`, ver sección 12 tabla 20)
+
+Se inserta: Fecha, Mensajero, Período, Área, totales por tipología (columnas históricas, ver 6.4), `desglose`, Tipo y Alquiler de Mochila, Disponibilidades, Total de Órdenes, Total por Cobrar, Total por Pagar, Saldo CUP, Vía de Pago (`messengers.payment_method`), Moneda (`CUP`), `comision_pct`, Responsable, Conciliación (`"[Mensajero] [AAAA-MM-DD] - [AAAA-MM-DD]"`, también nombre del PDF) y Estado `Nuevo`. El consecutivo lo asigna la base (series PM/CM/PMU/CMU, ver 6.7). El PDF (`pdfConciliacionMensajero.ts`) incluye Resumen por Grupo y la Liquidación (comisión a cobrar, a pagar, disponibilidades, mochila).
+
+### 7.6 Interfaz — Histórico
+
+Igual que Negocios (6.6): filtros (buscador, Área, **Moneda**, Estado, fechas), acciones por fila (PDF, Drive, correo, reconciliar, cambiar estado), selección múltiple para el envío masivo y fila desplegada con Tipo de Mochila, Total Órdenes, Por Cobrar / Por Pagar, Disponibilidades, Alquiler Mochila, Saldo CUP, desglose, último envío, Reconciliaciones y **Bitácora**.
 
 ---
 
 ## 8. Módulo Configuración
 
-> ⏳ Pendiente de especificación — fase posterior del desarrollo. No implementar hasta que este bloque sea reemplazado con la especificación completa.
+> ✅ Implementado. Principio acordado con el equipo (2026-10-27): **todo lo que define cómo se concilia se gestiona desde la app**, sin tocar código. Los catálogos de configuración solo los edita **Super Admin** (RLS `current_user_role() = 'super_admin'`); el resto de los roles los ve en solo lectura. Cada cambio queda en el Log.
+
+Menú Configuración:
+
+| Ítem | Qué gestiona |
+|---|---|
+| Roles y Usuarios | Usuarios, rol de seguridad (`profiles.role`) y Rol de Acceso (qué ítems de menú ve, `access_roles.module_keys`) — ver sección 19.3 |
+| Áreas | Catálogo `areas` |
+| Métodos de Pago → Negocios / Mensajeros / Órdenes / **Grupos de Pago** | Ver 8.1–8.3 |
+| Razón de Cambio | Tasa de cambio activa, USD por 1 CUP (`exchange_rates`, RN-010, sincronizable con El Toque — sección 22) |
+| Comisión Mandao | % de comisión de Negocios y de Mensajeros, Descuento de Disponibilidad y Alquiler de Mochila |
+| **Formato de Consecutivo** | Ver 8.4 |
+| **Correo de Conciliación** | Ver 8.5 |
+| Reglas (Negocios / Mensajeros) | Reglas del Dispatcher (`dispatcher_rules`) |
+| Data | Documentos de Google Sheets para importación y carpetas de Google Drive para los PDF de conciliación (Negocios / Mensajeros) |
+| Log | Log de Auditoría — ver 8.6 |
+
+> Un ítem nuevo del menú no aparece hasta que se habilita en el Rol de Acceso del usuario (Roles y Usuarios → Roles). Las migraciones que agregan menús lo habilitan en los roles que ya ven el menú relacionado.
+
+### 8.1 Métodos de Pago — Negocios y Mensajeros
+
+Vías de pago de la entidad (cómo se le paga al negocio o mensajero: Transferencia, Transferencia-Efectivo, Transferencia-Exterior, Efectivo…). Solo nombre, descripción/lógica y estado. **No llevan Tipología, Moneda ni Grupo** (rectificado 2026-10-28).
+
+### 8.2 Métodos de Pago — Órdenes
+
+Métodos con que el cliente paga la orden (`dispatcher.payment_type`). Al crear o editar uno se define su **Clasificación para la Conciliación**: Tipología (Por Cobrar / Por Pagar), Moneda (CUP / USD) y Grupo — ver sección 6.3. La tabla muestra la columna "Clasificación". Esta es la única pantalla donde se decide si un método es CxC o CxP.
+
+### 8.3 Métodos de Pago — Grupos de Pago
+
+Catálogo `payment_groups`: las **columnas de la tabla de órdenes del PDF** de conciliación y de los resúmenes. Solo se define el **Nombre** (agregar, renombrar, eliminar si ningún método lo usa); un grupo nuevo queda como última columna. El grupo de cada método se elige en Órdenes (8.2). Se mantiene como catálogo aparte para que varios métodos compartan una columna y renombrarla sea un solo cambio.
+
+### 8.4 Formato de Consecutivo
+
+8 series (`consecutivo_series`), agrupadas por Negocios y Mensajeros, una por Sentido (Por Pagar / Por Cobrar) × Moneda (CUP / USD) — ver 6.7. Cada serie define:
+- **Prefijo** (1–10 letras o números, único entre series).
+- **Año**: 2 dígitos (26), 4 dígitos (2026) o sin año.
+- **Separador**: ninguno, guion, punto o guion bajo.
+- **Dígitos** del número (1–10).
+- **Reinicio**: cada año o nunca (sin año en el código, obligatoriamente "nunca").
+
+Con vista previa. Los cambios aplican a las conciliaciones nuevas; cambiar el prefijo o el formato **no reinicia** la numeración (el contador va ligado a la clave fija de la serie) y nunca se repite un código ya emitido.
+
+> ⏳ El equipo está analizando si el formato definitivo es este (pendiente de confirmar).
+
+### 8.5 Correo de Conciliación
+
+Plantilla del correo con que se envían los PDF (`app_settings`: `conciliacion_correo_asunto`, `_cuerpo`, `_cc`): **Asunto**, **Cuerpo** y **Copia (CC)**, con vista previa y "Restaurar texto por defecto". Variables: `{nombre}` (negocio/mensajero), `{periodo}`, `{area}`, `{detalle}` (una línea por conciliación: riel, moneda y monto a pagar o a cobrar). **Sin consecutivos**: es información interna de la agencia.
+
+### 8.6 Log de Auditoría
+
+Últimas acciones del sistema (`audit_logs`) con filtros y búsqueda. "Ver detalles" muestra la información de forma legible:
+- **Qué se modificó**: tabla Campo / Antes / Después. En Gestión de Negocios y de Mensajeros se registra campo por campo (el Área por su nombre, el estado como Activo/Bloqueado, las cuentas bancarias por sub-campo) — agregado 2026-11-05; los registros anteriores a esa fecha no tienen este detalle.
+- **Datos del registro** al crear o eliminar.
+- Resto de la información; el JSON técnico queda plegado al final.
+
+En la lista, debajo de la acción, se resume "N campos modificados".
 
 ---
 
@@ -558,7 +862,7 @@ Una orden **no puede importarse más de una vez** para la misma Área y fecha op
 
 ## 11. Estados del sistema Conciliaciones
 
-> **Alcance actual**: solo los estados del Dispatcher aplican en esta fase. Los demás están documentados para referencia futura y no deben implementarse aún.
+> **Alcance actual**: aplican los estados del Dispatcher, de Disponibilidad y de Conciliación (que también usa Cobros y Pagos). Facturación está pendiente.
 
 ### Estados de Verificación Dispatcher ✅ FASE ACTUAL
 
@@ -584,17 +888,27 @@ Una orden **no puede importarse más de una vez** para la misma Área y fecha op
 | `advertencia` | `--color-warning` | Advertencia | `AlertTriangle` |
 | `informativa` | `--color-info` | Informativa | `Info` |
 
-### Estados de Conciliación (Negocios y Mensajeros)
+### Estados de Conciliación (Negocios y Mensajeros) ✅
 
-> ⏳ Pendiente — fase posterior del desarrollo.
+Implementados 2026-10-27 (`src/lib/conciliacion/estados.ts`). Detalle y transiciones en la sección 6.8.
+
+| Estado | Token | Badge Label | Ícono Lucide |
+|---|---|---|---|
+| `Nuevo` | neutral | Nuevo | `CircleDot` |
+| `Enviado` | `--color-info` | Enviado | `Send` |
+| `Confirmado` | `--color-warning` | Confirmado | `CheckCircle2` |
+| `Pagado` | `--color-success` | Pagado | `BadgeCheck` |
+| `Cobrado` | `--color-success` | Cobrado | `HandCoins` |
+
+Los estados anteriores se migraron: Aprobado → Confirmado, Incorrecto → Nuevo, Facturado → Pagado o Cobrado según el neto.
 
 ### Estados de Facturación
 
 > ⏳ Pendiente — fase posterior del desarrollo.
 
-### Estados de Cuentas por Pagar / Cobrar
+### Estados de Cobros y Pagos
 
-> ⏳ Pendiente — fase posterior del desarrollo.
+Cobros y Pagos no tiene estados propios: lista las conciliaciones **Confirmado** y las cierra como **Pagado** o **Cobrado** (sección 6.13).
 
 ---
 
@@ -602,7 +916,7 @@ Una orden **no puede importarse más de una vez** para la misma Área y fecha op
 
 > 🔄 Sección reescrita 2026-09-13. **La base de datos con la que se trabaja es Supabase (Postgres)** — Firestore ya no existe en este sistema. Esta sección documenta el esquema REAL y vigente, tal como vive en `supabase_schema.sql` (raíz del repo), que es la única fuente de verdad — cualquier tabla nueva se define primero ahí (con sus políticas RLS) y luego se refleja aquí. El agente AI no debe crear tablas adicionales a las aquí documentadas sin actualizar ambos archivos.
 
-> **Alcance actual**: las 16 tablas de esta sección ya están migradas y en uso — Dispatcher, Disponibilidad y los catálogos de Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría, Data). El módulo financiero (Conciliación, Facturación, Cuentas por Cobrar/Pagar, Planificación de Pagos) sigue sin tabla propia — ver "Tablas pendientes" al final de esta sección.
+> **Alcance actual**: las 21 tablas de esta sección ya están migradas y en uso — Dispatcher, Disponibilidad, los catálogos de Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría, Data, Roles de Acceso, Comisión Mandao, Alquiler de Mochila) y **Conciliación de Negocios y de Mensajeros**. Facturación, Cuentas por Cobrar/Pagar y Planificación de Pagos (de ambas entidades) siguen sin tabla propia — ver "Tablas pendientes" al final de esta sección.
 
 ### Tablas activas — Fase actual ✅
 
@@ -615,6 +929,7 @@ Una orden **no puede importarse más de una vez** para la misma Área y fecha op
 | `email` | text |
 | `role` | enum `user_role`: `super_admin` / `supervisor` / `operador` / `visitante` |
 | `active` | boolean — si `false`, cuenta pendiente de autorización (ver sección 19.3.1) |
+| `access_role_id` | uuid (FK a `access_roles`, nullable) — Rol de Acceso opcional (agregado 2026-09-23, ver tabla 17 y sección 19.3.2) |
 | `created_at` / `updated_at` | timestamptz |
 
 **2. `public.areas`**
@@ -790,7 +1105,7 @@ Una orden **no puede importarse más de una vez** para la misma Área y fecha op
 |---|---|
 | `exchange_rate_id` | uuid (PK) |
 | `name` | text |
-| `rate_cup` | numeric(12,2) |
+| `rate_cup` | numeric(18,8) — **USD por 1 CUP** (ej. 0.002 ≈ 500 CUP por USD; admite valores menores que 1, cambiado 2026-10-01) |
 | `description` | text |
 | `active` | boolean |
 | `created_at` / `updated_at` | timestamptz |
@@ -825,6 +1140,145 @@ Catálogo de IDs de Google Sheet para la Importación Masiva de Gestión de Nego
 
 > **Resolución de Área (agregado 2026-09-22)**: la columna "Área"/"Provincia" de la hoja trae nombres reales de provincia (ej. "Santa Clara"), que no necesariamente coinciden con `areas.name`. `BulkImportModal.tsx` primero intenta un match exacto de nombre y, si no hay, categoriza por provincia (Habana / Holguín / Provincias — todo lo que no sea Habana ni Holguín) usando `areas.province`, igual que ya hace `VerificationPage.tsx` para el Dispatcher. Como la importación hace upsert por nombre, reimportar corrige retroactivamente los registros que hubieran quedado con `area_id` nulo.
 
+**17. `public.access_roles`** — Roles de Acceso (agregado 2026-09-23)
+
+| Campo | Tipo |
+|---|---|
+| `access_role_id` | uuid (PK) |
+| `name` | text — único |
+| `description` | text |
+| `module_keys` | text[] — ids de módulos/ítems de menú que este rol deja ver (ver `moduleCatalog.ts`) |
+| `created_at` / `updated_at` | timestamptz |
+
+> **Unificado 2026-09-24** (ver sección 19.3.2): `RolesUsuariosPage.tsx` pestaña "Roles" lista los 4 roles de sistema (Super Admin/Supervisor/Operador/Visitante, `is_system = true`, no eliminables) más los que se creen. Sigue sin reemplazar `profiles.role`/RLS: `base_role` solo decide qué valor de `profiles.role` se copia al asignar ese Rol de Acceso a un usuario.
+
+**18. `public.commission_settings`** — Comisión Mandao (agregado 2026-09-24)
+
+| Campo | Tipo |
+|---|---|
+| `entity_type` | text (PK) — `'businesses'` / `'messengers'` |
+| `percentage` | numeric(5,2) |
+| `updated_at` / `updated_by` | timestamptz / uuid (FK a `auth.users`) |
+
+Un solo valor vigente por tipo de entidad (sin historial de tasas pasadas). `businesses` = 20%, `messengers` = 10% (confirmado por el usuario 2026-09-30) — ambos ajustables desde Configuración → Comisión Mandao. Usada por Conciliación de Negocios (sección 6.4) y de Mensajeros (sección 7.3) para calcular CxC/CxP.
+
+**19. `public.conciliaciones_businesses`** — Conciliación de Negocios (agregado 2026-09-24, renombrada de `conciliaciones` 2026-09-30)
+
+| Campo | Tipo |
+|---|---|
+| `conciliacion_id` | uuid (PK) |
+| `fecha` | date — fecha de ejecución |
+| `business_id` / `establecimiento` | uuid (FK a `businesses`) / text denormalizado |
+| `fecha_inicial` / `fecha_final` | date |
+| `area_id` / `area` | uuid (FK a `areas`) / text denormalizado |
+| `ordenes_efectivo` / `cxc_cu` | integer / numeric(12,2) |
+| `ordenes_transfermovil` / `cxp_tm` | integer / numeric(12,2) |
+| `ordenes_saldo_mandao` / `cxp_sm` | integer / numeric(12,2) |
+| `ordenes_tarjeta` / `cxp_us` | integer / numeric(12,2) |
+| `via_pago` | text — riel de liquidación de ESTA fila: `"Transferencia"` / `"Efectivo"` / `"Exterior"` (agregado 2026-09-30; antes guardaba el método de pago crudo del negocio) |
+| `moneda` | text — `'CUP'` o `'USD'` (agregado 2026-09-30, ver sección 6.4) |
+| `responsable` / `responsable_id` | text / uuid (FK a `auth.users`) |
+| `conciliacion` | text — label clickeable, genera PDF al vuelo |
+| `estado` | text — ciclo de vida `Nuevo`/`Enviado`/`Confirmado`/`Pagado`/`Cobrado` (desde 2026-10-27, ver sección 6.8), `'Nuevo'` al insertar |
+| `facturacion`, `descuento`, `nota`, `pagado`, `saldo`, `estado_pago`, `referencia`, `fecha_pago`, `prioridad` | nullable — los completan Facturación/CxC/CxP (sin construir aún) |
+| `created_at` / `updated_at` | timestamptz |
+
+Índice único `uq_conciliaciones_businesses_range` sobre `(business_id, fecha_inicial, fecha_final, via_pago)` (ampliado 2026-09-30 para permitir hasta 2 filas por negocio+rango) — refuerza a nivel de base de datos la regla de no-duplicidad (sección 6.4.2).
+
+**20. `public.conciliaciones_messengers`** — Conciliación de Mensajeros (agregado 2026-09-30)
+
+| Campo | Tipo |
+|---|---|
+| `conciliacion_id` | uuid (PK) |
+| `fecha` | date — fecha de ejecución |
+| `messenger_id` / `mensajero` | uuid (FK a `messengers`) / text denormalizado |
+| `fecha_inicial` / `fecha_final` | date |
+| `area_id` / `area` | uuid (FK a `areas`) / text denormalizado |
+| `ordenes_efectivo` / `cxc_cu` | integer / numeric(12,2) |
+| `ordenes_transfermovil` / `cxp_tm` | integer / numeric(12,2) |
+| `ordenes_saldo_mandao` / `cxp_sm` | integer / numeric(12,2) |
+| `ordenes_tarjeta` / `cxp_us` | integer / numeric(12,2) |
+| `tipo_mochila` | text — `messengers.backpack_type` al momento de conciliar |
+| `alquiler_mochila` | numeric(12,2) — tarifa vigente en `backpack_rental_rates` para ese tipo de mochila, ver tabla 21 y sección 7.4 |
+| `disponibilidades` | numeric(12,2) — suma de `availabilities.amount_to_pay` del mismo mensajero/rango |
+| `total_ordenes` | integer |
+| `total_por_cobrar` / `total_por_pagar` | numeric(12,2) |
+| `saldo_cup` | numeric(12,2), nullable — neto (Total por Pagar − Total por Cobrar) en CUP, sin conversión |
+| `via_pago` | text — `messengers.payment_method` |
+| `responsable` / `responsable_id` | text / uuid (FK a `auth.users`) |
+| `conciliacion` | text — label clickeable, genera PDF al vuelo |
+| `estado` | text — mismo ciclo de vida que `conciliaciones_businesses` |
+| `facturacion` | nullable |
+| `created_at` / `updated_at` | timestamptz |
+
+Índice único `uq_conciliaciones_messengers_range` sobre `(messenger_id, fecha_inicial, fecha_final)`.
+
+**21. `public.backpack_rental_rates`** — Alquiler de Mochila (agregado 2026-09-30)
+
+| Campo | Tipo |
+|---|---|
+| `backpack_type` | text (PK) — `'Pequeña'` / `'Grande'` |
+| `rate` | numeric(12,2) |
+| `updated_at` / `updated_by` | timestamptz / uuid (FK a `auth.users`) |
+
+Tarifa fija por tipo de mochila, gestionada en el mismo submódulo Configuración → Comisión Mandao (sección 7.4). Ambas filas arrancan en `$0.00` — sin valor real confirmado todavía, se configuran desde la UI antes de afectar una conciliación real. Usada por Conciliación de Mensajeros para restar de Total por Pagar según `messengers.backpack_type` (ver tabla 20, columna `alquiler_mochila`).
+
+**22. `public.payment_groups`** — Grupos de Pago (agregado 2026-10-27)
+
+| Campo | Tipo |
+|---|---|
+| `group_id` | uuid (PK) |
+| `name` | text — único |
+| `sort_order` | int — orden de la columna en el PDF (los nuevos van al final) |
+| `active` | boolean |
+| `created_at` / `updated_at` | timestamptz |
+
+Columnas del PDF de conciliación (sección 8.3). Valores iniciales: Efectivo, Pago en Línea, Pago en Línea Exterior.
+
+**23. `public.consecutivo_series`** — Formato de Consecutivo (agregado 2026-10-27c, por entidad 2026-11-02)
+
+| Campo | Tipo |
+|---|---|
+| `serie` | text (PK) — clave fija que lleva el contador: `PN`, `CN`, `PNU`, `CNU`, `PM`, `CM`, `PMU`, `CMU` |
+| `entidad` | `negocios` / `mensajeros` |
+| `sentido` | `pagar` / `cobrar` |
+| `moneda` | `CUP` / `USD` |
+| `prefijo` | text — único, 1–10 letras o números |
+| `formato_anio` | `AA` / `AAAA` / `ninguno` |
+| `separador` | `''` / `-` / `.` / `_` |
+| `digitos` | int (1–10) |
+| `reinicio` | `anual` / `nunca` (obligatorio `nunca` si no hay año) |
+| `updated_at` | timestamptz |
+
+Índice único `(entidad, sentido, moneda)`. Los contadores viven en `conciliacion_consecutivos (prefijo = serie, anio, ultimo)`, sin políticas: solo los usa la función `next_conciliacion_consecutivo` (security definer), que llaman los triggers `set_consecutivo_conciliacion_negocio` / `_mensajero` al insertar o al reconciliar una liquidación que estaba en 0. Ver secciones 6.7 y 8.4.
+
+**24. `public.conciliaciones_reconciliaciones`** — Registro de reconciliaciones (agregado 2026-10-27b)
+
+| Campo | Tipo |
+|---|---|
+| `reconciliacion_id` | uuid (PK) |
+| `entidad` | `negocios` / `mensajeros` |
+| `conciliacion_id` | uuid — fila reconciliada |
+| `consecutivo` | text |
+| `estado_anterior` | text |
+| `antes` / `despues` | jsonb — montos, órdenes, % comisión, tasa, desglose (y en Mensajeros disponibilidades, mochila y totales) |
+| `responsable` / `responsable_id` | text / uuid |
+| `created_at` | timestamptz |
+
+Solo lectura desde la app: la escribe el trigger `reconciliacion_conciliacion` (before update en ambas tablas de conciliación), que además bloquea cambios de montos fuera de Nuevo/Enviado, mantiene el consecutivo, cuenta `reconciliaciones` y actualiza `estado_at`. Ver sección 6.9.
+
+**Columnas agregadas a tablas existentes (2026-10-27 a 2026-11-02):**
+
+| Tabla | Columnas |
+|---|---|
+| `payment_methods` (13) | `tipologia` (`cobrar`/`pagar`), `currency` (`CUP`/`USD`), `group_id` (FK `payment_groups`) — clasificación de los métodos de Órdenes (sección 6.3) |
+| `messengers` (12) | `email` — destinatario del correo de conciliación |
+| `conciliaciones_businesses` (19) | `consecutivo` (único), `pdf_drive_file_id` / `pdf_drive_url`, `comision_pct`, `tasa_cambio`, `desglose` (jsonb), `estado_at`, `reconciliaciones`, `reconciliado_at`, `enviado_at`, `enviado_a`. `estado` ahora con `check` `Nuevo`/`Enviado`/`Confirmado`/`Pagado`/`Cobrado` |
+| `conciliaciones_messengers` (20) | Las mismas (excepto `tasa_cambio`) más `moneda` (`CUP`/`USD`, hoy siempre CUP) |
+| `app_settings` | Claves `conciliacion_correo_asunto` / `_cuerpo` / `_cc` (plantilla del correo, sección 8.5) y las carpetas de Drive por entidad |
+
+Migraciones correspondientes en `supabase/migrations/`: `2026-10-27_tipologia_moneda_grupo_pagos.sql`, `2026-10-27b_estados_reconciliacion.sql`, `2026-10-27c_formato_consecutivo.sql`, `2026-10-27d_envio_correo_conciliaciones.sql`, `2026-11-02_consecutivo_por_entidad.sql` (todas incorporadas a `supabase_schema.sql`).
+
 ### Funciones auxiliares (equivalente a las "reglas de seguridad" que tenía Firestore)
 
 | Función | Uso |
@@ -846,21 +1300,23 @@ Todas las tablas tienen RLS activo. Resumen por tipo de política:
 - **Verificaciones e incidencias** (`dispatcher_verifications`, `availability_verifications`, `dispatcher_incidents`, `availability_incidents`, `dispatcher_changes`): insertar requiere `can_execute_processes()`.
 - **Importaciones** (`dispatcher`, `availabilities`, `availability_imports`): insertar requiere `is_admin_or_supervisor()`.
 - **Edición/eliminación manual** en `dispatcher` y `availabilities` (Revisión): requiere `is_admin_or_supervisor()`.
-- **Catálogos** (`areas`, `messengers`, `payment_methods`, `exchange_rates`, `businesses`): CRUD completo (`for all`) solo `super_admin`.
+- **Catálogos** (`areas`, `messengers`, `payment_methods`, `exchange_rates`, `businesses`, `import_sources`, `access_roles`, `commission_settings`, `backpack_rental_rates`): CRUD completo (`for all`) solo `super_admin`.
+- **`conciliaciones_businesses` / `conciliaciones_messengers`**: CRUD completo (`for all`) requiere `is_admin_or_supervisor()` — es un proceso que mueve dinero, mismo nivel que Importación, no de solo-lectura como Verificar (Operador no puede ejecutar Conciliación).
 
 ### Tablas pendientes — módulo financiero sin diseñar ⏳
 
-> A diferencia de la versión anterior de este documento (que listaba `Stores`/`Drivers`/`PaymentMethods`/`ExchangeRates` como pendientes — las 4 ya están implementadas arriba, como `businesses`, `messengers`, `payment_methods` y `exchange_rates`), lo que realmente queda sin construir es el **módulo financiero**: Conciliación, Facturación, Cuentas por Cobrar, Cuentas por Pagar y Planificación de Pagos.
+> Conciliación de Negocios (tabla 19, sección 6) y de Mensajeros (tabla 20, sección 7) ya se implementaron. Lo que queda sin construir es: Facturación, Cuentas por Cobrar, Cuentas por Pagar y Planificación de Pagos (de Negocios y de Mensajeros).
 
 | Módulo | Estado |
 |---|---|
-| Conciliación | ⏳ solo UI con `MOCK_DATA`, sin tabla |
+| Conciliación de Negocios | ✅ implementado (tabla `conciliaciones_businesses`) |
+| Conciliación de Mensajeros | ✅ implementado (tabla `conciliaciones_messengers` + `backpack_rental_rates` para Alquiler de Mochila, sección 7.4) |
 | Facturación | ⏳ solo UI con `MOCK_DATA`, sin tabla |
 | Cuentas por Cobrar | ⏳ solo UI con `MOCK_DATA`, sin tabla |
 | Cuentas por Pagar | ⏳ solo UI con `MOCK_DATA`, sin tabla |
 | Planificación de Pagos | ⏳ solo UI con `MOCK_DATA`, sin tabla |
 
-Ninguna de estas páginas se relaciona hoy con `dispatcher`, `businesses` o `messengers`, y no hay reglas de negocio documentadas para calcular comisiones desde las órdenes, el desglose Efectivo/Transferencia/Saldo Mandao, ni impuestos. Diseñar ese esquema requiere primero esas reglas de negocio — pospuesto explícitamente hasta contar con ellas (decisión 2026-09-10).
+Ninguna de estas páginas se relaciona hoy con `dispatcher`, `businesses` o `messengers`, y no hay reglas de negocio documentadas para calcular comisiones desde las órdenes ni impuestos. Diseñar ese esquema requiere primero esas reglas de negocio — pospuesto explícitamente hasta contar con ellas (decisión 2026-09-10), igual que se hizo para Conciliación de Negocios (sección 6) antes de construirla.
 
 ---
 
@@ -1449,7 +1905,7 @@ export const navConfig = {
 
 ### 19.1 Estado de la migración
 
-- Esquema completo definido y validado en `supabase_schema.sql`: **16 tablas** (detalle completo en la sección 12), con políticas **RLS** activas en todas ellas, más funciones auxiliares (helper functions).
+- Esquema completo definido y validado en `supabase_schema.sql`: **21 tablas** (detalle completo en la sección 12), con políticas **RLS** activas en todas ellas, más funciones auxiliares (helper functions).
 - Se retiraron del esquema las tablas `email_groups` y `email_templates` (correspondientes a las colecciones `EmailGroups`/`EmailTemplates` que documentaba la versión anterior de este documento, basada en Firestore — nunca tuvieron uso real en el código).
 - Ya migrados y en uso real sobre Supabase: Auth, Dispatcher (Verificación/Revisión), Disponibilidad (Verificación/Revisión), y todo Gestión (Áreas, Mensajeros, Negocios, Métodos de Pago, Razón de Cambio, Roles y Usuarios, Logs de Auditoría). Ningún archivo del código activo importa ya `src/lib/firebase` (esa ruta no existe).
 - Pendiente de diseñar (sin tabla propia todavía): Conciliación, Facturación, Cuentas por Cobrar, Cuentas por Pagar y Planificación de Pagos — ver "Tablas pendientes" al final de la sección 12.
@@ -1479,6 +1935,16 @@ Pertenecer al dominio `@mandao.app` (Google Workspace) permite **autenticarse**,
 - Un **Super Admin** debe encontrar a la persona en **Roles y Usuarios**, asignarle uno de los 4 roles y marcarla como **Autorizada** (`active = true`). También puede invitarla de antemano por correo con el botón "Nuevo Usuario" (sin que la persona haya iniciado sesión todavía), que la autoriza de inmediato con el rol elegido.
 - La barrera es real a nivel de base de datos, no solo de UI: `current_user_role()` devuelve `NULL` para un usuario inactivo (por lo que niega toda escritura), y las políticas de solo lectura usan `public.is_active_user()` en vez de solo comprobar "está logueado" (ver `supabase_schema.sql` y `supabase/migrations/2026-09-10_require_active_profile.sql`).
 - Antes de este cambio, cualquier cuenta `@mandao.app` que iniciara sesión ya podía **leer** todo el sistema como Visitante en cuanto Google la autenticaba — ese hueco quedó cerrado.
+
+### 19.3.2 Roles de Acceso: agrupador de menú, no de seguridad (agregado 2026-09-23)
+
+`RolesUsuariosPage.tsx` tiene dos pestañas: **Usuarios** (CRUD de `profiles`, igual que antes) y **Roles de Acceso** (CRUD de `access_roles`, tabla 17 de la sección 12). Es una capa **nueva y completamente separada** del modelo de seguridad de los 4 roles fijos:
+
+- Un Rol de Acceso es un nombre + una lista de módulos (`module_keys`, ids de `moduleCatalog.ts` — la misma fuente que arma el menú lateral en `AppShell.tsx`) que ese rol deja ver, marcados como etiquetas (click para activar/desactivar).
+- En la pestaña Usuarios, cada persona puede tener asignado opcionalmente uno de estos roles (`profiles.access_role_id`), además de su rol fijo de siempre.
+- Si un usuario **no** tiene Rol de Acceso asignado (`access_role_id = NULL`, el caso de todo usuario creado antes de este cambio), el menú se sigue filtrando exactamente como antes, según su rol fijo (`hasPermission()` en `AppShell.tsx`).
+- Si **sí** tiene uno asignado, el menú lateral muestra únicamente los módulos de `access_roles.module_keys` — sin importar el rol fijo.
+- **Esto no cambia la seguridad real del sistema**: lo que un usuario puede leer/escribir en Supabase lo siguen decidiendo exclusivamente `profiles.role` y las políticas RLS (sección 12), que no fueron tocadas. Un Rol de Acceso solo decide qué ítems de menú se muestran; si un usuario llegara a ver un módulo para el que su rol fijo no tiene permiso de escritura, Supabase seguiría rechazando esa escritura vía RLS.
 
 ### 19.4 Actores del sistema (actualización de la sección 4)
 
@@ -1541,6 +2007,8 @@ gcloud run deploy mandao-conciliaciones \
 ## 22. Integración de Razón de Cambio con la API de El Toque
 
 > 🆕 Sección agregada. `RazonCambioPage.tsx` sigue permitiendo cargar tasas manualmente, pero además puede sincronizar automáticamente la tasa informal USD/CUP publicada por El Toque (https://tasas.eltoque.com/docs/).
+>
+> **Convención (2026-10-01):** El Toque publica CUP por 1 USD (ej. 500); el sistema guarda USD por 1 CUP (ej. 0.002). La función `sync-exchange-rate` guarda el inverso (`1 / tasa_el_toque`, 8 decimales) y deja en la descripción el valor original de El Toque.
 
 ### 22.1 Piezas involucradas
 
