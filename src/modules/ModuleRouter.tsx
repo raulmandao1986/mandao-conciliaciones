@@ -16,8 +16,7 @@ import { Package } from 'lucide-react';
 const ConciliacionNegociosPage = lazy(() => import('./conciliacion/ConciliacionNegociosPage').then(m => ({ default: m.ConciliacionNegociosPage })));
 const ConciliacionMensajerosPage = lazy(() => import('./conciliacion/ConciliacionMensajerosPage').then(m => ({ default: m.ConciliacionMensajerosPage })));
 const FacturacionPage = lazy(() => import('./conciliacion/FacturacionPage').then(m => ({ default: m.FacturacionPage })));
-const CuentasPagarPage = lazy(() => import('./conciliacion/CuentasPagarPage').then(m => ({ default: m.CuentasPagarPage })));
-const CuentasCobrarPage = lazy(() => import('./conciliacion/CuentasCobrarPage').then(m => ({ default: m.CuentasCobrarPage })));
+const CobrosPagosPage = lazy(() => import('./conciliacion/CobrosPagosPage').then(m => ({ default: m.CobrosPagosPage })));
 const PlanificacionPagosPage = lazy(() => import('./conciliacion/PlanificacionPagosPage').then(m => ({ default: m.PlanificacionPagosPage })));
 const GestionNegociosPage = lazy(() => import('./gestion/GestionNegociosPage').then(m => ({ default: m.GestionNegociosPage })));
 const GestionMensajerosPage = lazy(() => import('./gestion/GestionMensajerosPage').then(m => ({ default: m.GestionMensajerosPage })));
@@ -68,12 +67,15 @@ function renderModule(activeTab: string) {
     case 'facturacion-negocio':
     case 'facturacion-mensajero':
       return <FacturacionPage />;
+    // Cobros y Pagos reemplaza a Cuentas por Pagar / por Cobrar (2026-11-05).
+    case 'cobros-pagos-negocio':
     case 'cuentas-pagar-negocio':
-    case 'cuentas-pagar-mensajero':
-      return <CuentasPagarPage />;
     case 'cuentas-cobrar-negocio':
+      return <CobrosPagosPage entidad="negocios" />;
+    case 'cobros-pagos-mensajero':
+    case 'cuentas-pagar-mensajero':
     case 'cuentas-cobrar-mensajero':
-      return <CuentasCobrarPage />;
+      return <CobrosPagosPage entidad="mensajeros" />;
     case 'planificacion-pagos-negocio':
     case 'planificacion-pagos-mensajero':
       return <PlanificacionPagosPage />;

@@ -563,14 +563,14 @@ create trigger trg_protect_system_access_roles
 insert into public.access_roles (name, description, base_role, is_system, module_keys) values
   ('Super Admin', 'Acceso total a todos los módulos del sistema.', 'super_admin', true, array[
     'dashboard','dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision',
-    'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cuentas-pagar-negocio','cuentas-cobrar-negocio','planificacion-pagos-negocio','gestion-negocios',
-    'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cuentas-pagar-mensajero','cuentas-cobrar-mensajero','planificacion-pagos-mensajero','gestion-mensajeros',
+    'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cobros-pagos-negocio','planificacion-pagos-negocio','gestion-negocios',
+    'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cobros-pagos-mensajero','planificacion-pagos-mensajero','gestion-mensajeros',
     'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','grupos-pago','formato-consecutivo','razon-cambio','comision-mandao','correo-conciliacion','documentos-importacion','config-logs'
   ]),
   ('Supervisor', 'Acceso total a todos los módulos del sistema.', 'supervisor', true, array[
     'dashboard','dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision',
-    'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cuentas-pagar-negocio','cuentas-cobrar-negocio','planificacion-pagos-negocio','gestion-negocios',
-    'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cuentas-pagar-mensajero','cuentas-cobrar-mensajero','planificacion-pagos-mensajero','gestion-mensajeros',
+    'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cobros-pagos-negocio','planificacion-pagos-negocio','gestion-negocios',
+    'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cobros-pagos-mensajero','planificacion-pagos-mensajero','gestion-mensajeros',
     'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','grupos-pago','formato-consecutivo','razon-cambio','comision-mandao','correo-conciliacion','documentos-importacion','config-logs'
   ]),
   ('Operador', 'Puede ejecutar Verificación en Dispatcher y Disponibilidad. Sin acceso a Gestión ni Configuración.', 'operador', true, array[

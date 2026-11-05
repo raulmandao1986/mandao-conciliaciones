@@ -15,8 +15,8 @@
 3. [Arquitectura funcional y módulos](#3-arquitectura-funcional-y-módulos)
 4. [Actores y roles del sistema](#4-actores-y-roles-del-sistema)
 5. [Módulo Dispatcher](#5-módulo-dispatcher) ✅ **FASE ACTUAL**
-6. [Módulo Negocios](#6-módulo-negocios) ✅ Conciliación (Cobros y Pagos en construcción)
-7. [Módulo Mensajeros](#7-módulo-mensajeros) ✅ Conciliación (Cobros y Pagos en construcción)
+6. [Módulo Negocios](#6-módulo-negocios) ✅ Conciliación y Cobros y Pagos
+7. [Módulo Mensajeros](#7-módulo-mensajeros) ✅ Conciliación y Cobros y Pagos
 8. [Módulo Configuración](#8-módulo-configuración) ✅
 9. [Módulo Dashboard](#9-módulo-dashboard) ⏳
 10. [Reglas de negocio — catálogo completo](#10-reglas-de-negocio--catálogo-completo)
@@ -430,7 +430,7 @@ Sistema muestra diferencias detectadas
 
 ## 6. Módulo Negocios
 
-> ✅ Submódulo **Conciliación** implementado (`src/modules/conciliacion/ConciliacionNegociosPage.tsx`) y actualizado al **2026-11-05** con el documento "Nuevos cambios" del equipo: clasificación de órdenes por catálogo (Tipología / Moneda / Grupo), consecutivo por entidad, sentido y moneda, estados `Nuevo → Enviado → Confirmado → Pagado/Cobrado`, reconciliación con registro, envío por correo y Bitácora. Las secciones **6.7 a 6.12** describen ese ciclo y aplican igual a Mensajeros (sección 7). Dashboard, Facturación y Planificación de Pagos siguen ⏳; **Cobros y Pagos** (que reemplaza a Cuentas por Pagar / Cuentas por Cobrar) es la Fase 4, en construcción.
+> ✅ Submódulo **Conciliación** implementado (`src/modules/conciliacion/ConciliacionNegociosPage.tsx`) y actualizado al **2026-11-05** con el documento "Nuevos cambios" del equipo: clasificación de órdenes por catálogo (Tipología / Moneda / Grupo), consecutivo por entidad, sentido y moneda, estados `Nuevo → Enviado → Confirmado → Pagado/Cobrado`, reconciliación con registro, envío por correo y Bitácora. Las secciones **6.7 a 6.12** describen ese ciclo y aplican igual a Mensajeros (sección 7). Dashboard, Facturación y Planificación de Pagos siguen ⏳. **Cobros y Pagos** (Fase 4, reemplaza a Cuentas por Pagar / Cuentas por Cobrar) está en la sección 6.13.
 
 ### 6.1 Submódulo Conciliación — Descripción general
 
@@ -579,7 +579,7 @@ Al conciliar se inserta 1 fila por cada liquidación elegible (un negocio con M�
 
 - El cambio se hace en línea desde la fila del histórico ("Cambiar…"), que solo ofrece los pasos válidos. Un neto en 0 no tiene cierre Pagado/Cobrado.
 - Si otro usuario ya cambió el estado, se avisa en vez de sobrescribirlo. Cada cambio queda en el Log (`estado_at` guarda la fecha del último cambio).
-- Pagado / Cobrado los registrará la caja desde **Cobros y Pagos** (Fase 4).
+- Pagado / Cobrado los registra la caja desde **Cobros y Pagos** ("Registrar pago / cobro", sección 6.13), o en línea desde el histórico.
 
 ### 6.9 Reconciliación (aplica a Negocios y Mensajeros)
 
@@ -606,11 +606,35 @@ Al conciliar se inserta 1 fila por cada liquidación elegible (un negocio con M�
 
 Quedan en el Log de Auditoría (Configuración → Log): registro de conciliaciones (individual/masiva, cantidad, reconciliadas), cambios de estado (antes/después), envíos por correo (destinatarios), activación/registro de negocios desde la conciliación, y los cambios en los catálogos de Configuración.
 
+### 6.13 Cobros y Pagos (aplica a Negocios y Mensajeros) — Fase 4
+
+> ✅ Implementado 2026-11-05 (`src/modules/conciliacion/CobrosPagosPage.tsx`, lógica en `src/lib/conciliacion/cobrosPagos.ts`). **Reemplaza** a los submenús "Cuentas por Pagar" y "Cuentas por Cobrar" de los módulos Negocios y Mensajeros (que eran maquetas sin datos reales y se eliminaron).
+
+**Qué muestra:** las cuentas **pendientes** de pagar o cobrar = conciliaciones en estado **Confirmado** (el negocio/mensajero dio conformidad, pero todavía no se pagó ni se cobró).
+
+**Agrupación:** un renglón por **negocio/mensajero y moneda** (CUP y USD nunca se suman). Por cada grupo:
+- **Por Cobrar** = suma de lo Por Cobrar de sus conciliaciones (Negocios: `cxc_cu`; Mensajeros: `total_por_cobrar`).
+- **Por Pagar** = suma de lo Por Pagar (Negocios: `cxp_tm + cxp_sm + cxp_us`; Mensajeros: `total_por_pagar`).
+- **Neto** = Por Pagar − Por Cobrar → **"Pagar X"** (Mandao le paga) o **"Cobrar X"** (Mandao le cobra), descontando las cuentas por cobrar contra las por pagar.
+- **Vía de pago** del negocio/mensajero (Gestión de Negocios / Mensajeros).
+- Al desplegar: las conciliaciones que lo forman (consecutivo, período, riel, Por Cobrar, Por Pagar, neto) y los **datos de pago**: en Negocios, para CUP la Cuenta CUP, Personal y Cheque; para USD Zelle, Tropipay y Transferencia Internacional (las habilitadas); en Mensajeros, Tarjeta Fiscal, Cuenta Fiscal, CI y Teléfono. Si faltan se avisa para completarlos en Gestión.
+
+**Totales:** tarjetas por moneda con el total a pagar y a cobrar de lo filtrado.
+
+**Filtros:** búsqueda por negocio/mensajero o consecutivo, Moneda, Cuenta (Por Pagar / Por Cobrar — sobre el neto del grupo), Provincia / Área y Período (desde / hasta, sobre el período conciliado).
+
+**Planificación de pagos para la caja:**
+- Casillas por grupo y casilla de encabezado para marcar todo lo filtrado; la barra muestra en vivo los **totales acumulados** de lo marcado (a pagar y a cobrar por moneda).
+- **Exportar Excel** (hoja "Planificación" por grupo con datos de pago, y hoja "Detalle" por conciliación) y **Planificación PDF** (para enviar a la cajera). Exportan lo marcado o, si no hay nada marcado, todo lo filtrado.
+- **Registrar pago / cobro** (Super Admin / Supervisor): las conciliaciones de los grupos marcados pasan a **Pagado** (las Por Pagar) o **Cobrado** (las Por Cobrar) y salen de la lista. Cada cambio queda en el Log. Las conciliaciones con neto 0 no tienen cierre.
+
+**Menú:** "Cobros y Pagos" (`cobros-pagos-negocio` / `cobros-pagos-mensajero`); la migración `2026-11-05_cobros_pagos_menu.sql` lo habilita en los Roles de Acceso que veían Cuentas por Pagar / por Cobrar o la Conciliación del módulo.
+
 ---
 
 ## 7. Módulo Mensajeros
 
-> ✅ Submódulo **Conciliación** implementado (`src/modules/conciliacion/ConciliacionMensajerosPage.tsx`), con el mismo motor y el mismo ciclo que Negocios: clasificación por catálogo (6.3), consecutivo (6.7), estados (6.8), reconciliación (6.9), envío por correo (6.10) y Bitácora (6.11). Dashboard, Facturación y Planificación de Pagos siguen ⏳; **Cobros y Pagos** es la Fase 4.
+> ✅ Submódulo **Conciliación** implementado (`src/modules/conciliacion/ConciliacionMensajerosPage.tsx`), con el mismo motor y el mismo ciclo que Negocios: clasificación por catálogo (6.3), consecutivo (6.7), estados (6.8), reconciliación (6.9), envío por correo (6.10) y Bitácora (6.11). Dashboard, Facturación y Planificación de Pagos siguen ⏳. **Cobros y Pagos**: sección 6.13.
 
 ### 7.1 Submódulo Conciliación — Descripción general
 
@@ -838,7 +862,7 @@ Una orden **no puede importarse más de una vez** para la misma Área y fecha op
 
 ## 11. Estados del sistema Conciliaciones
 
-> **Alcance actual**: aplican los estados del Dispatcher, de Disponibilidad y de Conciliación. Facturación y Cobros y Pagos están pendientes.
+> **Alcance actual**: aplican los estados del Dispatcher, de Disponibilidad y de Conciliación (que también usa Cobros y Pagos). Facturación está pendiente.
 
 ### Estados de Verificación Dispatcher ✅ FASE ACTUAL
 
@@ -884,7 +908,7 @@ Los estados anteriores se migraron: Aprobado → Confirmado, Incorrecto → Nuev
 
 ### Estados de Cobros y Pagos
 
-> ⏳ Fase 4 — se documentarán al construir Cobros y Pagos (reemplaza a Cuentas por Pagar / Cuentas por Cobrar).
+Cobros y Pagos no tiene estados propios: lista las conciliaciones **Confirmado** y las cierra como **Pagado** o **Cobrado** (sección 6.13).
 
 ---
 

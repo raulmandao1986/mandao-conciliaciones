@@ -5,7 +5,6 @@ import {
   GitMerge,
   FileText,
   CreditCard,
-  Receipt,
   CalendarClock,
   Building2,
   Users,
@@ -17,6 +16,7 @@ import {
   ListChecks,
   Hash,
   Mail,
+  HandCoins,
 } from 'lucide-react';
 
 export interface NavItem {
@@ -67,8 +67,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { id: 'dashboard-negocio', label: 'Dashboard', icon: LayoutDashboard },
       { id: 'conciliacion-negocio', label: 'Conciliación', icon: GitMerge },
       { id: 'facturacion-negocio', label: 'Facturación', icon: FileText },
-      { id: 'cuentas-pagar-negocio', label: 'Cuentas por Pagar', icon: CreditCard },
-      { id: 'cuentas-cobrar-negocio', label: 'Cuentas por Cobrar', icon: Receipt },
+      { id: 'cobros-pagos-negocio', label: 'Cobros y Pagos', icon: HandCoins },
       { id: 'planificacion-pagos-negocio', label: 'Planificación Pagos', icon: CalendarClock },
       { id: 'gestion-negocios', label: 'Gestión de Negocios', icon: Building2 },
     ]
@@ -79,8 +78,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { id: 'dashboard-mensajero', label: 'Dashboard', icon: LayoutDashboard },
       { id: 'conciliacion-mensajero', label: 'Conciliación', icon: GitMerge },
       { id: 'facturacion-mensajero', label: 'Facturación', icon: FileText },
-      { id: 'cuentas-pagar-mensajero', label: 'Cuentas por Pagar', icon: CreditCard },
-      { id: 'cuentas-cobrar-mensajero', label: 'Cuentas por Cobrar', icon: Receipt },
+      { id: 'cobros-pagos-mensajero', label: 'Cobros y Pagos', icon: HandCoins },
       { id: 'planificacion-pagos-mensajero', label: 'Planificación Pagos', icon: CalendarClock },
       { id: 'gestion-mensajeros', label: 'Gestión de Mensajeros', icon: Users },
     ]
