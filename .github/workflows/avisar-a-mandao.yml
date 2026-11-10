@@ -1,0 +1,47 @@
+name: Copiar a Mandao
+
+# En cada push o borrado de rama copia este repo a Mandao-V2/mandao-conciliaciones-clone:
+# las ramas tal cual y main mergeado en la rama "mandao" de allí. La lógica vive en el
+# repo de Mandao (.github/scripts/sincronizar-con-raul.sh, rama mandao) y se descarga en
+# cada ejecución, así que este fichero no necesita cambios.
+#
+# Secreto en este repo: MANDAO_SYNC_TOKEN, token "fine-grained" de la organización
+# Mandao-V2, limitado al repo mandao-conciliaciones-clone, con "Contents" y "Workflows"
+# en Read and write.
+
+on:
+  push:
+  delete:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: copiar-a-mandao
+  cancel-in-progress: false
+
+jobs:
+  copiar:
+    # Este fichero también acaba copiado en el repo de Mandao: allí no debe ejecutarse.
+    if: github.repository == 'raulmandao1986/mandao-conciliaciones'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Copiar a Mandao
+        env:
+          TOKEN_MANDAO: ${{ secrets.MANDAO_SYNC_TOKEN }}
+          TOKEN_RAUL: ${{ github.token }}
+          URL_RAUL: https://github.com/${{ github.repository }}.git
+          URL_MANDAO: https://github.com/Mandao-V2/mandao-conciliaciones-clone.git
+        run: |
+          if [ -z "$TOKEN_MANDAO" ]; then
+            echo "::error::Falta el secreto MANDAO_SYNC_TOKEN."
+            exit 1
+          fi
+          curl -fsS \
+            -H "Authorization: Bearer $TOKEN_MANDAO" \
+            -H "Accept: application/vnd.github.raw" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -o "$RUNNER_TEMP/sincronizar.sh" \
+            "https://api.github.com/repos/Mandao-V2/mandao-conciliaciones-clone/contents/.github/scripts/sincronizar-con-raul.sh?ref=mandao"
+          RESUMEN="$GITHUB_STEP_SUMMARY" bash "$RUNNER_TEMP/sincronizar.sh"
