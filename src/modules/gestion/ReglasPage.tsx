@@ -23,6 +23,7 @@ import {
   type RuleColumn,
   type RuleColumnEntry,
 } from '../../lib/dispatcherRules';
+import { notificar } from '../../lib/notificaciones';
 
 const inputCls = 'h-10 px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] focus:ring-1 focus:ring-[var(--color-primary)] transition-all disabled:bg-[var(--color-surface-2)] disabled:text-[var(--color-text-faint)]';
 
@@ -215,7 +216,7 @@ export function ReglasPage({ actor }: { actor: RuleActor }) {
       logAuditEvent('Configuraciones', 'Regla de Dispatcher eliminada', { actor, nombre: ruleToDelete.nombre, aplicaA: describeCondition(ruleToDelete) });
       await loadRules();
     } catch (err: any) {
-      alert('Error al eliminar la regla. Detalle: ' + (err?.message || err));
+      notificar('Error al eliminar la regla. Detalle: ' + (err?.message || err));
     } finally {
       setRuleToDelete(null);
     }

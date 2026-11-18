@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_IMPORT, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
 import { formatCurrency, formatDate, formatDatetime, toLocalISODate } from '../../lib/formatters';
+import { notificar } from '../../lib/notificaciones';
 // El dispatcher siempre registra los montos en CUP (confirmado por el usuario
 // 2026-09-30) — mismo criterio que Conciliación de Negocios y Dispatcher.
 const formatCUP = (value: number) => formatCurrency(value, 'CUP');
@@ -15,6 +16,7 @@ import {
 } from '../../lib/conciliacion/paymentBuckets';
 import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
 import { EstadoConciliacionControl, ReconciliacionesLog } from '../../lib/conciliacion/EstadoBadge';
+import { Monto } from '../../design-system/primitives/Monto';
 import { puedeReconciliar, parseEstado, cambiarEstadoConciliacion } from '../../lib/conciliacion/estados';
 import { useEnvioConciliaciones, puedeEnviar, type EnvioItem } from './EnvioCorreo';
 import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn, nombreArchivoPdf } from '../../lib/conciliacion/drivePdf';
@@ -233,6 +235,7 @@ export function ConciliacionMensajerosPage() {
   const [fechaInicio, setFechaInicio] = useState(() => toLocalISODate());
   const [fechaFin, setFechaFin] = useState(() => toLocalISODate());
   const [commissionPercent, setCommissionPercent] = useState(10);
+  const [commissionUSD, setCommissionUSD] = useState<number | null>(null);
   const [backpackRates, setBackpackRates] = useState<Record<string, number>>({});
   const [availabilityDiscount, setAvailabilityDiscount] = useState(0);
 
@@ -287,9 +290,15 @@ export function ConciliacionMensajerosPage() {
   };
 
   const loadCommission = async () => {
-    const { data, error } = await supabase.from('commission_settings').select('percentage').eq('entity_type', 'messengers').maybeSingle();
+    // Comisión CUP (base) y, si existe, la de USD (migración 2026-11-16).
+    let { data, error } = await supabase.from('commission_settings').select('percentage, currency').eq('entity_type', 'messengers');
+    if (error && /currency/.test(error.message || '')) ({ data, error } = await supabase.from('commission_settings').select('percentage').eq('entity_type', 'messengers') as any);
     if (error) { console.error('Error loading commission_settings:', error.message); return; }
-    if (data) setCommissionPercent(Number(data.percentage));
+    const filas = (data || []) as { percentage: number; currency?: string }[];
+    const cup = filas.find(r => !r.currency || r.currency === 'CUP');
+    const usd = filas.find(r => r.currency === 'USD');
+    if (cup) setCommissionPercent(Number(cup.percentage));
+    setCommissionUSD(usd ? Number(usd.percentage) : null);
   };
 
   // Tarifa fija por tipo de mochila (Configuración -> Comisión Mandao ->
@@ -429,7 +438,7 @@ export function ConciliacionMensajerosPage() {
       // orden de mensajero es su Delivery Charge. Mensajeros: todo en CUP.
       const calc = computeDesglose(
         ordenesGrupo.map(o => ({ paymentType: o.paymentType, monto: o.deliveryCharge })),
-        commissionPercent,
+        { CUP: commissionPercent, USD: commissionUSD },
         catalogo
       );
       // Tarifa fija por tipo de mochila del mensajero (sección 7.4). Un
@@ -503,7 +512,7 @@ export function ConciliacionMensajerosPage() {
       }
     }, 400);
     return () => clearTimeout(timer);
-  }, [mode, selectedAreaId, fechaInicio, fechaFin, messengers, areas, commissionPercent, backpackRates, availabilityDiscount, pendientesVersion]);
+  }, [mode, selectedAreaId, fechaInicio, fechaFin, messengers, areas, commissionPercent, commissionUSD, backpackRates, availabilityDiscount, pendientesVersion]);
 
   const handleCalcular = async () => {
     if (mode === 'individual' && !selectedMensajeroKey) {
@@ -560,7 +569,7 @@ export function ConciliacionMensajerosPage() {
       setPendientesVersion(v => v + 1);
       await handleCalcular();
     } catch (err: any) {
-      alert('No se pudo activar el mensajero: ' + (err?.message || err));
+      notificar('No se pudo activar el mensajero: ' + (err?.message || err));
     }
   };
   const nombreArea = (areaId: string | null) => areas.find(a => a.id === areaId)?.nombre || 'N/D';
@@ -586,14 +595,14 @@ export function ConciliacionMensajerosPage() {
         });
       }
       if (existentes.length > 0) {
-        alert(`${existentes.map(f => f.mensajeroNombre).join(', ')} ya existe(n) en Gestión de Mensajeros con otro estado o en otra Área: no se registró de nuevo. Revise el aviso de cada uno para activarlo o modificar su información.`);
+        notificar(`${existentes.map(f => f.mensajeroNombre).join(', ')} ya existe(n) en Gestión de Mensajeros con otro estado o en otra Área: no se registró de nuevo. Revise el aviso de cada uno para activarlo o modificar su información.`);
       }
       await loadMessengers();
       setPendientesVersion(v => v + 1);
       await handleCalcular();
     } catch (err: any) {
       console.error('Error registrando mensajeros faltantes:', err);
-      alert('Error al registrar mensajeros. Detalle: ' + (err?.message || err));
+      notificar('Error al registrar mensajeros. Detalle: ' + (err?.message || err));
     } finally {
       setRegistering(false);
     }
@@ -817,7 +826,7 @@ export function ConciliacionMensajerosPage() {
       await cambiarEstadoConciliacion('conciliaciones_messengers', { id: rec.id, estado: rec.estado, nombre: rec.conciliacion, consecutivo: rec.consecutivo }, nuevo);
       setHistory(prev => prev.map(h => (h.id === rec.id ? { ...h, estado: nuevo } : h)));
     } catch (err: any) {
-      alert('No se pudo cambiar el estado: ' + (err?.message || err));
+      notificar('No se pudo cambiar el estado: ' + (err?.message || err));
     }
   };
 
@@ -848,20 +857,17 @@ export function ConciliacionMensajerosPage() {
         fileName: pdfFileNameMensajero,
         displayName: r => r.mensajero,
       });
-      alert(describeDriveResult(drive));
+      notificar(describeDriveResult(drive));
       await loadHistory();
     } finally {
       setSubiendoId(null);
     }
   };
 
-  // Si el PDF está en Google Drive se abre desde allí; si no, se genera al
-  // momento a partir de la fila guardada y se abre en una pestaña nueva.
+  // El PDF se genera al momento con el diseño vigente a partir de la fila
+  // guardada y se abre en una pestaña nueva (2026-11-18: la copia de Google
+  // Drive puede tener un diseño anterior; queda como archivo del envío).
   const handleGenerarPDF = async (rec: ConciliacionRecord) => {
-    if (rec.pdfDriveUrl) {
-      window.open(rec.pdfDriveUrl, '_blank', 'noopener');
-      return;
-    }
     // La pestaña se abre antes del await para que el navegador no la bloquee.
     const win = window.open('', '_blank');
     try {
@@ -872,7 +878,7 @@ export function ConciliacionMensajerosPage() {
     } catch (err: any) {
       win?.close();
       console.error('Error generando PDF:', err);
-      alert('Error al generar el PDF: ' + (err?.message || err));
+      notificar('Error al generar el PDF: ' + (err?.message || err));
     }
   };
 
@@ -981,7 +987,7 @@ export function ConciliacionMensajerosPage() {
         <div className="flex items-center justify-between gap-3">
           <p className="text-[11px] text-[var(--color-text-faint)] flex items-center gap-1.5">
             <Info size={12} />
-            Comisión Mandao vigente: <strong className="text-[var(--color-text-muted)]">{commissionPercent}%</strong> · Descuento Disponibilidad: <strong className="text-[var(--color-text-muted)]">{availabilityDiscount}%</strong> · Moneda: <strong className="text-[var(--color-text-muted)]">CUP</strong>
+            Comisión Mandao vigente: <strong className="text-[var(--color-text-muted)]">{commissionPercent}%{commissionUSD !== null ? ` CUP · ${commissionUSD}% USD` : ''}</strong> · Descuento Disponibilidad: <strong className="text-[var(--color-text-muted)]">{availabilityDiscount}%</strong> · Moneda: <strong className="text-[var(--color-text-muted)]">CUP</strong>
           </p>
           <Button variant="brand" className="gap-2" onClick={handleCalcular} disabled={calculating || (mode === 'individual' && !selectedMensajeroKey)}>
             {calculating ? <Loader2 size={16} className="animate-spin" /> : <Calculator size={16} />}
@@ -1210,23 +1216,21 @@ export function ConciliacionMensajerosPage() {
                         </td>
                         <td className="p-4 text-xs font-mono text-slate-600">{formatDate(r.fechaInicial)} — {formatDate(r.fechaFinal)}</td>
                         <td className="p-4 text-xs font-semibold text-slate-600">{r.viaPago}</td>
-                        <td className="p-4 text-right">
-                          {r.totalPorPagar > r.totalPorCobrar ? (
-                            <span className="font-bold text-sm text-[var(--color-danger)] tabular-nums">Pagar {formatCUP(r.totalPorPagar - r.totalPorCobrar)}</span>
-                          ) : r.totalPorCobrar > r.totalPorPagar ? (
-                            <span className="font-bold text-sm text-[var(--color-success)] tabular-nums">Cobrar {formatCUP(r.totalPorCobrar - r.totalPorPagar)}</span>
-                          ) : (
-                            <span className="font-bold text-sm text-slate-400 tabular-nums">{formatCUP(0)}</span>
-                          )}
+                        <td className="p-4 text-right text-sm">
+                          <Monto valor={r.totalPorPagar - r.totalPorCobrar} moneda={r.moneda} />
                         </td>
                         <td className="p-4">
                           <EstadoConciliacionControl estado={r.estado} neto={r.totalPorPagar - r.totalPorCobrar} editable={canExecute} onCambiar={nuevo => handleCambiarEstado(r, nuevo)} />
                         </td>
                         <td className="p-4" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center gap-2">
-                            <button onClick={() => handleGenerarPDF(r)} className="text-xs font-bold text-blue-600 hover:underline flex items-center gap-1" title={r.pdfDriveUrl ? 'Abrir PDF en Google Drive' : 'Generar/Descargar PDF'}>
-                              <FileText size={12} />
-                              {r.conciliacion}
+                            <button
+                              onClick={() => handleGenerarPDF(r)}
+                              className="p-1.5 rounded-[var(--radius-sm)] text-[var(--color-danger)] hover:bg-[var(--color-danger-bg)]"
+                              aria-label={`Abrir PDF ${r.conciliacion}`}
+                              title={`Abrir PDF: ${r.conciliacion}`}
+                            >
+                              <FileText size={18} />
                             </button>
                             {!r.pdfDriveUrl && canExecute && (
                               <button
@@ -1378,16 +1382,10 @@ function MensajeroResultCard({
             </div>
           )}
 
-          {(calculo.totalPorPagar > calculo.totalPorCobrar) && (
-            <div className="bg-[var(--color-brand)] rounded-lg p-4 flex justify-between items-center">
-              <span className="font-black text-xs uppercase text-[var(--color-brand-ink)]">Total a Pagar al Mensajero</span>
-              <span className="text-xl font-black text-[var(--color-brand-ink)]">{formatCUP(calculo.totalPorPagar - calculo.totalPorCobrar)}</span>
-            </div>
-          )}
-          {(calculo.totalPorCobrar > calculo.totalPorPagar) && (
-            <div className="bg-[var(--color-brand)] rounded-lg p-4 flex justify-between items-center">
-              <span className="font-black text-xs uppercase text-[var(--color-brand-ink)]">Total a Cobrar al Mensajero</span>
-              <span className="text-xl font-black text-[var(--color-brand-ink)]">{formatCUP(calculo.totalPorCobrar - calculo.totalPorPagar)}</span>
+          {!esSaldoCero(calculo.totalPorPagar, calculo.totalPorCobrar) && (
+            <div className="bg-[var(--color-brand)] rounded-lg p-4 flex justify-between items-center text-[var(--color-brand-ink)]">
+              <span className="font-black text-xs uppercase">{calculo.totalPorPagar > calculo.totalPorCobrar ? 'Total a Pagar al Mensajero' : 'Total a Cobrar al Mensajero'}</span>
+              <span className="text-xl font-black tabular-nums">{formatCUP(Math.abs(calculo.totalPorPagar - calculo.totalPorCobrar))}</span>
             </div>
           )}
           {esSaldoCero(calculo.totalPorPagar, calculo.totalPorCobrar) && (
@@ -1511,8 +1509,8 @@ function MasivaResultTable({
                     <td className="p-3 font-bold text-sm text-[var(--color-text)]">{r.mensajeroNombre}</td>
                     <td className="p-3 text-xs text-slate-500">{r.areaNombre}</td>
                     <td className="p-3 text-right text-xs font-mono">{r.ordenes.length}</td>
-                    <td className="p-3 text-right text-xs font-mono font-bold">
-                      {r.totalPorPagar > r.totalPorCobrar ? formatCUP(r.totalPorPagar - r.totalPorCobrar) : r.totalPorCobrar > r.totalPorPagar ? formatCUP(r.totalPorCobrar - r.totalPorPagar) : formatCUP(0)}
+                    <td className="p-3 text-right text-xs">
+                      <Monto valor={r.totalPorPagar - r.totalPorCobrar} moneda="CUP" />
                     </td>
                     <td className="p-3">
                       {r.ordenes.length === 0 ? (

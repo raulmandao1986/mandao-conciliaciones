@@ -1,15 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
-import { Percent, Loader2, Save, Building2, Users, Package, CalendarClock } from 'lucide-react';
+import { Percent, Loader2, Save, Building2, Users, Package, CalendarClock, Plus, Trash2 } from 'lucide-react';
 import { Button } from '../../design-system/primitives/Button';
 import { formatCurrency } from '../../lib/formatters';
+import { cn } from '../../lib/utils';
+import { notificar, confirmar } from '../../lib/notificaciones';
 
+type Entidad = 'businesses' | 'messengers';
+type Moneda = 'CUP' | 'USD';
+// Comisión por entidad y moneda (2026-11-16). La de USD se aplica a las órdenes
+// pagadas con métodos en USD; si no existe, esas órdenes usan la de CUP.
 interface CommissionRecord {
-  entityType: 'businesses' | 'messengers';
+  entityType: Entidad;
+  currency: Moneda;
   percentage: number;
   updatedAt: string | null;
 }
+const ENTIDAD_LABEL: Record<Entidad, string> = { businesses: 'Negocios', messengers: 'Mensajeros' };
 
 interface AvailabilityDiscountRecord {
   percentage: number;
@@ -35,10 +43,10 @@ export function ComisionMandaoPage() {
   const { user } = useAuth();
   const canWrite = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
 
-  const [records, setRecords] = useState<Record<'businesses' | 'messengers', CommissionRecord | null>>({
-    businesses: null,
-    messengers: null,
-  });
+  const [records, setRecords] = useState<CommissionRecord[]>([]);
+  // false = falta la migración 2026-11-16 (sin columna currency): solo CUP.
+  const [conMoneda, setConMoneda] = useState(true);
+  const [agregando, setAgregando] = useState(false);
   const [backpackRates, setBackpackRates] = useState<Record<'Pequeña' | 'Grande', BackpackRateRecord | null>>({
     'Pequeña': null,
     'Grande': null,
@@ -49,7 +57,7 @@ export function ComisionMandaoPage() {
   const load = async () => {
     setLoading(true);
     const [commissionRes, backpackRes, discountRes] = await Promise.all([
-      supabase.from('commission_settings').select('entity_type, percentage, updated_at'),
+      supabase.from('commission_settings').select('entity_type, currency, percentage, updated_at'),
       supabase.from('backpack_rental_rates').select('backpack_type, rate, updated_at'),
       supabase.from('availability_discount_settings').select('percentage, updated_at').eq('entity_type', 'messengers').maybeSingle(),
     ]);
@@ -61,18 +69,20 @@ export function ComisionMandaoPage() {
         ? { percentage: Number(discountRes.data.percentage), updatedAt: discountRes.data.updated_at }
         : null);
     }
-    if (commissionRes.error) {
-      console.error('Error fetching commission_settings:', commissionRes.error.message);
+    let comisiones: any = commissionRes;
+    const sinMoneda = !!commissionRes.error && /currency/.test(commissionRes.error.message || '');
+    if (sinMoneda) comisiones = await supabase.from('commission_settings').select('entity_type, percentage, updated_at');
+    setConMoneda(!sinMoneda);
+    if (comisiones.error) {
+      console.error('Error fetching commission_settings:', comisiones.error.message);
     } else {
-      const next: Record<'businesses' | 'messengers', CommissionRecord | null> = { businesses: null, messengers: null };
-      (commissionRes.data || []).forEach((r: any) => {
-        next[r.entity_type as 'businesses' | 'messengers'] = {
-          entityType: r.entity_type,
-          percentage: Number(r.percentage),
-          updatedAt: r.updated_at,
-        };
-      });
-      setRecords(next);
+      const orden = (r: CommissionRecord) => `${r.entityType}|${r.currency === 'CUP' ? 0 : 1}`;
+      setRecords((comisiones.data || []).map((r: any) => ({
+        entityType: r.entity_type,
+        currency: r.currency === 'USD' ? 'USD' : 'CUP',
+        percentage: Number(r.percentage),
+        updatedAt: r.updated_at,
+      } as CommissionRecord)).sort((a: CommissionRecord, b: CommissionRecord) => orden(a).localeCompare(orden(b))));
     }
     if (backpackRes.error) {
       console.error('Error fetching backpack_rental_rates:', backpackRes.error.message);
@@ -112,27 +122,58 @@ export function ComisionMandaoPage() {
           <h1 className="text-xl font-bold text-[var(--color-text)]">Comisión Mandao</h1>
           <p className="text-sm text-[var(--color-text-muted)] mt-1">
             Porcentaje que retiene Mandao por cada orden. La Conciliación lo usa para calcular Cuentas por
-            Cobrar (Efectivo) y Cuentas por Pagar (Transfermóvil, Saldo Mandao, Tarjeta).
+            Cobrar (Efectivo) y Cuentas por Pagar (Transfermóvil, Saldo Mandao, Tarjeta). La comisión en USD
+            se aplica a las órdenes pagadas con métodos en USD; si no se define, se usa la de CUP.
           </p>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-3xl">
-        <CommissionCard
-          icon={Building2}
-          label="Negocios"
-          record={records.businesses}
-          canWrite={canWrite}
-          onSaved={load}
-        />
-        <CommissionCard
-          icon={Users}
-          label="Mensajeros"
-          record={records.messengers}
-          canWrite={canWrite}
-          onSaved={load}
-        />
+      <div className="space-y-3 max-w-3xl">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm font-bold text-[var(--color-text)] flex items-center gap-2">
+            <Percent size={16} className="text-[var(--color-primary)]" />
+            Comisiones
+          </h2>
+          {canWrite && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              disabled={!conMoneda || records.length >= 4}
+              title={!conMoneda ? 'Falta correr la migración 2026-11-16_comision_por_moneda.sql' : records.length >= 4 ? 'Ya están definidas todas las combinaciones' : 'Agregar comisión'}
+              onClick={() => setAgregando(true)}
+            >
+              <Plus size={14} /> Agregar comisión
+            </Button>
+          )}
+        </div>
+        {!conMoneda && (
+          <p className="text-xs text-[var(--color-warning)] bg-[var(--color-warning-bg)] border border-amber-200 rounded-[var(--radius-sm)] p-2">
+            Para agregar comisiones por moneda falta correr en Supabase la migración 2026-11-16_comision_por_moneda.sql.
+          </p>
+        )}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {records.map(r => (
+            <React.Fragment key={`${r.entityType}|${r.currency}`}>
+              <CommissionCard
+                icon={r.entityType === 'businesses' ? Building2 : Users}
+                label={`${ENTIDAD_LABEL[r.entityType]} · ${r.currency}`}
+                record={r}
+                conMoneda={conMoneda}
+                canWrite={canWrite}
+                onSaved={load}
+              />
+            </React.Fragment>
+          ))}
+        </div>
       </div>
+      {agregando && (
+        <NuevaComisionDialog
+          existentes={records}
+          onCerrar={() => setAgregando(false)}
+          onGuardada={async () => { setAgregando(false); await load(); }}
+        />
+      )}
 
       <div className="space-y-3 max-w-3xl">
         <div>
@@ -171,11 +212,12 @@ export function ComisionMandaoPage() {
 }
 
 function CommissionCard({
-  icon: Icon, label, record, canWrite, onSaved, note
+  icon: Icon, label, record, conMoneda, canWrite, onSaved, note
 }: {
   icon: React.ElementType;
   label: string;
   record: CommissionRecord | null;
+  conMoneda: boolean;
   canWrite: boolean;
   onSaved: () => Promise<void>;
   note?: string;
@@ -192,13 +234,13 @@ function CommissionCard({
   const handleSave = async () => {
     if (!record) return;
     if (draftPercentage < 0 || draftPercentage > 100) {
-      alert('El porcentaje debe estar entre 0 y 100.');
+      notificar('El porcentaje debe estar entre 0 y 100.');
       return;
     }
     setSaving(true);
     try {
       const { data: userData } = await supabase.auth.getUser();
-      const { error } = await supabase
+      let q = supabase
         .from('commission_settings')
         .update({
           percentage: draftPercentage,
@@ -206,6 +248,8 @@ function CommissionCard({
           updated_by: userData?.user?.id || null
         })
         .eq('entity_type', record.entityType);
+      if (conMoneda) q = q.eq('currency', record.currency);
+      const { error } = await q;
       if (error) throw error;
       await logAuditEvent('Configuraciones', `Comisión Mandao (${label}) Actualizada`, {
         porcentajeAnterior: record.percentage,
@@ -215,10 +259,21 @@ function CommissionCard({
       await onSaved();
     } catch (err: any) {
       console.error('Error saving commission:', err);
-      alert('Error al guardar la comisión. Detalle: ' + (err?.message || err));
+      notificar('Error al guardar la comisión. Detalle: ' + (err?.message || err));
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleEliminar = async () => {
+    if (!record) return;
+    const ok = await confirmar(`Se eliminará la comisión ${label} (${record.percentage.toFixed(2)}%). Las órdenes en USD volverán a usar la comisión en CUP en las conciliaciones nuevas.`, { titulo: '¿Eliminar comisión?', textoConfirmar: 'Eliminar' });
+    if (!ok) return;
+    const { error } = await supabase.from('commission_settings').delete().eq('entity_type', record.entityType).eq('currency', record.currency);
+    if (error) { notificar.error('No se pudo eliminar la comisión: ' + error.message); return; }
+    await logAuditEvent('Configuraciones', 'Comisión Mandao Eliminada', { comision: label, porcentaje: record.percentage });
+    notificar.exito(`Comisión ${label} eliminada.`);
+    await onSaved();
   };
 
   return (
@@ -226,6 +281,17 @@ function CommissionCard({
       <div className="flex items-center gap-2 text-sm font-bold text-[var(--color-text)]">
         <Icon size={16} className="text-[var(--color-primary)]" />
         {label}
+        {canWrite && record?.currency === 'USD' && !editing && (
+          <button
+            type="button"
+            onClick={() => { void handleEliminar(); }}
+            aria-label={`Eliminar comisión ${label}`}
+            title="Eliminar comisión"
+            className="ml-auto p-1 rounded text-[var(--color-text-faint)] hover:text-[var(--color-danger)] hover:bg-[var(--color-danger-bg)]"
+          >
+            <Trash2 size={14} />
+          </button>
+        )}
       </div>
 
       {editing ? (
@@ -256,7 +322,7 @@ function CommissionCard({
       ) : (
         <div className="flex items-center justify-between">
           <div>
-            <span className="text-3xl font-black text-[var(--color-text)] font-mono">{record?.percentage.toFixed(2) ?? '—'}%</span>
+            <span className="text-2xl font-black text-[var(--color-text)] font-mono">{record?.percentage.toFixed(2) ?? '—'}%</span>
             <p className="text-xs text-[var(--color-text-faint)] mt-1">
               {record?.updatedAt ? `Actualizado: ${new Date(record.updatedAt).toLocaleString('es-VE')}` : 'Sin actualizar'}
             </p>
@@ -293,7 +359,7 @@ function AvailabilityDiscountCard({
   const handleSave = async () => {
     if (!record) return;
     if (!(draft >= 0 && draft <= 100)) {
-      alert('El porcentaje debe estar entre 0 y 100.');
+      notificar('El porcentaje debe estar entre 0 y 100.');
       return;
     }
     setSaving(true);
@@ -316,7 +382,7 @@ function AvailabilityDiscountCard({
       await onSaved();
     } catch (err: any) {
       console.error('Error saving availability discount:', err);
-      alert('Error al guardar el descuento. Detalle: ' + (err?.message || err));
+      notificar('Error al guardar el descuento. Detalle: ' + (err?.message || err));
     } finally {
       setSaving(false);
     }
@@ -397,7 +463,7 @@ function BackpackRateCard({
 
   const handleSave = async () => {
     if (draftRate < 0) {
-      alert('La tarifa no puede ser negativa.');
+      notificar('La tarifa no puede ser negativa.');
       return;
     }
     setSaving(true);
@@ -420,7 +486,7 @@ function BackpackRateCard({
       await onSaved();
     } catch (err: any) {
       console.error('Error saving backpack rate:', err);
-      alert('Error al guardar la tarifa. Detalle: ' + (err?.message || err));
+      notificar('Error al guardar la tarifa. Detalle: ' + (err?.message || err));
     } finally {
       setSaving(false);
     }
@@ -467,6 +533,75 @@ function BackpackRateCard({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function NuevaComisionDialog({ existentes, onCerrar, onGuardada }: {
+  existentes: CommissionRecord[];
+  onCerrar: () => void;
+  onGuardada: () => Promise<void>;
+}) {
+  const libres = (['businesses', 'messengers'] as Entidad[]).flatMap(e => (['CUP', 'USD'] as Moneda[]).map(m => ({ e, m })))
+    .filter(x => !existentes.some(r => r.entityType === x.e && r.currency === x.m));
+  const [entidad, setEntidad] = useState<Entidad>(libres[0]?.e || 'businesses');
+  const [moneda, setMoneda] = useState<Moneda>(libres.find(x => x.e === (libres[0]?.e || 'businesses'))?.m || 'USD');
+  const [porcentaje, setPorcentaje] = useState('');
+  const [guardando, setGuardando] = useState(false);
+  const yaExiste = existentes.some(r => r.entityType === entidad && r.currency === moneda);
+  const pct = Number(porcentaje);
+  const errPct = porcentaje === '' ? null : !(pct >= 0 && pct <= 100) ? 'El porcentaje debe estar entre 0 y 100.' : null;
+
+  const guardar = async () => {
+    if (yaExiste || errPct || porcentaje === '') return;
+    setGuardando(true);
+    const { data: userData } = await supabase.auth.getUser();
+    const { error } = await supabase.from('commission_settings').insert({
+      entity_type: entidad, currency: moneda, percentage: pct,
+      updated_at: new Date().toISOString(), updated_by: userData?.user?.id || null,
+    });
+    setGuardando(false);
+    if (error) { notificar.error('No se pudo agregar la comisión: ' + error.message); return; }
+    await logAuditEvent('Configuraciones', 'Comisión Mandao Agregada', { datos: { 'Aplica a': ENTIDAD_LABEL[entidad], 'Moneda': moneda, 'Porcentaje': `${pct}%` } });
+    notificar.exito(`Comisión ${ENTIDAD_LABEL[entidad]} · ${moneda} agregada (${pct}%).`);
+    await onGuardada();
+  };
+
+  const campo = 'h-10 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] focus:ring-2 focus:ring-teal-500/20';
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/30" onClick={onCerrar} />
+      <div role="dialog" aria-modal="true" aria-labelledby="titulo-nueva-comision" className="relative bg-[var(--color-surface)] rounded-[var(--radius-md)] shadow-xl border border-[var(--color-border)] p-6 w-full max-w-sm space-y-4">
+        <h2 id="titulo-nueva-comision" className="text-base font-bold text-[var(--color-text)]">Agregar comisión</h2>
+        <label className="grid gap-1.5">
+          <span className="text-sm font-medium text-[var(--color-text)]">Aplica a<span className="text-[var(--color-danger)] ml-0.5">*</span></span>
+          <select value={entidad} onChange={(e) => setEntidad(e.target.value as Entidad)} className={campo}>
+            <option value="businesses">Negocios</option>
+            <option value="messengers">Mensajeros</option>
+          </select>
+        </label>
+        <label className="grid gap-1.5">
+          <span className="text-sm font-medium text-[var(--color-text)]">Moneda<span className="text-[var(--color-danger)] ml-0.5">*</span></span>
+          <select value={moneda} onChange={(e) => setMoneda(e.target.value as Moneda)} className={campo}>
+            <option value="CUP">CUP</option>
+            <option value="USD">USD</option>
+          </select>
+          {yaExiste
+            ? <span className="text-xs font-medium text-[var(--color-danger)]">Ya existe la comisión {ENTIDAD_LABEL[entidad]} · {moneda}: edítela en su tarjeta.</span>
+            : <span className="text-xs text-[var(--color-text-muted)]">{moneda === 'USD' ? 'Se aplica a las órdenes pagadas con métodos en USD.' : 'Se aplica a las órdenes pagadas con métodos en CUP.'}</span>}
+        </label>
+        <label className="grid gap-1.5">
+          <span className="text-sm font-medium text-[var(--color-text)]">Porcentaje (%)<span className="text-[var(--color-danger)] ml-0.5">*</span></span>
+          <input type="number" step="0.01" min="0" max="100" value={porcentaje} onChange={(e) => setPorcentaje(e.target.value)} className={cn(campo, 'text-right tabular-nums')} placeholder="Ej. 15" />
+          {errPct && <span className="text-xs font-medium text-[var(--color-danger)]">{errPct}</span>}
+        </label>
+        <div className="flex justify-end gap-2 pt-1">
+          <Button variant="ghost" onClick={onCerrar}>Cancelar</Button>
+          <Button variant="brand" className="gap-2" disabled={guardando || yaExiste || !!errPct || porcentaje === ''} onClick={() => { void guardar(); }}>
+            {guardando ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />} Agregar
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

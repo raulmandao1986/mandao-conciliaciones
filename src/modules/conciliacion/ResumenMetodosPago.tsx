@@ -1,6 +1,6 @@
 import React from 'react';
 import { BarChart3 } from 'lucide-react';
-import { formatCurrency } from '../../lib/formatters';
+import { Monto } from '../../design-system/primitives/Monto';
 import { TIPOLOGIA_LABEL, type LineaGrupo } from '../../lib/conciliacion/catalogoPagos';
 
 // Resumen del período en la Conciliación Masiva (pedido por el usuario
@@ -115,9 +115,9 @@ export function ResumenMetodosPago({
                 <td className="p-3 font-semibold text-[var(--color-text)]">{f.metodo}</td>
                 <td className="p-3 text-xs font-mono text-slate-500">{f.moneda}</td>
                 <td className={num}>{f.ordenes.toLocaleString('es-VE')}</td>
-                <td className={`${num} font-semibold`}>{formatCurrency(f.ventas, f.moneda)}</td>
-                <td className={num}>{f.beneficio === null ? '—' : formatCurrency(f.beneficio, f.moneda)}</td>
-                <td className={num}>{f.comision === null ? '—' : formatCurrency(f.comision, f.moneda)}</td>
+                <td className={`${num} font-semibold`}><Monto valor={f.ventas} moneda={f.moneda} tono="texto" /></td>
+                <td className={num}>{f.beneficio === null ? '—' : <Monto valor={f.beneficio} moneda={f.moneda} tono="texto" />}</td>
+                <td className={num}>{f.comision === null ? '—' : <Monto valor={f.comision} moneda={f.moneda} tono="texto" />}</td>
               </tr>
             ))}
           </tbody>
@@ -128,9 +128,9 @@ export function ResumenMetodosPago({
                   <td className="p-3 text-[var(--color-text)]">Total {t.moneda}</td>
                   <td className="p-3 text-xs font-mono text-slate-500">{t.moneda}</td>
                   <td className={num}>{t.ordenes.toLocaleString('es-VE')}</td>
-                  <td className={num}>{formatCurrency(t.ventas, t.moneda)}</td>
-                  <td className={num}>{formatCurrency(t.beneficio, t.moneda)}</td>
-                  <td className={num}>{formatCurrency(t.comision, t.moneda)}</td>
+                  <td className={num}><Monto valor={t.ventas} moneda={t.moneda} tono="texto" /></td>
+                  <td className={num}><Monto valor={t.beneficio} moneda={t.moneda} tono="texto" /></td>
+                  <td className={num}><Monto valor={t.comision} moneda={t.moneda} tono="texto" /></td>
                 </tr>
               ))}
             </tfoot>

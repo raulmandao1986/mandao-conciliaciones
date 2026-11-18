@@ -10,6 +10,7 @@ import { ShieldCheck, Search, Loader2, Edit2, Trash2, Mail, Calendar, Save, Plus
 import { SlideOver } from '../../design-system/primitives/SlideOver';
 import { cn } from '../../lib/utils';
 import { formatDate } from '../../lib/formatters';
+import { notificar } from '../../lib/notificaciones';
 
 interface UserRecord {
   id: string;
@@ -240,7 +241,7 @@ function UsuariosTab({ canWrite, accessRoles }: { canWrite: boolean; accessRoles
     if (!selectedUser) return;
     const chosenRole = accessRoles.find(r => r.id === formData.accessRoleId);
     if (!chosenRole) {
-      alert('Selecciona un Rol válido.');
+      notificar('Selecciona un Rol válido.');
       return;
     }
     setSaving(true);
@@ -266,7 +267,7 @@ function UsuariosTab({ canWrite, accessRoles }: { canWrite: boolean; accessRoles
       await loadUsers();
     } catch (err: any) {
       console.error('Error updating profile:', err);
-      alert('Error al actualizar el usuario. Detalle: ' + (err?.message || err));
+      notificar('Error al actualizar el usuario. Detalle: ' + (err?.message || err));
     } finally {
       setSaving(false);
     }
@@ -658,7 +659,7 @@ function RolesTab({
       await onReload();
     } catch (err: any) {
       console.error('Error saving access role:', err);
-      alert('Error al guardar el rol. Detalle: ' + (err?.message || err));
+      notificar('Error al guardar el rol. Detalle: ' + (err?.message || err));
     } finally {
       setSaving(false);
     }
@@ -677,7 +678,7 @@ function RolesTab({
       await onReload();
     } catch (err: any) {
       console.error('Error deleting access role:', err);
-      alert('Error al eliminar el rol. Detalle: ' + (err?.message || err));
+      notificar('Error al eliminar el rol. Detalle: ' + (err?.message || err));
     } finally {
       setDeleteConfirmOpen(false);
       setRoleIdToDelete(null);

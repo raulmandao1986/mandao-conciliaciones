@@ -571,7 +571,7 @@ Al conciliar se inserta 1 fila por cada liquidación elegible (un negocio con M�
 
 | Estado | Significado | Pasa a |
 |---|---|---|
-| **Nuevo** | Registrada; se puede reconciliar. | Enviado |
+| **Nuevo** | Registrada; se puede reconciliar. | Enviado · Confirmado (sin pasar por Enviado) |
 | **Enviado** | PDF enviado al negocio/mensajero (automático al enviar por correo, o manual). Se puede reconciliar. | Confirmado · volver a Nuevo |
 | **Confirmado** | El negocio/mensajero dio su conformidad. **Montos bloqueados.** | Pagado o Cobrado (según el neto) · volver a Enviado |
 | **Pagado** | Mandao pagó el neto (fila Por Pagar). | — (final) |

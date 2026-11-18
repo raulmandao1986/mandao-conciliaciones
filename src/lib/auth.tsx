@@ -1,5 +1,5 @@
 import { createContext, useContext, ReactNode, useState, useEffect } from 'react';
-import { supabase, syncGoogleTokenToSessionStorage, ALLOWED_EMAIL_DOMAIN } from './supabase';
+import { supabase, syncGoogleTokenToSessionStorage, renovarGoogleToken, googleTokenPorVencer, ALLOWED_EMAIL_DOMAIN } from './supabase';
 import type { Session } from '@supabase/supabase-js';
 
 // Modelo de roles fijo — decisión confirmada: solo estos 4 existen.
@@ -138,6 +138,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     return () => listener.subscription.unsubscribe();
   }, []);
+
+  // Renovación automática del permiso de Google (dura 1 h): se revisa cada
+  // 4 minutos y al volver a la pestaña, y se renueva antes de que venza, así
+  // Sheets, Gmail y Drive siguen funcionando sin "Reconectar Google".
+  useEffect(() => {
+    if (!session?.user) return;
+    const revisar = () => { if (googleTokenPorVencer()) void renovarGoogleToken(); };
+    revisar();
+    const timer = window.setInterval(revisar, 4 * 60 * 1000);
+    const alVolver = () => { if (document.visibilityState === 'visible') revisar(); };
+    document.addEventListener('visibilitychange', alVolver);
+    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', alVolver); };
+  }, [session?.user?.id]);
 
   const user: User | null = session?.user && profile
     ? {

@@ -31,6 +31,7 @@ import { useAuth } from '../../lib/auth';
 import { parseSheetDate, normalizeSheetDateStr } from '../../lib/sheetDateParser';
 import { locateHeaderRow, DISPONIBILIDAD_HEADERS, columnLetter } from '../../lib/sheetHeaders';
 import { toLocalISODate } from '../../lib/formatters';
+import { notificar } from '../../lib/notificaciones';
 
 const NOTIFY_EMAILS_STORAGE_KEY = 'mandao_notify_emails';
 
@@ -302,7 +303,7 @@ export function DisponibilidadVerificationPage() {
       await reconnectGoogle();
     } catch (error: any) {
       console.error("Error connecting Google:", error);
-      alert("Error al conectar con Google: " + error.message);
+      notificar("Error al conectar con Google: " + error.message);
     }
     return null;
   };
@@ -310,7 +311,7 @@ export function DisponibilidadVerificationPage() {
   const handleDisconnectGoogle = () => {
     setGoogleToken(null);
     sessionStorage.removeItem('google_access_token');
-    alert("Desconectado de Google API.");
+    notificar("Desconectado de Google API.");
   };
 
   const handleSaveConfig = async () => {
@@ -320,7 +321,7 @@ export function DisponibilidadVerificationPage() {
       showToast('success', "¡Parámetros de configuración guardados correctamente!");
     } catch (err: any) {
       console.error("Error saving config:", err);
-      alert("Error al guardar la configuración: " + err.message);
+      notificar("Error al guardar la configuración: " + err.message);
     } finally {
       setIsSavingConfig(false);
     }
@@ -328,7 +329,7 @@ export function DisponibilidadVerificationPage() {
 
   const handleVerify = async () => {
     if (!spreadsheetId.trim()) {
-      alert("Por favor, ingresa un ID de documento de Google Sheets válido.");
+      notificar("Por favor, ingresa un ID de documento de Google Sheets válido.");
       return;
     }
 
@@ -637,7 +638,7 @@ export function DisponibilidadVerificationPage() {
     } catch (error: any) {
       addLog('error', `Fallo crítico de verificación: ${error.message}`);
       console.error("Verification error:", error);
-      alert("Error en la verificación: " + error.message);
+      notificar("Error en la verificación: " + error.message);
     } finally {
       setLoading(false);
     }
@@ -671,7 +672,7 @@ export function DisponibilidadVerificationPage() {
         if (importErr.code === '23505') {
           addLog('error', `RN-013: Ya existe una importación registrada para el área "${activeAreaName}" en el rango de fechas ${formData.fechaInicio} a ${formData.fechaFin}.`);
           showToast('error', 'Error RN-013: Importación duplicada detectada para este rango de fechas y área.');
-          alert(`Error RN-013: Ya existe una importación registrada para el área "${activeAreaName}" en el rango de fechas de ${formData.fechaInicio} a ${formData.fechaFin}.`);
+          notificar(`Error RN-013: Ya existe una importación registrada para el área "${activeAreaName}" en el rango de fechas de ${formData.fechaInicio} a ${formData.fechaFin}.`);
           setImporting(false);
           return;
         }
@@ -714,7 +715,7 @@ export function DisponibilidadVerificationPage() {
 
     } catch (e: any) {
       addLog('error', `Error durante la importación: ${e.message}`);
-      alert("Error al importar registros: " + e.message);
+      notificar("Error al importar registros: " + e.message);
     } finally {
       setImporting(false);
     }
@@ -724,11 +725,11 @@ export function DisponibilidadVerificationPage() {
     if (!result) return;
     const activeToken = googleToken;
     if (!activeToken) {
-      alert("Debes estar conectado a Google API para poder enviar correos de notificación.");
+      notificar("Debes estar conectado a Google API para poder enviar correos de notificación.");
       return;
     }
     if (!notifyEmails.trim()) {
-      alert("Por favor, configura al menos una dirección de correo para notificar.");
+      notificar("Por favor, configura al menos una dirección de correo para notificar.");
       return;
     }
 

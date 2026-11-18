@@ -32,6 +32,7 @@ import {
 import { SlideOver } from '../../design-system/primitives/SlideOver';
 import { diffCambios, datosLegibles } from '../../lib/auditDiff';
 import { tomarEdicionPendiente } from '../../lib/conciliacion/catalogoEntidad';
+import { notificar } from '../../lib/notificaciones';
 
 // Etiquetas de los campos para el Log de Auditoría (antes / después).
 const ETIQUETAS_LOG: Record<string, string> = {
@@ -486,7 +487,7 @@ export function GestionNegociosPage() {
       await loadBusinesses();
     } catch (error: any) {
       console.error('Error saving business:', error);
-      alert('Error al guardar el negocio. Detalle: ' + (error?.message || error));
+      notificar('Error al guardar el negocio. Detalle: ' + (error?.message || error));
     } finally {
       setSaving(false);
     }
@@ -512,7 +513,7 @@ export function GestionNegociosPage() {
       await loadBusinesses();
     } catch (err: any) {
       console.error('Error deleting business:', err);
-      alert('Error al eliminar el negocio. Detalle: ' + (err?.message || err));
+      notificar('Error al eliminar el negocio. Detalle: ' + (err?.message || err));
     } finally {
       setDeleteConfirmOpen(false);
       setBusinessIdToDelete(null);

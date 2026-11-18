@@ -1,9 +1,11 @@
 // src/lib/formatters.ts
 
+// Monto seguido de la moneda: "236,41 USD" / "30.920,20 CUP" (formato pedido
+// 2026-11-16 para todo el sistema).
 export const formatCurrency = (value: number, currency = "USD") =>
-  new Intl.NumberFormat("es-VE", {
-    style: "currency", currency, minimumFractionDigits: 2
-  }).format(value);
+  `${new Intl.NumberFormat("es-VE", {
+    minimumFractionDigits: 2, maximumFractionDigits: 2
+  }).format(value)} ${currency}`;
 
 export const formatQty = (value: number) =>
   new Intl.NumberFormat("es-VE", {

@@ -9,6 +9,7 @@ import {
   CORREO_KEYS, PLANTILLA_DEFECTO, VARIABLES_CORREO, loadPlantillaCorreo, aplicarPlantilla, parseCorreos,
   type PlantillaCorreo,
 } from '../../lib/conciliacion/envioCorreo';
+import { notificar } from '../../lib/notificaciones';
 
 // Configuración -> Correo de Conciliación (2026-10-27d): asunto, cuerpo y
 // copia del correo con que se envían los PDF de conciliación a negocios y
@@ -62,7 +63,7 @@ export function CorreoConciliacionPage() {
       { setting_key: CORREO_KEYS.cuerpo, value: form.cuerpo.trim(), updated_at: ahora, updated_by: user?.id || null },
       { setting_key: CORREO_KEYS.cc, value: parseCorreos(form.cc).join(', '), updated_at: ahora, updated_by: user?.id || null },
     ], { onConflict: 'setting_key' });
-    if (e) alert('No se pudo guardar la plantilla: ' + e.message);
+    if (e) notificar('No se pudo guardar la plantilla: ' + e.message);
     else {
       logAuditEvent('Configuraciones', 'Plantilla de Correo de Conciliación Actualizada', { asunto: form.asunto.trim(), cc: parseCorreos(form.cc) });
       await load();

@@ -4,6 +4,7 @@ import { supabase, logAuditEvent } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
 import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
+import { notificar } from '../../lib/notificaciones';
 
 // Configuración -> Formato de Consecutivo (2026-10-27c).
 // Una serie por Entidad × Sentido × Moneda: cada una con su formato y su
@@ -91,7 +92,7 @@ export function FormatoConsecutivoPage() {
       prefijo: d.prefijo.toUpperCase(), formato_anio: d.formatoAnio, separador: d.separador,
       digitos: d.digitos, reinicio: d.reinicio, updated_at: new Date().toISOString(),
     }).eq('serie', s.serie);
-    if (e) alert('No se pudo guardar el formato: ' + e.message);
+    if (e) notificar('No se pudo guardar el formato: ' + e.message);
     else {
       logAuditEvent('Configuraciones', 'Formato de Consecutivo Actualizado', {
         serie: s.serie,

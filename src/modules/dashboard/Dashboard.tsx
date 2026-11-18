@@ -6,14 +6,18 @@ import {
 import { supabase } from '../../lib/supabase';
 import { formatCurrency, formatDatetime, formatQty, formatPercent } from '../../lib/formatters';
 import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
+import { normalizeEntityName } from '../../lib/conciliacion/paymentBuckets';
+import { Monto } from '../../design-system/primitives/Monto';
 import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
 import { MontoPagarChart, type SemanaMonto } from './MontoPagarChart';
 
 // Dashboard General (pedido por el usuario 2026-10-07): órdenes del
 // Dispatcher, conciliaciones registradas, altas de Negocios/Mensajeros y
-// monto a pagar conciliado en el período elegido (por defecto, los últimos
-// 30 días), comparado con el período anterior de igual duración.
+// monto a pagar conciliado en el rango Desde–Hasta elegido (por defecto, el
+// último mes vencido, 2026-11-16), comparado con el período anterior de igual
+// duración. Negocios/Mensajeros "operativos" = los del catálogo que tuvieron
+// órdenes en el rango.
 
 interface AuditLogEntry {
   log_id: string;
@@ -35,17 +39,13 @@ const daysBetween = (a: string, b: string) =>
   Math.round((new Date(`${b}T00:00:00`).getTime() - new Date(`${a}T00:00:00`).getTime()) / 86400000);
 const ddmm = (iso: string) => `${iso.slice(8, 10)}/${iso.slice(5, 7)}`;
 
-function buildPeriodos(): Periodo[] {
+// Último mes vencido: del día 1 al último día del mes anterior al actual.
+function mesVencido(): { desde: string; hasta: string } {
   const hoy = new Date();
-  const manana = toISODate(new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate() + 1));
-  const list: Periodo[] = [{ key: 'ultimos30', label: 'Últimos 30 días', start: addDays(manana, -30), end: manana }];
-  for (let i = 0; i < 12; i++) {
-    const ini = new Date(hoy.getFullYear(), hoy.getMonth() - i, 1);
-    const fin = new Date(hoy.getFullYear(), hoy.getMonth() - i + 1, 1);
-    const nombre = ini.toLocaleDateString('es-VE', { month: 'long', year: 'numeric' });
-    list.push({ key: toISODate(ini), label: nombre.charAt(0).toUpperCase() + nombre.slice(1), start: toISODate(ini), end: toISODate(fin) });
-  }
-  return list;
+  return {
+    desde: toISODate(new Date(hoy.getFullYear(), hoy.getMonth() - 1, 1)),
+    hasta: toISODate(new Date(hoy.getFullYear(), hoy.getMonth(), 0)),
+  };
 }
 
 interface DashboardData {
@@ -58,9 +58,11 @@ interface DashboardData {
   negociosTotal: number;
   negociosActivos: number;
   negociosNuevos: number;
+  negociosOperativos: number;
   mensajerosTotal: number;
   mensajerosActivos: number;
   mensajerosNuevos: number;
+  mensajerosOperativos: number;
   pagarNegociosCUP: number;
   pagarNegociosUSD: number;
   pagarMensajeros: number;
@@ -84,7 +86,7 @@ async function loadDashboard(p: Periodo): Promise<DashboardData> {
     ordenes, ordenesPrev, incidencias,
     negociosTotal, negociosActivos, negociosNuevos,
     mensajerosTotal, mensajerosActivos, mensajerosNuevos,
-    concPrevNeg, concPrevMen, concNeg, concMen, logsRes,
+    concPrevNeg, concPrevMen, concNeg, concMen, logsRes, ordenesRango, catNegocios, catMensajeros,
   ] = await Promise.all([
     count(supabase.from('dispatcher').select('order_pk', head).gte('delivery_date', p.start).lt('delivery_date', p.end)),
     count(supabase.from('dispatcher').select('order_pk', head).gte('delivery_date', prevStart).lt('delivery_date', p.start)),
@@ -104,7 +106,20 @@ async function loadDashboard(p: Periodo): Promise<DashboardData> {
       .select('conciliacion_id, fecha, total_por_pagar, total_por_cobrar')
       .gte('fecha', p.start).lt('fecha', p.end).order('conciliacion_id').range(from, to)),
     supabase.from('audit_logs').select('log_id, module, action, occurred_at').order('occurred_at', { ascending: false }).limit(6),
+    // Operativos: negocios (store) y mensajeros (driver) con órdenes en el rango.
+    fetchAllRows<any>((from, to) => supabase.from('dispatcher')
+      .select('order_pk, store, driver, area_id')
+      .gte('delivery_date', p.start).lt('delivery_date', p.end).order('order_pk').range(from, to)),
+    fetchAllRows<any>((from, to) => supabase.from('businesses').select('business_id, name, area_id').order('business_id').range(from, to)),
+    fetchAllRows<any>((from, to) => supabase.from('messengers').select('messenger_id, name, area_id').order('messenger_id').range(from, to)),
   ]);
+
+  // Cuenta los del catálogo (nombre normalizado + Área) que aparecen en las órdenes.
+  const operativos = (catalogo: any[], campo: 'store' | 'driver', idCol: string) => {
+    const enOrdenes = new Set<string>();
+    ordenesRango.forEach((o: any) => { if (o[campo]) enOrdenes.add(`${normalizeEntityName(o[campo])}|${o.area_id}`); });
+    return new Set(catalogo.filter(c => enOrdenes.has(`${normalizeEntityName(c.name)}|${c.area_id}`)).map(c => c[idCol])).size;
+  };
 
   // Semanas de 7 días desde el inicio del período.
   const semanas: SemanaMonto[] = [];
@@ -134,7 +149,9 @@ async function loadDashboard(p: Periodo): Promise<DashboardData> {
     ordenes, ordenesPrev, incidencias,
     concNegocios: concNeg.length, concMensajeros: concMen.length, concPrev: concPrevNeg + concPrevMen,
     negociosTotal, negociosActivos, negociosNuevos,
+    negociosOperativos: operativos(catNegocios, 'store', 'business_id'),
     mensajerosTotal, mensajerosActivos, mensajerosNuevos,
+    mensajerosOperativos: operativos(catMensajeros, 'driver', 'messenger_id'),
     pagarNegociosCUP, pagarNegociosUSD, pagarMensajeros, cobrarCUP,
     semanas,
     logs: (logsRes.data as AuditLogEntry[]) ?? [],
@@ -184,25 +201,41 @@ function Kpi({ label, value, icon: Icon, tone, children }: {
   );
 }
 
-function ActivosTotal({ label, icon: Icon, activos, total, nuevos }: { label: string; icon: React.ElementType; activos: number; total: number; nuevos: number }) {
-  const pct = total > 0 ? (activos / total) * 100 : 0;
+// Operativos (con órdenes en el rango) dentro de los Activos dentro del Total
+// registrado: barra en tres capas, de la más fuerte a la más clara.
+function ActivosTotal({ label, icon: Icon, activos, operativos, total, nuevos }: {
+  label: string; icon: React.ElementType; activos: number; operativos: number; total: number; nuevos: number;
+}) {
+  const pct = (n: number) => (total > 0 ? Math.min(100, (n / total) * 100) : 0);
   return (
     <Card>
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-start justify-between gap-3">
         <p className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wider flex items-center gap-2">
           <Icon size={14} /> {label}
         </p>
-        <span className="text-[11px] text-[var(--color-text-faint)] tabular-nums">{formatPercent(pct)} activos</span>
+        <div className="text-right text-[11px] leading-tight tabular-nums">
+          <p className="text-[var(--color-text-muted)]"><strong className="text-[var(--color-text)]">{formatPercent(pct(activos))}</strong> activos</p>
+          <p className="text-[var(--color-text-muted)]"><strong className="text-[var(--color-success)]">{formatPercent(pct(operativos))}</strong> operativos</p>
+          <p className="text-[var(--color-text-faint)]">Total {formatQty(total)}</p>
+        </div>
       </div>
       <p className="text-2xl font-bold text-[var(--color-text)] mt-1 tabular-nums">
-        {formatQty(activos)} <span className="text-base font-semibold text-[var(--color-text-faint)]">/ {formatQty(total)}</span>
+        {formatQty(operativos)} <span className="text-sm font-semibold text-[var(--color-text-faint)]">operativos · {formatQty(activos)} activos</span>
       </p>
-      <div className="mt-2 h-1.5 rounded-full bg-[var(--color-surface-3)] overflow-hidden" aria-hidden>
-        <div className="h-full rounded-full bg-[var(--color-success)]" style={{ width: `${pct}%` }} />
+      <div
+        className="relative mt-2 h-2 rounded-full bg-[var(--color-surface-3)] overflow-hidden"
+        role="img"
+        aria-label={`${operativos} operativos, ${activos} activos de ${total} registrados`}
+      >
+        <div className="absolute inset-y-0 left-0 rounded-full bg-[var(--color-success)] opacity-30" style={{ width: `${pct(activos)}%` }} />
+        <div className="absolute inset-y-0 left-0 rounded-full bg-[var(--color-success)]" style={{ width: `${pct(operativos)}%` }} />
       </div>
-      <p className="mt-2 text-[11px] text-[var(--color-text-muted)]">
-        Activos / Total registrados · <strong className="text-[var(--color-text)] tabular-nums">{formatQty(total - activos)}</strong> inactivos · <strong className="text-[var(--color-text)] tabular-nums">{formatQty(nuevos)}</strong> nuevos en el período
-      </p>
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[var(--color-text-muted)]">
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-[var(--color-success)]" aria-hidden />Operativos (con órdenes en el rango)</span>
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-[var(--color-success)] opacity-30" aria-hidden />Activos</span>
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-[var(--color-surface-3)] border border-[var(--color-border)]" aria-hidden />Total</span>
+        <span>· <strong className="text-[var(--color-text)] tabular-nums">{formatQty(nuevos)}</strong> nuevos en el período</span>
+      </div>
     </Card>
   );
 }
@@ -217,9 +250,13 @@ function SkeletonCard({ tall }: { tall?: boolean }) {
 }
 
 export function Dashboard() {
-  const periodos = useMemo(buildPeriodos, []);
-  const [periodoKey, setPeriodoKey] = useState('ultimos30');
-  const periodo = periodos.find(x => x.key === periodoKey) || periodos[0];
+  const inicial = useMemo(mesVencido, []);
+  const [desde, setDesde] = useState(inicial.desde);
+  const [hasta, setHasta] = useState(inicial.hasta);
+  const rangoValido = !!desde && !!hasta && desde <= hasta;
+  const periodo: Periodo = rangoValido
+    ? { key: `${desde}|${hasta}`, label: '', start: desde, end: addDays(hasta, 1) }
+    : { key: `${inicial.desde}|${inicial.hasta}`, label: '', start: inicial.desde, end: addDays(inicial.hasta, 1) };
   const [data, setData] = useState<DashboardData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -247,16 +284,32 @@ export function Dashboard() {
             Dispatcher, conciliaciones y catálogos de Negocios y Mensajeros · <span className="tabular-nums">{rango}</span>
           </p>
         </div>
-        <label className="flex flex-col gap-1.5">
-          <span className="text-sm font-medium text-[var(--color-text)]">Período</span>
-          <select
-            value={periodoKey}
-            onChange={(e) => setPeriodoKey(e.target.value)}
-            className="h-9 px-3 text-sm bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] outline-none focus:border-[var(--color-primary)] focus:ring-2 focus:ring-teal-500/20"
-          >
-            {periodos.map(x => <option key={x.key} value={x.key}>{x.label}</option>)}
-          </select>
-        </label>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-[var(--color-text)]">Desde</span>
+            <input
+              type="date"
+              value={desde}
+              max={hasta || undefined}
+              onChange={(e) => setDesde(e.target.value)}
+              className="h-9 px-3 text-sm font-mono bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] outline-none focus:border-[var(--color-primary)] focus:ring-2 focus:ring-teal-500/20"
+            />
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-[var(--color-text)]">Hasta</span>
+            <input
+              type="date"
+              value={hasta}
+              min={desde || undefined}
+              onChange={(e) => setHasta(e.target.value)}
+              className="h-9 px-3 text-sm font-mono bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] outline-none focus:border-[var(--color-primary)] focus:ring-2 focus:ring-teal-500/20"
+            />
+          </label>
+          {(desde !== inicial.desde || hasta !== inicial.hasta) && (
+            <Button variant="ghost" size="sm" onClick={() => { setDesde(inicial.desde); setHasta(inicial.hasta); }}>Último mes vencido</Button>
+          )}
+          {!rangoValido && <span className="text-xs font-medium text-[var(--color-danger)] w-full text-right">"Desde" debe ser anterior o igual a "Hasta".</span>}
+        </div>
       </div>
 
       {error ? (
@@ -295,8 +348,8 @@ export function Dashboard() {
 
           {/* Catálogos */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            <ActivosTotal label="Negocios" icon={Store} activos={data.negociosActivos} total={data.negociosTotal} nuevos={data.negociosNuevos} />
-            <ActivosTotal label="Mensajeros" icon={Users} activos={data.mensajerosActivos} total={data.mensajerosTotal} nuevos={data.mensajerosNuevos} />
+            <ActivosTotal label="Negocios" icon={Store} activos={data.negociosActivos} operativos={data.negociosOperativos} total={data.negociosTotal} nuevos={data.negociosNuevos} />
+            <ActivosTotal label="Mensajeros" icon={Users} activos={data.mensajerosActivos} operativos={data.mensajerosOperativos} total={data.mensajerosTotal} nuevos={data.mensajerosNuevos} />
             <Kpi label="Incidencias Dispatcher" value={formatQty(data.incidencias)} icon={AlertCircle} tone="warning">
               <p className="text-[11px] text-[var(--color-text-muted)]">Total registradas en verificaciones</p>
             </Kpi>
@@ -313,16 +366,16 @@ export function Dashboard() {
             </div>
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
               {[
-                { label: 'Negocios (CUP)', value: formatCurrency(data.pagarNegociosCUP, 'CUP'), dot: '#2a78d6' },
-                { label: 'Mensajeros (CUP)', value: formatCurrency(data.pagarMensajeros, 'CUP'), dot: '#eb6834' },
-                { label: 'Negocios exterior (USD)', value: formatCurrency(data.pagarNegociosUSD, 'USD') },
-                { label: 'A cobrar (CUP)', value: formatCurrency(data.cobrarCUP, 'CUP') },
+                { label: 'Negocios (CUP)', valor: data.pagarNegociosCUP, moneda: 'CUP', dot: '#2a78d6' },
+                { label: 'Mensajeros (CUP)', valor: data.pagarMensajeros, moneda: 'CUP', dot: '#eb6834' },
+                { label: 'Negocios exterior (USD)', valor: data.pagarNegociosUSD, moneda: 'USD' },
+                { label: 'A cobrar (CUP)', valor: data.cobrarCUP, moneda: 'CUP' },
               ].map(t => (
                 <div key={t.label} className="p-3 rounded-[var(--radius-sm)] bg-[var(--color-surface-2)] border border-[var(--color-border)]">
                   <p className="text-[11px] font-medium text-[var(--color-text-muted)] flex items-center gap-1.5">
                     {t.dot && <span className="w-2 h-2 rounded-sm" style={{ background: t.dot }} aria-hidden />}{t.label}
                   </p>
-                  <p className="text-lg font-bold text-[var(--color-text)] tabular-nums mt-0.5">{t.value}</p>
+                  <p className="text-lg mt-0.5"><Monto valor={t.valor} moneda={t.moneda} tono="texto" /></p>
                 </div>
               ))}
             </div>

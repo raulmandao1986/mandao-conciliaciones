@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { supabase, reconnectGoogle } from '../../lib/supabase';
-import { getGoogleToken } from '../../lib/googleDrive';
+import { obtenerGoogleToken } from '../../lib/googleDrive';
 import { formatDate } from '../../lib/formatters';
 import { cn } from '../../lib/utils';
 import { Button } from '../../design-system/primitives/Button';
@@ -10,6 +10,7 @@ import type { EstadoConciliacion } from '../../lib/conciliacion/estados';
 import {
   loadPlantillaCorreo, aplicarPlantilla, parseCorreos, enviarGmail, marcarEnviadas, type Adjunto,
 } from '../../lib/conciliacion/envioCorreo';
+import { notificar } from '../../lib/notificaciones';
 
 // "Enviar" del histórico de Conciliación de Negocios y de Mensajeros: agrupa
 // las conciliaciones por negocio/mensajero y período, busca su correo,
@@ -57,11 +58,11 @@ export function useEnvioConciliaciones<R>({ entidad, construirPdfs, onTerminado 
   const solicitar = async (items: EnvioItem<R>[]) => {
     const enviables = items.filter(i => puedeEnviar(i.estado));
     if (enviables.length === 0) {
-      alert('No hay conciliaciones en estado Nuevo o Enviado para enviar.');
+      notificar('No hay conciliaciones en estado Nuevo o Enviado para enviar.');
       return;
     }
     // El permiso de Gmail viene del login con Google y vence en 1 h.
-    if (!getGoogleToken()) {
+    if (!(await obtenerGoogleToken())) {
       setSinGoogle(true);
       return;
     }
@@ -95,12 +96,12 @@ export function useEnvioConciliaciones<R>({ entidad, construirPdfs, onTerminado 
       const conCorreo = todos.filter(g => g.correos.length > 0);
       const sinCorreo = todos.filter(g => g.correos.length === 0);
       if (conCorreo.length === 0) {
-        alert(`Ningún ${etiqueta} seleccionado tiene correo registrado (${sinCorreo.map(g => g.nombre).slice(0, 5).join(', ')}). Regístrelo en Gestión de ${entidad === 'negocios' ? 'Negocios' : 'Mensajeros'}.`);
+        notificar(`Ningún ${etiqueta} seleccionado tiene correo registrado (${sinCorreo.map(g => g.nombre).slice(0, 5).join(', ')}). Regístrelo en Gestión de ${entidad === 'negocios' ? 'Negocios' : 'Mensajeros'}.`);
         return;
       }
       setPendiente({ conCorreo, sinCorreo });
     } catch (err: any) {
-      alert('No se pudo preparar el envío: ' + (err?.message || err));
+      notificar('No se pudo preparar el envío: ' + (err?.message || err));
     } finally {
       setPreparando(false);
     }

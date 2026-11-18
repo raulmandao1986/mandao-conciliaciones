@@ -35,6 +35,7 @@ import { locateHeaderRow, DISPONIBILIDAD_HEADERS } from '../../lib/sheetHeaders'
 import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
 // Lectura de filas de "Orders" compartida con la Revisión (src/lib/dispatcherOrders.ts).
 import { parseCellNumber, mapOrderRow as mapRowToRecord, orderToDbRow } from '../../lib/dispatcherOrders';
+import { notificar } from '../../lib/notificaciones';
 const formatCUP = (value: number) => formatCurrency(value, 'CUP');
 
 // Persistencia local (por navegador) de los correos de notificación.
@@ -344,7 +345,7 @@ export function VerificationPage() {
       await reconnectGoogle();
     } catch (error: any) {
       console.error("Error connecting Google:", error);
-      alert("Error al conectar con Google: " + error.message);
+      notificar("Error al conectar con Google: " + error.message);
     }
     return null;
   };
@@ -352,17 +353,17 @@ export function VerificationPage() {
   const handleDisconnectGoogle = () => {
     setGoogleToken(null);
     sessionStorage.removeItem('google_access_token');
-    alert("Desconectado de Google API.");
+    notificar("Desconectado de Google API.");
   };
 
   const handleSaveConfig = async () => {
     setIsSavingConfig(true);
     try {
       localStorage.setItem(NOTIFY_EMAILS_STORAGE_KEY, notifyEmails);
-      alert("¡Parámetros de configuración guardados correctamente!");
+      notificar("¡Parámetros de configuración guardados correctamente!");
     } catch (err: any) {
       console.error("Error saving config:", err);
-      alert("Error al guardar la configuración: " + err.message);
+      notificar("Error al guardar la configuración: " + err.message);
     } finally {
       setIsSavingConfig(false);
     }
@@ -370,7 +371,7 @@ export function VerificationPage() {
 
   const handleVerify = async () => {
     if (!spreadsheetId.trim()) {
-      alert("Por favor, ingresa un ID de documento de Google Sheets válido.");
+      notificar("Por favor, ingresa un ID de documento de Google Sheets válido.");
       return;
     }
 
@@ -838,7 +839,7 @@ export function VerificationPage() {
     } catch (error: any) {
       addLog('error', `Fallo crítico de verificación: ${error.message}`);
       console.error("Verification error:", error);
-      alert("Error en la verificación: " + error.message);
+      notificar("Error en la verificación: " + error.message);
     } finally {
       setLoading(false);
     }
@@ -1086,7 +1087,7 @@ export function VerificationPage() {
 
   const sendEmailReport = async () => {
     if (!result) {
-      alert("No hay resultados de verificación para enviar.");
+      notificar("No hay resultados de verificación para enviar.");
       return;
     }
     
@@ -1099,7 +1100,7 @@ export function VerificationPage() {
     }
 
     if (!notifyEmails.trim()) {
-      alert("Por favor, configure al menos un correo destinatario en la sección de parámetros de verificación.");
+      notificar("Por favor, configure al menos un correo destinatario en la sección de parámetros de verificación.");
       return;
     }
 
@@ -1330,11 +1331,11 @@ export function VerificationPage() {
       }).catch(err => {
         console.error('jsPDF error:', err);
         addLog('error', `Error al inicializar jsPDF: ${err.message}`);
-        alert('Error al exportar PDF: ' + err.message);
+        notificar('Error al exportar PDF: ' + err.message);
       });
     } catch (err: any) {
       addLog('error', `Error al generar PDF: ${err.message}`);
-      alert("Error al intentar exportar las incidencias a PDF: " + err.message);
+      notificar("Error al intentar exportar las incidencias a PDF: " + err.message);
     }
   };
 
@@ -1395,7 +1396,7 @@ export function VerificationPage() {
       .join('\n');
     navigator.clipboard.writeText(recordsText);
     addLog('success', `Copiadas ${selectedIncidences.length} incidencias seleccionadas al portapapeles.`);
-    alert(`Copiadas ${selectedIncidences.length} incidencias seleccionadas al portapapeles.`);
+    notificar(`Copiadas ${selectedIncidences.length} incidencias seleccionadas al portapapeles.`);
   };
 
   return (

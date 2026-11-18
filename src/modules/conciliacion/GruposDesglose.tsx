@@ -1,11 +1,13 @@
 import React from 'react';
 import { formatCurrency } from '../../lib/formatters';
 import { cn } from '../../lib/utils';
+import { Monto } from '../../design-system/primitives/Monto';
 import { TIPOLOGIA_LABEL, type LineaGrupo, type Moneda } from '../../lib/conciliacion/catalogoPagos';
 
-// Desglose de una conciliación por Grupo de pago (Configuración -> Tipología
-// de Pago): una fila por grupo + tipología, con sus métodos, el saldo y la
-// Cuenta por Cobrar (CxC) o por Pagar (CxP) que genera.
+// Desglose de una conciliación por Grupo de pago (Métodos de Pago -> Órdenes):
+// una fila por grupo + tipología, con sus métodos, el saldo y la Cuenta por
+// Cobrar (CxC, verde: Mandao cobra) o por Pagar (CxP, rojo: Mandao paga), con
+// el mismo criterio de color que el resto del sistema; USD en fondo negro.
 export function GruposDesglose({ lineas, moneda, className }: { lineas: LineaGrupo[]; moneda: Moneda; className?: string }) {
   const visibles = lineas.filter(l => l.ordenes > 0);
   if (visibles.length === 0) return null;
@@ -23,8 +25,9 @@ export function GruposDesglose({ lineas, moneda, className }: { lineas: LineaGru
                 {l.ordenes} órdenes · {l.metodos.join(', ')} · Saldo {formatCurrency(l.saldo, moneda)}
               </span>
             </div>
-            <span className={cn('font-mono font-black text-sm tabular-nums shrink-0', cobrar ? 'text-[var(--color-danger)]' : 'text-[var(--color-success)]')}>
-              {cobrar ? 'CxC ' : 'CxP '}{formatCurrency(l.monto, moneda)}
+            <span className="flex items-center gap-1.5 shrink-0 text-sm">
+              <span className="text-[10px] font-bold text-[var(--color-text-faint)]">{cobrar ? 'CxC' : 'CxP'}</span>
+              <Monto valor={l.monto} moneda={moneda} tono={cobrar ? 'cobrar' : 'pagar'} />
             </span>
           </div>
         );

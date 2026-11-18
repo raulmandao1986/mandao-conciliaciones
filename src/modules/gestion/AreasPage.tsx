@@ -8,6 +8,7 @@ import { StatusBadge } from '../../design-system/primitives/StatusBadge';
 import { DataTable } from '../../design-system/patterns/DataTable';
 import { cn } from '../../lib/utils';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
+import { notificar } from '../../lib/notificaciones';
 
 interface AreaRecord {
   id: string;
@@ -131,7 +132,7 @@ export function AreasPage() {
       await loadAreas();
     } catch (err: any) {
       console.error('Error saving area:', err);
-      alert('Error al guardar el área. Detalle: ' + (err?.message || err));
+      notificar('Error al guardar el área. Detalle: ' + (err?.message || err));
     } finally {
       setSaving(false);
     }
@@ -150,7 +151,7 @@ export function AreasPage() {
       await loadAreas();
     } catch (err: any) {
       console.error('Error deleting area:', err);
-      alert('Error al eliminar el área. Detalle: ' + (err?.message || err));
+      notificar('Error al eliminar el área. Detalle: ' + (err?.message || err));
     } finally {
       setDeleteConfirmOpen(false);
       setAreaIdToDelete(null);

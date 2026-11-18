@@ -115,8 +115,45 @@ export const syncGoogleTokenToSessionStorage = async () => {
   if (token && token !== sessionStorage.getItem('google_access_token')) {
     sessionStorage.setItem('google_access_token', token);
     sessionStorage.setItem(GOOGLE_TOKEN_EXP_KEY, String(Date.now() + 55 * 60 * 1000));
+    // Recién iniciada la sesión con Google: se guarda el refresh token en el
+    // servidor (Edge Function google-token) para renovar el permiso solo.
+    const refresh = data.session?.provider_refresh_token;
+    if (refresh) {
+      supabase.functions.invoke('google-token', { body: { accion: 'guardar', refresh_token: refresh } })
+        .catch(() => { /* sin la función desplegada se sigue pidiendo reconectar */ });
+    }
   }
   return token ?? sessionStorage.getItem('google_access_token');
+};
+
+// Renueva el permiso de Google sin volver a pasar por el login (2026-11-16).
+// Devuelve el token nuevo, o null si no se pudo (función sin desplegar o
+// permiso revocado): en ese caso la app pide "Reconectar Google" como antes.
+let renovacionEnCurso: Promise<string | null> | null = null;
+export const renovarGoogleToken = (): Promise<string | null> => {
+  if (renovacionEnCurso) return renovacionEnCurso;
+  renovacionEnCurso = (async () => {
+    try {
+      const { data, error } = await supabase.functions.invoke('google-token', { body: { accion: 'renovar' } });
+      if (error || !data?.access_token) return null;
+      const vence = Date.now() + (Number(data.expires_in) || 3600) * 1000 - 5 * 60 * 1000;
+      sessionStorage.setItem('google_access_token', data.access_token);
+      sessionStorage.setItem(GOOGLE_TOKEN_EXP_KEY, String(vence));
+      return data.access_token as string;
+    } catch {
+      return null;
+    } finally {
+      renovacionEnCurso = null;
+    }
+  })();
+  return renovacionEnCurso;
+};
+
+// ¿Falta el permiso de Google o vence en menos de 10 minutos?
+export const googleTokenPorVencer = () => {
+  const token = sessionStorage.getItem('google_access_token');
+  const exp = Number(sessionStorage.getItem(GOOGLE_TOKEN_EXP_KEY) || 0);
+  return !token || (exp > 0 && exp - Date.now() < 10 * 60 * 1000);
 };
 
 export const logout = async () => {

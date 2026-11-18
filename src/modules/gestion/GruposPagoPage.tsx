@@ -5,6 +5,7 @@ import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
 import { Button } from '../../design-system/primitives/Button';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
 import { cn } from '../../lib/utils';
+import { notificar } from '../../lib/notificaciones';
 
 // Configuración -> Métodos de Pago -> Grupos de Pago (rectificado 2026-10-28).
 // Clasificador de las columnas del PDF de conciliación: cada método de pago
@@ -58,7 +59,7 @@ export function GruposPagoPage() {
     if (!nombre || duplicado(nombre, g.id)) return;
     setGuardandoId(g.id);
     const { error: e } = await supabase.from('payment_groups').update({ name: nombre, updated_at: new Date().toISOString() }).eq('group_id', g.id);
-    if (e) alert('No se pudo guardar el grupo: ' + e.message);
+    if (e) notificar('No se pudo guardar el grupo: ' + e.message);
     else {
       logAuditEvent('Configuraciones', 'Grupo de Pago Actualizado', { antes: g.nombre, despues: nombre });
       await load();
@@ -72,7 +73,7 @@ export function GruposPagoPage() {
     setGuardandoId('nuevo');
     const orden = grupos.reduce((m, g) => Math.max(m, g.orden), 0) + 1;
     const { error: e } = await supabase.from('payment_groups').insert({ name: nombre, sort_order: orden });
-    if (e) alert('No se pudo crear el grupo: ' + e.message);
+    if (e) notificar('No se pudo crear el grupo: ' + e.message);
     else {
       logAuditEvent('Configuraciones', 'Grupo de Pago Creado', { nombre });
       setNuevo('');
@@ -87,7 +88,7 @@ export function GruposPagoPage() {
     if (!g) return;
     setGuardandoId(g.id);
     const { error: e } = await supabase.from('payment_groups').delete().eq('group_id', g.id);
-    if (e) alert('No se pudo eliminar el grupo: ' + e.message);
+    if (e) notificar('No se pudo eliminar el grupo: ' + e.message);
     else {
       logAuditEvent('Configuraciones', 'Grupo de Pago Eliminado', { nombre: g.nombre });
       await load();
