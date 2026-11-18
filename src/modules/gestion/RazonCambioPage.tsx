@@ -8,6 +8,7 @@ import { StatusBadge } from '../../design-system/primitives/StatusBadge';
 import { DataTable } from '../../design-system/patterns/DataTable';
 import { cn } from '../../lib/utils';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
+import { notificar } from '../../lib/notificaciones';
 
 // La tasa se expresa en USD por 1 CUP (ej. 0.002 ≈ 500 CUP por USD,
 // confirmado por el usuario 2026-10-01): puede ser menor que 1, así que
@@ -157,7 +158,7 @@ export function RazonCambioPage() {
       await loadRates();
     } catch (err: any) {
       console.error('Error saving exchange rate:', err);
-      alert('Error al guardar la tasa de cambio. Detalle: ' + (err?.message || err));
+      notificar('Error al guardar la tasa de cambio. Detalle: ' + (err?.message || err));
     } finally {
       setSaving(false);
     }
@@ -195,7 +196,7 @@ export function RazonCambioPage() {
       await loadRates();
     } catch (err: any) {
       console.error('Error deleting exchange rate:', err);
-      alert('Error al eliminar la tasa de cambio. Detalle: ' + (err?.message || err));
+      notificar('Error al eliminar la tasa de cambio. Detalle: ' + (err?.message || err));
     } finally {
       setDeleteConfirmOpen(false);
       setRateIdToDelete(null);

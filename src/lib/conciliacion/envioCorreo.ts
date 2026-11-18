@@ -1,5 +1,5 @@
 import { supabase, logAuditEvent } from '../supabase';
-import { getGoogleToken, clearGoogleToken } from '../googleDrive';
+import { obtenerGoogleToken, clearGoogleToken } from '../googleDrive';
 import type { EstadoConciliacion, TablaConciliacion } from './estados';
 
 // Envío por correo de las conciliaciones (Fase 3 "Nuevos cambios",
@@ -82,7 +82,7 @@ const nombreAdjunto = (n: string) => (/^[\x20-\x7e]*$/.test(n) ? n.replace(/"/g,
 // Verificación: el endpoint de subida (/upload/gmail/...) no permite llamadas
 // desde el navegador (CORS, "Failed to fetch", 2026-11-05).
 export async function enviarGmail(params: { to: string[]; cc: string[]; asunto: string; cuerpo: string; adjuntos: Adjunto[] }): Promise<void> {
-  const token = getGoogleToken();
+  const token = await obtenerGoogleToken();
   if (!token) throw new Error('No hay sesión de Google activa. Use "Reconectar Google" y vuelva a intentarlo.');
   const limite = `mandao_${Date.now().toString(36)}`;
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#0f172a;line-height:1.5">${escapeHtml(params.cuerpo).replace(/\n/g, '<br>')}</div>`;
@@ -138,12 +138,18 @@ export async function enviarGmail(params: { to: string[]; cc: string[]; asunto: 
 // (las que ya estaban en Enviado se reenvían y conservan el estado).
 export async function marcarEnviadas(table: TablaConciliacion, ids: string[], destinatarios: string[]): Promise<void> {
   const ahora = new Date().toISOString();
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from(table)
     .update({ estado: 'Enviado' as EstadoConciliacion, enviado_at: ahora, enviado_a: destinatarios.join(', '), updated_at: ahora })
     .in('conciliacion_id', ids)
-    .in('estado', ['Nuevo', 'Enviado']);
+    .in('estado', ['Nuevo', 'Enviado'])
+    .select('conciliacion_id');
   if (error) throw new Error(`El correo se envió, pero no se pudo actualizar el estado: ${error.message}`);
+  // Sin filas actualizadas (permisos o estado ya cambiado) se avisa en vez de
+  // dar el envío por completo.
+  if (!data || data.length === 0) {
+    throw new Error('El correo se envió, pero la conciliación no pasó a Enviado (sin permiso para modificarla o ya no estaba en Nuevo/Enviado). Cámbiela a mano en el histórico.');
+  }
   await logAuditEvent('Conciliaciones', 'Conciliación Enviada por Correo', {
     entidad: table === 'conciliaciones_businesses' ? 'Negocios' : 'Mensajeros',
     conciliaciones: ids.length,

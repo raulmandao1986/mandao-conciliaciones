@@ -35,6 +35,7 @@ import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
 import { parseSheetDate, normalizeSheetDateStr } from '../../lib/sheetDateParser';
 import { locateHeaderRow, DISPONIBILIDAD_HEADERS } from '../../lib/sheetHeaders';
 import { toLocalISODate } from '../../lib/formatters';
+import { notificar, confirmar } from '../../lib/notificaciones';
 
 interface DisponibilidadRecord {
   id: string;
@@ -332,7 +333,7 @@ export function DisponibilidadRevisionPage() {
       await reconnectGoogle();
     } catch (error: any) {
       console.error("Auth Error:", error);
-      alert("Error al conectar con Google G-Suite: " + error.message);
+      notificar("Error al conectar con Google G-Suite: " + error.message);
     }
     return null;
   };
@@ -345,7 +346,7 @@ export function DisponibilidadRevisionPage() {
   // Cambios" en dispatcher/RevisionPage.tsx.
   const handleDetectChanges = async () => {
     if (!spreadsheetId.trim()) {
-      alert("Por favor, selecciona un Dispatcher (Área) con Spreadsheet ID configurado.");
+      notificar("Por favor, selecciona un Dispatcher (Área) con Spreadsheet ID configurado.");
       return;
     }
 
@@ -354,7 +355,7 @@ export function DisponibilidadRevisionPage() {
 
     let activeToken = googleToken;
     if (!activeToken) {
-      alert('Token de Google no disponible o expirado. Serás redirigido para reconectar — vuelve a pulsar "Detectar Cambios" al regresar.');
+      notificar('Token de Google no disponible o expirado. Serás redirigido para reconectar — vuelve a pulsar "Detectar Cambios" al regresar.');
       await handleConnectGoogle();
       setDetecting(false);
       return;
@@ -489,7 +490,7 @@ export function DisponibilidadRevisionPage() {
 
     } catch (err: any) {
       console.error("Detect changes error:", err);
-      alert('Error al detectar cambios: ' + err.message);
+      notificar('Error al detectar cambios: ' + err.message);
     } finally {
       setDetecting(false);
     }
@@ -527,11 +528,11 @@ export function DisponibilidadRevisionPage() {
         montoNuevo: editForm.monto
       });
 
-      alert("¡Registro actualizado con éxito!");
+      notificar("¡Registro actualizado con éxito!");
       setEditingRecord(null);
       await loadRecords();
     } catch (e: any) {
-      alert("Error actualizando registro: " + e.message);
+      notificar("Error actualizando registro: " + e.message);
     }
   };
 
@@ -551,18 +552,18 @@ export function DisponibilidadRevisionPage() {
         monto: deletingRecord.monto
       });
 
-      alert("Registro de disponibilidad eliminado correctamente.");
+      notificar("Registro de disponibilidad eliminado correctamente.");
       setDeletingRecord(null);
       await loadRecords();
     } catch (e: any) {
-      alert("Error al eliminar registro: " + e.message);
+      notificar("Error al eliminar registro: " + e.message);
     }
   };
 
   const handleDeleteSelected = async () => {
     const selectedIds = Object.keys(selectedRows).filter(k => selectedRows[k]);
     if (selectedIds.length === 0) return;
-    if (!window.confirm(`¿Estás seguro de que deseas eliminar permanentemente los ${selectedIds.length} registros seleccionados?`)) return;
+    if (!await confirmar(`¿Estás seguro de que deseas eliminar permanentemente los ${selectedIds.length} registros seleccionados?`)) return;
 
     try {
       setLoading(true);
@@ -573,12 +574,12 @@ export function DisponibilidadRevisionPage() {
         cantidadEliminados: selectedIds.length
       });
 
-      alert(`Se eliminaron con éxito ${selectedIds.length} registros.`);
+      notificar(`Se eliminaron con éxito ${selectedIds.length} registros.`);
       setSelectedRows({});
       setIsAllSelected(false);
       await loadRecords();
     } catch (e: any) {
-      alert("Error en la eliminación masiva: " + e.message);
+      notificar("Error en la eliminación masiva: " + e.message);
     } finally {
       setLoading(false);
     }

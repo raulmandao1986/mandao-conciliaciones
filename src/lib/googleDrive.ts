@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabase, renovarGoogleToken } from './supabase';
 
 // Subida de los PDF de Conciliación a una carpeta de Google Drive
 // (configurada en Configuración -> Data, tabla app_settings). La hace el
@@ -31,6 +31,12 @@ export function getGoogleToken(): string | null {
     return null;
   }
   return token;
+}
+
+// Token vigente o, si falta o venció, uno renovado en el servidor (Edge
+// Function google-token). null = hay que "Reconectar Google".
+export async function obtenerGoogleToken(): Promise<string | null> {
+  return getGoogleToken() || (await renovarGoogleToken());
 }
 
 // Token rechazado por Google (401) o vencido: se descarta para pedir reconectar.

@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
   ChevronRight,
-  LogOut,
   ExternalLink,
   Package,
   Menu,
@@ -21,6 +20,8 @@ import { cn } from '../lib/utils';
 import { Button } from '../design-system/primitives/Button';
 import { SlideOver } from '../design-system/primitives/SlideOver';
 import { NAV_SECTIONS } from '../lib/moduleCatalog';
+import { notificar } from '../lib/notificaciones';
+import { UserMenu } from './UserMenu';
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, isLoading: isAuthLoading, logout, reloadPermissions } = useAuth();
@@ -255,16 +256,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </nav>
 
-        <div className="p-3 border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/50">
-          <Button 
-            variant="ghost" 
-            className="w-full justify-start text-[var(--color-danger)] hover:bg-[var(--color-danger-bg)]"
-            onClick={handleLogout}
-          >
-            <LogOut className="w-5 h-5 shrink-0" />
-            {isSidebarOpen && <span className="ml-3">Cerrar Sesión</span>}
-          </Button>
-        </div>
       </aside>
 
       {/* Topbar */}
@@ -306,9 +297,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </p>
               </div>
             </div>
-            <div className="w-9 h-9 rounded-full bg-[var(--color-brand)] flex items-center justify-center text-[var(--color-brand-ink)] font-bold border-2 border-[var(--color-surface)] shadow-sm cursor-pointer hover:ring-2 hover:ring-[var(--color-brand)] transition-all">
-              {user?.name.charAt(0)}
-            </div>
+            <UserMenu nombre={user?.name || ''} correo={user?.email || ''} rol={user?.role || ''} onLogout={handleLogout} />
           </div>
         </div>
       </header>
@@ -343,7 +332,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 onClick={async () => {
                   console.log("🔄 [F12 AUTH DEBUG] Forzando sincronización inmediata con Firestore...");
                   await reloadPermissions();
-                  alert("Permisos actualizados de Firestore con éxito.");
+                  notificar("Permisos actualizados de Firestore con éxito.");
                 }}
               >
                 <RefreshCw size={14} className="animate-spin" />

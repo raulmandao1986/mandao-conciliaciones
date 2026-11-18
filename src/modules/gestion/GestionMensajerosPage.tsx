@@ -29,6 +29,7 @@ import {
 import { SlideOver } from '../../design-system/primitives/SlideOver';
 import { diffCambios, datosLegibles } from '../../lib/auditDiff';
 import { tomarEdicionPendiente } from '../../lib/conciliacion/catalogoEntidad';
+import { notificar } from '../../lib/notificaciones';
 
 // Etiquetas de los campos para el Log de Auditoría (antes / después).
 const ETIQUETAS_LOG: Record<string, string> = {
@@ -400,7 +401,7 @@ export function GestionMensajerosPage() {
       await loadMessengers();
     } catch (error: any) {
       console.error('Error saving messenger:', error);
-      alert('Error al guardar el mensajero. Detalle: ' + (error?.message || error));
+      notificar('Error al guardar el mensajero. Detalle: ' + (error?.message || error));
     } finally {
       setSaving(false);
     }
@@ -426,7 +427,7 @@ export function GestionMensajerosPage() {
       await loadMessengers();
     } catch (err: any) {
       console.error('Error deleting messenger:', err);
-      alert('Error al eliminar el mensajero. Detalle: ' + (err?.message || err));
+      notificar('Error al eliminar el mensajero. Detalle: ' + (err?.message || err));
     } finally {
       setDeleteConfirmOpen(false);
       setMessengerIdToDelete(null);

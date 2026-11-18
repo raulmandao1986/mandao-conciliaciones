@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Loader2, History, ChevronDown, ChevronUp } from 'lucide-react';
 import { cn } from '../utils';
 import { formatCurrency, formatDatetime } from '../formatters';
@@ -18,7 +18,10 @@ export function EstadoConciliacionBadge({ estado }: { estado: string | null }) {
   );
 }
 
-// Badge + cambio de estado en línea desde la fila del histórico.
+// Estado de la conciliación en un solo componente (2026-11-16): el propio
+// badge muestra el estado actual y, si se puede cambiar, al hacer clic
+// despliega los estados a los que puede pasar. El menú es fijo (no lo recorta
+// la tabla con scroll horizontal).
 export function EstadoConciliacionControl({
   estado, neto, editable, onCambiar,
 }: {
@@ -28,30 +31,87 @@ export function EstadoConciliacionControl({
   onCambiar: (nuevo: EstadoConciliacion) => Promise<void>;
 }) {
   const [guardando, setGuardando] = useState(false);
+  const [menu, setMenu] = useState<{ top: number; left: number } | null>(null);
+  const boton = useRef<HTMLButtonElement>(null);
+  const caja = useRef<HTMLDivElement>(null);
   const opciones = editable ? transicionesEstado(estado, neto) : [];
+  const config = ESTADO_CONCILIACION_CONFIG[parseEstado(estado)];
+  const Icon = config.icon;
+
+  useEffect(() => {
+    if (!menu) return;
+    const cerrar = () => setMenu(null);
+    const fuera = (e: MouseEvent) => {
+      if (!caja.current?.contains(e.target as Node) && !boton.current?.contains(e.target as Node)) cerrar();
+    };
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') cerrar(); };
+    document.addEventListener('mousedown', fuera);
+    document.addEventListener('keydown', esc);
+    window.addEventListener('scroll', cerrar, true);
+    window.addEventListener('resize', cerrar);
+    return () => {
+      document.removeEventListener('mousedown', fuera);
+      document.removeEventListener('keydown', esc);
+      window.removeEventListener('scroll', cerrar, true);
+      window.removeEventListener('resize', cerrar);
+    };
+  }, [menu]);
+
+  if (opciones.length === 0) return <EstadoConciliacionBadge estado={estado} />;
+
+  const elegir = async (nuevo: EstadoConciliacion) => {
+    setMenu(null);
+    setGuardando(true);
+    try { await onCambiar(nuevo); } finally { setGuardando(false); }
+  };
+
   return (
-    <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-      <EstadoConciliacionBadge estado={estado} />
-      {opciones.length > 0 && (
-        guardando ? <Loader2 size={13} className="animate-spin text-[var(--color-text-faint)]" /> : (
-          <select
-            aria-label="Cambiar estado"
-            title="Cambiar estado"
-            value=""
-            onChange={async (e) => {
-              const nuevo = e.target.value as EstadoConciliacion;
-              if (!nuevo) return;
-              setGuardando(true);
-              try { await onCambiar(nuevo); } finally { setGuardando(false); }
-            }}
-            className="h-7 px-1.5 text-[11px] bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] outline-none focus:border-[var(--color-primary)] text-[var(--color-text-muted)]"
-          >
-            <option value="">Cambiar…</option>
-            {opciones.map(o => <option key={o} value={o}>{o === 'Nuevo' || (o === 'Enviado' && estado === 'Confirmado') ? `Volver a ${o}` : o}</option>)}
-          </select>
-        )
+    <span onClick={(e) => e.stopPropagation()}>
+      <button
+        ref={boton}
+        type="button"
+        disabled={guardando}
+        aria-haspopup="menu"
+        aria-expanded={!!menu}
+        aria-label={`Estado: ${config.label}. Cambiar estado`}
+        title="Cambiar estado"
+        onClick={() => {
+          if (menu) { setMenu(null); return; }
+          const r = boton.current?.getBoundingClientRect();
+          if (r) setMenu({ top: r.bottom + 4, left: r.left });
+        }}
+        className={cn(
+          'inline-flex items-center gap-1 pl-2.5 pr-1.5 py-0.5 rounded-full text-xs font-bold border whitespace-nowrap transition-shadow hover:shadow-sm disabled:opacity-70',
+          config.className
+        )}
+      >
+        {guardando ? <Loader2 size={12} className="animate-spin" /> : <Icon size={12} />}
+        {config.label}
+        <ChevronDown size={12} className="opacity-70" />
+      </button>
+      {menu && (
+        <div
+          ref={caja}
+          role="menu"
+          style={{ position: 'fixed', top: menu.top, left: menu.left }}
+          className="z-[150] min-w-[11rem] bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-sm)] shadow-lg py-1"
+        >
+          <p className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-faint)]">Cambiar a</p>
+          {opciones.map(o => (
+            <button
+              key={o}
+              type="button"
+              role="menuitem"
+              onClick={() => { void elegir(o); }}
+              className="w-full flex items-center gap-2 px-3 h-9 text-left text-xs hover:bg-[var(--color-surface-2)]"
+            >
+              <EstadoConciliacionBadge estado={o} />
+              {(o === 'Nuevo' || (o === 'Enviado' && estado === 'Confirmado')) && <span className="text-[var(--color-text-faint)]">(volver)</span>}
+            </button>
+          ))}
+        </div>
       )}
-    </div>
+    </span>
   );
 }
 

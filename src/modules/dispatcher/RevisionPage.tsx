@@ -42,6 +42,23 @@ import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
 // etiquetados; la conversión a USD solo aplica dentro de Conciliación de
 // Negocios (ver ConciliacionNegociosPage.tsx), no en estas vistas.
 import { formatCurrency, toLocalISODate } from '../../lib/formatters';
+import { notificar, confirmar } from '../../lib/notificaciones';
+import { useEstadoPersistente, limpiarEstadoPersistente } from '../../lib/estadoPersistente';
+
+// Filtros y resultado de la Revisión se conservan al salir de la pantalla;
+// solo "Limpiar Filtros" los borra (pedido 2026-11-16).
+const P = 'revision-dispatcher:';
+const filtrosIniciales = () => ({
+  origen: 'Todos',
+  deliveryDate: '',
+  orderDate: '',
+  paymentType: 'Todos',
+  area: 'Todos',
+  store: 'Todas',
+  driver: 'Todos',
+  fechaInicio: toLocalISODate(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)), // last 7 days
+  fechaFin: toLocalISODate()
+});
 const formatCUP = (value: number) => formatCurrency(value, 'CUP');
 
 interface OrderRecord {
@@ -232,32 +249,32 @@ export function RevisionPage() {
   const { user } = useAuth();
   const [data, setData] = useState<OrderRecord[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+  const [searchQuery, setSearchQuery] = useEstadoPersistente(P + 'busqueda', '');
+  const [expandedRows, setExpandedRows] = useEstadoPersistente<Record<string, boolean>>(P + 'expandidas', {});
   const [showHelp, setShowHelp] = useState(false);
 
   // Dynamic Areas selection & Google Auth
   const [areas, setAreas] = useState<any[]>([]);
-  const [selectedAreaId, setSelectedAreaId] = useState<string>('');
-  const [spreadsheetId, setSpreadsheetId] = useState<string>('');
+  const [selectedAreaId, setSelectedAreaId] = useEstadoPersistente<string>(P + 'area', '');
+  const [spreadsheetId, setSpreadsheetId] = useEstadoPersistente<string>(P + 'sheet', '');
   const [googleToken, setGoogleToken] = useState<string | null>(() => sessionStorage.getItem('google_access_token'));
   
   // Real-time audit logs for comparison
-  const [comparisonLogs, setComparisonLogs] = useState<{ id: string; t: string; lvl: 'info' | 'success' | 'warn' | 'error'; msg: string }[]>([]);
+  const [comparisonLogs, setComparisonLogs] = useEstadoPersistente<{ id: string; t: string; lvl: 'info' | 'success' | 'warn' | 'error'; msg: string }[]>(P + 'logs', []);
   const [comparing, setComparing] = useState(false);
   
   // Comparison difference structure
-  const [externalComparison, setExternalComparison] = useState<{
+  const [externalComparison, setExternalComparison] = useEstadoPersistente<{
     discrepancies: Record<string, string[]>;
     deletedInSheets: Set<string>;
     newInSheets: any[];
     compared: boolean;
-  } | null>(null);
+  } | null>(P + 'comparacion', null);
 
-  const [discrepanciesTable, setDiscrepanciesTable] = useState<any[]>([]);
-  const [selectedDiscrepancyIds, setSelectedDiscrepancyIds] = useState<string[]>([]);
-  const [activeTab, setActiveTab] = useState<'table' | 'differences'>('table');
-  const [diffFilters, setDiffFilters] = useState({
+  const [discrepanciesTable, setDiscrepanciesTable] = useEstadoPersistente<any[]>(P + 'diferencias', []);
+  const [selectedDiscrepancyIds, setSelectedDiscrepancyIds] = useEstadoPersistente<string[]>(P + 'seleccion', []);
+  const [activeTab, setActiveTab] = useEstadoPersistente<'table' | 'differences'>(P + 'pestana', 'table');
+  const [diffFilters, setDiffFilters] = useEstadoPersistente(P + 'filtrosDif', {
     search: '',
     campo: 'Todos',
     tipo: 'Todos'
@@ -266,17 +283,7 @@ export function RevisionPage() {
   const diffItemsPerPage = 10;
   const [syncing, setSyncing] = useState(false);
 
-  const [filters, setFilters] = useState({
-    origen: 'Todos',
-    deliveryDate: '',
-    orderDate: '',
-    paymentType: 'Todos',
-    area: 'Todos',
-    store: 'Todas',
-    driver: 'Todos',
-    fechaInicio: toLocalISODate(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)), // last 7 days
-    fechaFin: toLocalISODate()
-  });
+  const [filters, setFilters] = useEstadoPersistente(P + 'filtros', filtrosIniciales);
 
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 15;
@@ -284,8 +291,8 @@ export function RevisionPage() {
   const [registeredPaymentMethods, setRegisteredPaymentMethods] = useState<any[]>([]);
 
   // Sorting state for main dispatcher table
-  const [sortField, setSortField] = useState<keyof OrderRecord | 'store'>('deliveryDate');
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [sortField, setSortField] = useEstadoPersistente<keyof OrderRecord | 'store'>(P + 'orden', 'deliveryDate');
+  const [sortDirection, setSortDirection] = useEstadoPersistente<'asc' | 'desc'>(P + 'sentido', 'desc');
 
   // Sorting state for discrepancies table
   const [diffSortField, setDiffSortField] = useState<string>('orderId');
@@ -444,7 +451,7 @@ export function RevisionPage() {
       await reconnectGoogle();
     } catch (error: any) {
       console.error(error);
-      alert("Error de conexión Google: " + error.message);
+      notificar("Error de conexión Google: " + error.message);
     }
     return null;
   };
@@ -621,7 +628,7 @@ export function RevisionPage() {
 
   const handleDetectExternalChanges = async () => {
     if (!spreadsheetId.trim()) {
-      alert("Por favor, selecciona un Dispatcher/Área que cuente con un Spreadsheet ID configurado para comparar.");
+      notificar("Por favor, selecciona un Dispatcher/Área que cuente con un Spreadsheet ID configurado para comparar.");
       return;
     }
 
@@ -934,7 +941,7 @@ export function RevisionPage() {
     } catch (error: any) {
       addComparisonLog('error', `Fallo de revisión: ${error.message}`);
       console.error("Error catastrófico en revisión:", error);
-      alert("Error al comparar bases de datos: " + error.message);
+      notificar("Error al comparar bases de datos: " + error.message);
     } finally {
       setComparing(false);
     }
@@ -942,7 +949,7 @@ export function RevisionPage() {
 
   const handleSyncSelectedDiscrepancies = async () => {
     if (selectedDiscrepancyIds.length === 0) return;
-    if (!window.confirm(`¿Estás seguro de sincronizar y solventar las ${selectedDiscrepancyIds.length} diferencias seleccionadas en BD? Esto actualizará, creará, o eliminará registros según corresponda para que coincidan con Documento Dispatcher.`)) return;
+    if (!await confirmar(`¿Estás seguro de sincronizar y solventar las ${selectedDiscrepancyIds.length} diferencias seleccionadas en BD? Esto actualizará, creará, o eliminará registros según corresponda para que coincidan con Documento Dispatcher.`)) return;
     
     setSyncing(true);
     let successCount = 0;
@@ -1023,7 +1030,7 @@ export function RevisionPage() {
         console.error("Failed to write sync audit log:", logErr);
       }
 
-      alert(`Sincronización masiva finalizada:\n- Exitosos: ${successCount}\n- Fallados: ${failCount}\nSe borrará la comparación anterior para que re-ejecute si lo desea.`);
+      notificar(`Sincronización masiva finalizada:\n- Exitosos: ${successCount}\n- Fallados: ${failCount}\nSe borrará la comparación anterior para que re-ejecute si lo desea.`);
 
       await loadOrders();
 
@@ -1035,14 +1042,14 @@ export function RevisionPage() {
       
     } catch (err: any) {
       console.error(err);
-      alert('Error en la sincronización: ' + err.message);
+      notificar('Error en la sincronización: ' + err.message);
     } finally {
       setSyncing(false);
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm("¿Estás seguro de eliminar permanentemente este registro de BD?")) return;
+    if (!await confirmar("¿Estás seguro de eliminar permanentemente este registro de BD?")) return;
     try {
       const { error } = await supabase.from('dispatcher').delete().eq('order_pk', id);
       if (error) throw new Error(error.message);
@@ -1050,13 +1057,13 @@ export function RevisionPage() {
       addComparisonLog('success', `Registro ID ${id} eliminado de BD.`);
     } catch (e: any) {
       console.error(e);
-      alert("Error al eliminar: " + e.message);
+      notificar("Error al eliminar: " + e.message);
     }
   };
 
   const handleExportPDF = () => {
     if (filteredData.length === 0) {
-      alert("No hay registros en pantalla para exportar.");
+      notificar("No hay registros en pantalla para exportar.");
       return;
     }
 
@@ -1154,7 +1161,7 @@ export function RevisionPage() {
         doc.save(`auditoria-dispatcher-${filters.origen}-${filters.fechaInicio}.pdf`);
       });
     } catch (e: any) {
-      alert("Error al intentar exportar las incidencias a PDF: " + e.message);
+      notificar("Error al intentar exportar las incidencias a PDF: " + e.message);
     }
   };
 
@@ -1421,17 +1428,21 @@ export function RevisionPage() {
           <Button
             variant="ghost" 
             className="text-[10px] h-8 font-bold ml-auto" 
-            onClick={() => setFilters({
-              origen: 'Todos',
-              deliveryDate: '',
-              orderDate: '',
-              paymentType: 'Todos',
-              area: 'Todos',
-              store: 'Todas',
-              driver: 'Todos',
-              fechaInicio: toLocalISODate(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)),
-              fechaFin: toLocalISODate()
-            })}
+            onClick={() => {
+              // Único lugar que borra filtros y resultado (se conservan al navegar).
+              limpiarEstadoPersistente(P);
+              setFilters(filtrosIniciales());
+              setSearchQuery('');
+              setSelectedAreaId('');
+              setSpreadsheetId('');
+              setExternalComparison(null);
+              setDiscrepanciesTable([]);
+              setSelectedDiscrepancyIds([]);
+              setComparisonLogs([]);
+              setExpandedRows({});
+              setActiveTab('table');
+              setDiffFilters({ search: '', campo: 'Todos', tipo: 'Todos' });
+            }}
           >
             Limpiar Filtros
           </Button>
@@ -1464,7 +1475,7 @@ export function RevisionPage() {
             if (externalComparison) {
               setActiveTab('differences');
             } else {
-              alert("Para visualizar las diferencias, primero selecciona un Centro de Operación (Area) con Spreadsheet ID y haz clic en 'Detectar Cambios'.");
+              notificar("Para visualizar las diferencias, primero selecciona un Centro de Operación (Area) con Spreadsheet ID y haz clic en 'Detectar Cambios'.");
             }
           }}
           className={cn(

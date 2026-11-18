@@ -32,7 +32,8 @@ export const puedeReconciliar = (estado: EstadoConciliacion) => estado === 'Nuev
 // Cobrar: decide si el cierre es Pagado o Cobrado (en 0 no hay cierre).
 export function transicionesEstado(estado: EstadoConciliacion, neto: number): EstadoConciliacion[] {
   switch (estado) {
-    case 'Nuevo': return ['Enviado'];
+    // Nuevo puede pasar directo a Confirmado (sin envío por correo, 2026-11-18).
+    case 'Nuevo': return ['Enviado', 'Confirmado'];
     case 'Enviado': return ['Confirmado', 'Nuevo'];
     case 'Confirmado': {
       const cierre: EstadoConciliacion[] = Math.abs(neto) < 0.005 ? [] : [neto > 0 ? 'Pagado' : 'Cobrado'];

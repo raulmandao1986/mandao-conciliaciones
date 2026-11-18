@@ -8,6 +8,7 @@ import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
 import { cn } from '../../lib/utils';
 import { formatCurrency, formatDate } from '../../lib/formatters';
 import { Button } from '../../design-system/primitives/Button';
+import { Monto as MontoDS } from '../../design-system/primitives/Monto';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
 import { Pagination, usePagination } from '../../design-system/patterns/Pagination';
 import { cambiarEstadoConciliacion } from '../../lib/conciliacion/estados';
@@ -15,6 +16,7 @@ import {
   loadPendientes, loadEntidadesPago, agrupar, accionDe, totalesPorMoneda, exportarExcel, exportarPdf,
   type EntidadCobros, type GrupoCobro, type Moneda, type ConciliacionPendiente, type EntidadPago,
 } from '../../lib/conciliacion/cobrosPagos';
+import { notificar } from '../../lib/notificaciones';
 
 // Módulo Negocios / Mensajeros -> Cobros y Pagos (Fase 4 "Nuevos cambios",
 // 2026-11-05). Reemplaza a Cuentas por Pagar y Cuentas por Cobrar: lista lo
@@ -25,11 +27,10 @@ import {
 
 const fieldCls = 'h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)]';
 
+// Neto del grupo o de la conciliación: el color indica pagar (rojo) o cobrar
+// (verde); USD con fondo negro.
 function Monto({ neto, moneda }: { neto: number; moneda: Moneda }) {
-  const accion = accionDe(neto);
-  if (accion === 'Pagar') return <span className="font-bold text-[var(--color-danger)] tabular-nums">Pagar {formatCurrency(neto, moneda)}</span>;
-  if (accion === 'Cobrar') return <span className="font-bold text-[var(--color-success)] tabular-nums">Cobrar {formatCurrency(-neto, moneda)}</span>;
-  return <span className="font-bold text-[var(--color-text-faint)] tabular-nums">{formatCurrency(0, moneda)}</span>;
+  return <MontoDS valor={neto} moneda={moneda} />;
 }
 
 export function CobrosPagosPage({ entidad }: { entidad: EntidadCobros }) {
@@ -107,7 +108,7 @@ export function CobrosPagosPage({ entidad }: { entidad: EntidadCobros }) {
       if (formato === 'excel') await exportarExcel(entidad, paraExportar);
       else await exportarPdf(entidad, paraExportar, user?.name || user?.email || '');
     } catch (err: any) {
-      alert('No se pudo exportar: ' + (err?.message || err));
+      notificar('No se pudo exportar: ' + (err?.message || err));
     } finally {
       setExportando(null);
     }
@@ -129,7 +130,7 @@ export function CobrosPagosPage({ entidad }: { entidad: EntidadCobros }) {
       }
     }
     setCerrando(false);
-    if (fallidas.length > 0) alert(`No se pudieron registrar ${fallidas.length}:\n${fallidas.slice(0, 5).join('\n')}`);
+    if (fallidas.length > 0) notificar(`No se pudieron registrar ${fallidas.length}:\n${fallidas.slice(0, 5).join('\n')}`);
     await load();
   };
 
@@ -156,8 +157,8 @@ export function CobrosPagosPage({ entidad }: { entidad: EntidadCobros }) {
             <div key={m} className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-[var(--radius-md)] p-4">
               <p className="text-xs font-semibold text-[var(--color-text-muted)]">{m} · {totAll[m].grupos} {e.varios} con saldo pendiente</p>
               <div className="flex flex-wrap gap-x-6 gap-y-1 mt-2">
-                <span className="text-sm text-[var(--color-text-muted)]">A pagar <strong className="text-lg text-[var(--color-danger)] tabular-nums">{formatCurrency(totAll[m].pagar, m)}</strong></span>
-                <span className="text-sm text-[var(--color-text-muted)]">A cobrar <strong className="text-lg text-[var(--color-success)] tabular-nums">{formatCurrency(totAll[m].cobrar, m)}</strong></span>
+                <span className="text-sm text-[var(--color-text-muted)]">A pagar <MontoDS valor={totAll[m].pagar} moneda={m} tono="pagar" className="text-lg" /></span>
+                <span className="text-sm text-[var(--color-text-muted)]">A cobrar <MontoDS valor={totAll[m].cobrar} moneda={m} tono="cobrar" className="text-lg" /></span>
               </div>
             </div>
           ))}
@@ -222,8 +223,8 @@ export function CobrosPagosPage({ entidad }: { entidad: EntidadCobros }) {
                 <strong className="text-[var(--color-text)]">{seleccionados.length} seleccionado(s)</strong>
                 {(['CUP', 'USD'] as Moneda[]).filter(m => totSel[m].grupos > 0).map(m => (
                   <span key={m} className="tabular-nums">
-                    {m}: a pagar <strong className="text-[var(--color-danger)]">{formatCurrency(totSel[m].pagar, m)}</strong>
-                    {' · '}a cobrar <strong className="text-[var(--color-success)]">{formatCurrency(totSel[m].cobrar, m)}</strong>
+                    {m}: a pagar <MontoDS valor={totSel[m].pagar} moneda={m} tono="pagar" />
+                    {' · '}a cobrar <MontoDS valor={totSel[m].cobrar} moneda={m} tono="cobrar" />
                   </span>
                 ))}
               </span>
@@ -320,8 +321,8 @@ export function CobrosPagosPage({ entidad }: { entidad: EntidadCobros }) {
                       <td className="p-3 text-xs text-[var(--color-text-muted)]">{g.viaPago}</td>
                       <td className="p-3 text-xs font-mono font-semibold">{g.moneda}</td>
                       <td className="p-3 text-right tabular-nums text-xs">{g.conciliaciones.length}</td>
-                      <td className="p-3 text-right tabular-nums text-xs">{formatCurrency(g.totalCxC, g.moneda)}</td>
-                      <td className="p-3 text-right tabular-nums text-xs">{formatCurrency(g.totalCxP, g.moneda)}</td>
+                      <td className="p-3 text-right text-xs"><MontoDS valor={g.totalCxC} moneda={g.moneda} tono="texto" /></td>
+                      <td className="p-3 text-right text-xs"><MontoDS valor={g.totalCxP} moneda={g.moneda} tono="texto" /></td>
                       <td className="p-3 text-right text-sm"><Monto neto={g.neto} moneda={g.moneda} /></td>
                     </tr>
                     {abierto && <DetalleGrupo grupo={g} entidad={entidad} />}
@@ -370,8 +371,8 @@ function DetalleGrupo({ grupo: g, entidad }: { grupo: GrupoCobro; entidad: Entid
                     <td className="p-2 font-mono">{c.consecutivo || '—'}</td>
                     <td className="p-2 font-mono text-[var(--color-text-muted)] whitespace-nowrap">{formatDate(c.fechaInicial)} — {formatDate(c.fechaFinal)}</td>
                     <td className="p-2 text-[var(--color-text-muted)]">{c.riel}</td>
-                    <td className="p-2 text-right tabular-nums">{formatCurrency(c.cxc, c.moneda)}</td>
-                    <td className="p-2 text-right tabular-nums">{formatCurrency(c.cxp, c.moneda)}</td>
+                    <td className="p-2 text-right"><MontoDS valor={c.cxc} moneda={c.moneda} tono="texto" /></td>
+                    <td className="p-2 text-right"><MontoDS valor={c.cxp} moneda={c.moneda} tono="texto" /></td>
                     <td className="p-2 text-right"><Monto neto={c.neto} moneda={c.moneda} /></td>
                   </tr>
                 ))}

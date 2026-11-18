@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { supabase } from '../../lib/supabase';
+import { supabase, logAuditEvent } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
 import { CreditCard, Plus, Edit2, Trash2, Loader2, Save, Search } from 'lucide-react';
 import { Button } from '../../design-system/primitives/Button';
@@ -8,6 +8,7 @@ import { StatusBadge } from '../../design-system/primitives/StatusBadge';
 import { DataTable } from '../../design-system/patterns/DataTable';
 import { cn } from '../../lib/utils';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
+import { notificar } from '../../lib/notificaciones';
 
 interface PaymentMethodRecord {
   id: string;
@@ -60,6 +61,10 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
   const clasifica = conClasificacion && type === 'ordenes';
 
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  // Cambiar la clasificación de un método de Órdenes existente cambia cómo se
+  // calculan las conciliaciones nuevas: se pide confirmación (2026-11-08, tras
+  // una inversión accidental de Cash y Card desde la antigua Tipología de Pago).
+  const [confirmarClasificacion, setConfirmarClasificacion] = useState(false);
   const [methodIdToDelete, setMethodIdToDelete] = useState<string | null>(null);
 
   const loadMethods = async () => {
@@ -142,9 +147,25 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
     setIsFormOpen(true);
   };
 
-  const handleSave = async (e?: React.FormEvent) => {
+  const nombreGrupo = (id: string | null) => grupos.find(g => g.id === id)?.nombre || 'Sin grupo';
+  // Cambios de clasificación (antes / después) de un método existente.
+  const cambiosClasificacion = () => {
+    if (!selectedMethod || !clasifica) return {};
+    const c: Record<string, { antes: string; despues: string }> = {};
+    if (selectedMethod.tipologia !== formData.tipologia) c['Tipología'] = { antes: TIPOLOGIA_TXT[selectedMethod.tipologia], despues: TIPOLOGIA_TXT[formData.tipologia as 'cobrar' | 'pagar'] };
+    if (selectedMethod.moneda !== formData.moneda) c['Moneda'] = { antes: selectedMethod.moneda, despues: formData.moneda };
+    if ((selectedMethod.grupoId || '') !== (formData.grupoId || '')) c['Grupo'] = { antes: nombreGrupo(selectedMethod.grupoId), despues: nombreGrupo(formData.grupoId || null) };
+    return c;
+  };
+
+  const handleSave = async (e?: React.FormEvent, confirmado = false) => {
     if (e) e.preventDefault();
     if (!formData.nombre) return;
+    const cambios = cambiosClasificacion();
+    if (!confirmado && Object.keys(cambios).length > 0) {
+      setConfirmarClasificacion(true);
+      return;
+    }
 
     setSaving(true);
     try {
@@ -166,15 +187,20 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
       if (selectedMethod) {
         const { error } = await supabase.from('payment_methods').update(payload).eq('payment_method_id', selectedMethod.id);
         if (error) throw error;
+        logAuditEvent('Configuraciones', 'Método de Pago Actualizado', { nombre: formData.nombre, cambios });
       } else {
         const { error } = await supabase.from('payment_methods').insert(payload);
         if (error) throw error;
+        logAuditEvent('Configuraciones', 'Método de Pago Creado', {
+          nombre: formData.nombre,
+          ...(clasifica ? { datos: { 'Tipología': TIPOLOGIA_TXT[formData.tipologia as 'cobrar' | 'pagar'], 'Moneda': formData.moneda, 'Grupo': nombreGrupo(formData.grupoId || null) } } : {}),
+        });
       }
       setIsFormOpen(false);
       await loadMethods();
     } catch (err: any) {
       console.error('Error saving payment method:', err);
-      alert('Error al guardar el método de pago. Detalle: ' + (err?.message || err));
+      notificar('Error al guardar el método de pago. Detalle: ' + (err?.message || err));
     } finally {
       setSaving(false);
     }
@@ -193,7 +219,7 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
       await loadMethods();
     } catch (err: any) {
       console.error('Error deleting payment method:', err);
-      alert('Error al eliminar el método de pago. Detalle: ' + (err?.message || err));
+      notificar('Error al eliminar el método de pago. Detalle: ' + (err?.message || err));
     } finally {
       setDeleteConfirmOpen(false);
       setMethodIdToDelete(null);
@@ -518,6 +544,16 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
           </div>
         </form>
       </SlideOver>
+
+      <ConfirmDialog
+        isOpen={confirmarClasificacion}
+        title="¿Cambiar la clasificación del método?"
+        message={`${Object.entries(cambiosClasificacion()).map(([k, v]) => `${k}: ${v.antes} → ${v.despues}`).join(' · ')}. Las conciliaciones que se calculen desde ahora usarán esta clasificación; las ya registradas no cambian hasta reconciliarlas. Recuerde: Cash/Efectivo genera Cuenta por Cobrar y el resto de los métodos, Cuenta por Pagar.`}
+        confirmText="Guardar cambio"
+        onConfirm={() => { setConfirmarClasificacion(false); void handleSave(undefined, true); }}
+        onCancel={() => setConfirmarClasificacion(false)}
+        isDanger={true}
+      />
 
       <ConfirmDialog
         isOpen={deleteConfirmOpen}

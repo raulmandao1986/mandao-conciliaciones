@@ -3,6 +3,7 @@ import { FileText, History, RotateCcw } from 'lucide-react';
 import { SlideOver } from '../../design-system/primitives/SlideOver';
 import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
+import { Monto } from '../../design-system/primitives/Monto';
 import { formatCurrency, formatDate, formatDatetime } from '../../lib/formatters';
 import { EstadoConciliacionBadge, ReconciliacionesLog } from '../../lib/conciliacion/EstadoBadge';
 import type { EstadoConciliacion } from '../../lib/conciliacion/estados';
@@ -36,10 +37,9 @@ export interface BitacoraRegistro {
 
 const solapa = (r: BitacoraRegistro, fi: string, ff: string) => r.fechaInicial <= ff && r.fechaFinal >= fi;
 
+// Neto (Por Pagar − Por Cobrar): el color indica pagar (rojo) o cobrar (verde).
 function Neto({ neto, moneda }: { neto: number; moneda: 'CUP' | 'USD' }) {
-  if (neto > 0.005) return <span className="font-semibold text-[var(--color-danger)] tabular-nums">Pagar {formatCurrency(neto, moneda)}</span>;
-  if (neto < -0.005) return <span className="font-semibold text-[var(--color-success)] tabular-nums">Cobrar {formatCurrency(-neto, moneda)}</span>;
-  return <span className="font-semibold text-[var(--color-text-faint)] tabular-nums">{formatCurrency(0, moneda)}</span>;
+  return <Monto valor={neto} moneda={moneda} />;
 }
 
 function Campo({ label, value }: { label: string; value: React.ReactNode }) {

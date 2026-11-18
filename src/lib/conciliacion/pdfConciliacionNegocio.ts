@@ -2,7 +2,7 @@ import { formatDate } from '../formatters';
 import type { LineaGrupo } from './catalogoPagos';
 import {
   sinMandao, num, NEGRO, GRIS, PDF_MARGEN as M, BORDES as bordes, CABECERA as cabecera,
-  drawEncabezado, drawPie, repartir, columnasResumen, resumenPorLinea, loadOrdenesConciliacion,
+  drawEncabezado, drawPie, titularPdf, repartir, columnasResumen, resumenPorLinea, loadOrdenesConciliacion,
   type OrdenPdf,
 } from './pdfComun';
 
@@ -21,6 +21,7 @@ export interface PdfNegocioRecord {
   establecimiento: string;
   areaId: string | null;
   area: string;
+  conciliacion: string; // texto del enlace del histórico = título y nombre del PDF
   fechaInicial: string;
   fechaFinal: string;
   fecha: string;
@@ -49,7 +50,10 @@ export async function buildPdfNegocio(
   const autoTable = (await import('jspdf-autotable')).default;
 
   const esUSD = rec.moneda === 'USD';
-  const pct = (rec.comisionPct ?? defaults.comisionPct) / 100;
+  // % de cada orden = el de su línea del desglose (comisión por moneda,
+  // 2026-11-16); en conciliaciones anteriores, el guardado con la fila.
+  const pctBase = rec.comisionPct ?? defaults.comisionPct;
+  const pct = (o: OrdenPdf) => (rec.desglose.find(l => l.key === o.key)?.pct ?? pctBase) / 100;
   const tasa = esUSD ? (rec.tasaCambio ?? defaults.tasaCambio ?? 0) : 1;
   const mon = rec.moneda;
 
@@ -60,6 +64,7 @@ export async function buildPdfNegocio(
   const { res, tot } = resumenPorLinea(lineas, cols.map(c => c.key));
 
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  titularPdf(doc, rec.conciliacion);
 
   // Encabezado: título + logo (solo en el PDF en CUP).
   await drawEncabezado(doc, !esUSD);
@@ -129,8 +134,8 @@ export async function buildPdfNegocio(
       // Tipo de pedido = dispatcher.payment_type real (no el grupo).
       ? lineas.map(l => [formatDate(l.fecha), sinMandao(l.paymentType), l.orderId, num(l.importe), num(l.beneficio), num(l.comision)])
       : [[{ content: 'No se encontraron órdenes para esta conciliación.', colSpan: 6, styles: { halign: 'center', textColor: GRIS } }]],
-    // Pie de cada página: fecha de conciliación, Área y paginado.
-    didDrawPage: () => drawPie(doc, rec.fecha, rec.area),
+    // Pie de cada página: fecha de conciliación y paginado.
+    didDrawPage: () => drawPie(doc, rec.fecha),
   });
 
   return doc;

@@ -1,5 +1,5 @@
 import { supabase } from '../supabase';
-import { loadDriveFolderId, getGoogleToken, uploadPdfToDrive, runWithConcurrency } from '../googleDrive';
+import { loadDriveFolderId, obtenerGoogleToken, uploadPdfToDrive, runWithConcurrency } from '../googleDrive';
 
 // Genera y sube a Google Drive el PDF de cada conciliación recién
 // registrada (o de una del histórico, al reintentar) y guarda el enlace en
@@ -36,7 +36,7 @@ export async function subirPdfsConciliacion<R extends { id: string }>({
   if (!folderId) {
     return { subidos: 0, fallidos: [], urls, aviso: `No hay carpeta de Google Drive configurada para ${entity === 'negocios' ? 'Negocios' : 'Mensajeros'} (Configuración → Data): los PDF no se guardaron en Drive.` };
   }
-  const token = getGoogleToken();
+  const token = await obtenerGoogleToken();
   if (!token) {
     return { subidos: 0, fallidos: [], urls, aviso: 'No hay sesión de Google activa: los PDF no se guardaron en Drive. Reconecte Google y use "Subir a Drive" en el histórico.' };
   }

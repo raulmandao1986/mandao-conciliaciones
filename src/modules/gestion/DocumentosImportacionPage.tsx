@@ -9,6 +9,7 @@ import { DataTable } from '../../design-system/patterns/DataTable';
 import { cn } from '../../lib/utils';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
 import { DriveFolderSettingsCard } from './components/DriveFolderSettingsCard';
+import { notificar } from '../../lib/notificaciones';
 
 type EntityType = 'businesses' | 'messengers';
 
@@ -129,7 +130,7 @@ export function DocumentosImportacionPage() {
       await loadSources();
     } catch (err: any) {
       console.error('Error saving import source:', err);
-      alert('Error al guardar el documento. Detalle: ' + (err?.message || err));
+      notificar('Error al guardar el documento. Detalle: ' + (err?.message || err));
     } finally {
       setSaving(false);
     }
@@ -148,7 +149,7 @@ export function DocumentosImportacionPage() {
       await loadSources();
     } catch (err: any) {
       console.error('Error deleting import source:', err);
-      alert('Error al eliminar el documento. Detalle: ' + (err?.message || err));
+      notificar('Error al eliminar el documento. Detalle: ' + (err?.message || err));
     } finally {
       setDeleteConfirmOpen(false);
       setSourceIdToDelete(null);

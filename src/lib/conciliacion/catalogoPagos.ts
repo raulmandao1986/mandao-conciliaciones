@@ -68,7 +68,14 @@ export interface LineaGrupo {
   saldo: number;      // en la moneda de la fila de conciliación
   monto: number;      // Por Cobrar: el % de comisión (CxC). Por Pagar: el (100 − %) (CxP)
   metodos: string[];
+  pct?: number;       // % de comisión aplicado a esta línea (por su moneda, 2026-11-16)
 }
+
+// Comisión por moneda de los métodos (Configuración -> Comisión Mandao). Las
+// órdenes en métodos USD usan la de USD; si no está definida, la de CUP.
+export interface Comisiones { CUP: number; USD: number | null }
+export const pctPorMoneda = (c: number | Comisiones, moneda: Moneda) =>
+  typeof c === 'number' ? c : moneda === 'USD' && c.USD !== null ? c.USD : c.CUP;
 
 export interface DesgloseCalculo {
   lineas: LineaGrupo[];
@@ -92,7 +99,7 @@ export function totales(lineas: LineaGrupo[]) {
 // (Mensajeros), lo pasa el llamador en `monto`.
 export function computeDesglose(
   ordenes: { paymentType: string; monto: number }[],
-  commissionPercent: number,
+  commission: number | Comisiones,
   cat: CatalogoPagos
 ): DesgloseCalculo {
   const porClave = new Map<string, LineaGrupo>();
@@ -117,11 +124,11 @@ export function computeDesglose(
     if (!linea.metodos.includes(metodo.nombre)) linea.metodos.push(metodo.nombre);
     porClave.set(key, linea);
   });
-  const pct = commissionPercent / 100;
-  const lineas = Array.from(porClave.values()).map(l => ({
-    ...l,
-    monto: l.tipologia === 'cobrar' ? l.saldo * pct : l.saldo * (1 - pct),
-  })).sort(ordenarLineas);
+  const lineas = Array.from(porClave.values()).map(l => {
+    const pctLinea = pctPorMoneda(commission, l.moneda);
+    const pct = pctLinea / 100;
+    return { ...l, pct: pctLinea, monto: l.tipologia === 'cobrar' ? l.saldo * pct : l.saldo * (1 - pct) };
+  }).sort(ordenarLineas);
   return { lineas, sinClasificar, ...totales(lineas) };
 }
 
@@ -155,5 +162,6 @@ export function parseDesglose(raw: any): LineaGrupo[] {
     tipologia: l.tipologia === 'cobrar' ? 'cobrar' : 'pagar', moneda: l.moneda === 'USD' ? 'USD' : 'CUP',
     ordenes: Number(l.ordenes) || 0, saldo: Number(l.saldo) || 0, monto: Number(l.monto) || 0,
     metodos: Array.isArray(l.metodos) ? l.metodos.map(String) : [],
+    ...(l.pct !== null && l.pct !== undefined ? { pct: Number(l.pct) } : {}),
   } as LineaGrupo)).sort(ordenarLineas);
 }

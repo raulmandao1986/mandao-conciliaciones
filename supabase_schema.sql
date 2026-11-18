@@ -610,11 +610,15 @@ where p.access_role_id is null and ar.is_system and ar.base_role = p.role;
 -- Un solo valor vigente por entity_type — sin historial de tasas pasadas
 -- como exchange_rates, porque no se pidió esa función; si hace falta
 -- más adelante se amplía igual que RazonCambioPage.
+-- Por entidad y moneda (2026-11-16): la de USD se aplica a las órdenes
+-- pagadas con métodos en USD; si no existe, se usa la de CUP.
 create table public.commission_settings (
-  entity_type text primary key check (entity_type in ('businesses', 'messengers')),
+  entity_type text not null check (entity_type in ('businesses', 'messengers')),
+  currency text not null default 'CUP' check (currency in ('CUP', 'USD')),
   percentage numeric(5,2) not null,
   updated_at timestamptz not null default now(),
-  updated_by uuid references auth.users(id)
+  updated_by uuid references auth.users(id),
+  constraint commission_settings_pkey primary key (entity_type, currency)
 );
 
 -- El 20% de Mensajeros es un valor inicial de referencia (igual que
@@ -624,7 +628,7 @@ create table public.commission_settings (
 insert into public.commission_settings (entity_type, percentage) values
   ('businesses', 20.00),
   ('messengers', 10.00)
-on conflict (entity_type) do nothing;
+on conflict (entity_type, currency) do nothing;
 
 -- Tarifa de Alquiler de Mochila (Mensajeros), por tipo de mochila — se
 -- gestiona en el mismo submódulo "Comisión Mandao" (Configuración). Sin
@@ -1302,3 +1306,17 @@ create trigger trg_reconciliacion_conciliacion_negocio
 create trigger trg_reconciliacion_conciliacion_mensajero
   before update on public.conciliaciones_messengers
   for each row execute function public.reconciliacion_conciliacion();
+
+-- =====================================================================
+-- PERMISO DE GOOGLE (2026-11-16): refresh token por usuario para que la Edge
+-- Function google-token renueve el acceso a Sheets, Gmail y Drive sin pedir
+-- "Reconectar Google" cada hora. Privada: RLS sin políticas (solo service role).
+-- =====================================================================
+create table public.google_oauth_tokens (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  refresh_token text not null,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.google_oauth_tokens enable row level security;
+revoke all on public.google_oauth_tokens from anon, authenticated;

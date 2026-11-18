@@ -3,6 +3,7 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 import {SUPABASE_CONFIGURADO} from './lib/supabase';
+import {CentroNotificaciones} from './lib/notificaciones';
 
 // Sin la conexión a Supabase (variables SUPABASE_URL / SUPABASE_ANON_KEY no
 // definidas al compilar) la app no puede funcionar: se explica en pantalla.
@@ -24,5 +25,6 @@ function ConfiguracionFaltante() {
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     {SUPABASE_CONFIGURADO ? <App /> : <ConfiguracionFaltante />}
+    <CentroNotificaciones />
   </StrictMode>,
 );

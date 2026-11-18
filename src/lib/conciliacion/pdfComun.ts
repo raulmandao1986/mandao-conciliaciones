@@ -43,6 +43,13 @@ export function getLogoDataUrl(): Promise<string | null> {
 }
 
 // Título "Reporte de conciliación" y, si corresponde, el logo arriba a la derecha.
+// Título del documento = nombre del PDF: el visor del navegador lo muestra en
+// la pestaña al abrirlo (en vez de un identificador del archivo).
+export function titularPdf(doc: any, titulo: string) {
+  doc.setProperties({ title: titulo });
+  doc.viewerPreferences({ DisplayDocTitle: true });
+}
+
 export async function drawEncabezado(doc: any, conLogo: boolean) {
   const pageW = doc.internal.pageSize.getWidth();
   doc.setFont('helvetica', 'bold');
@@ -55,14 +62,15 @@ export async function drawEncabezado(doc: any, conLogo: boolean) {
   }
 }
 
-// Pie de cada página: fecha de conciliación, Área y número de página.
-export function drawPie(doc: any, fechaConciliacion: string, area: string) {
+// Pie de cada página: fecha de conciliación y número de página (sin el Área,
+// pedido 2026-11-16).
+export function drawPie(doc: any, fechaConciliacion: string) {
   const pageW = doc.internal.pageSize.getWidth();
   const h = doc.internal.pageSize.getHeight();
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(7.5);
   doc.setTextColor(...GRIS);
-  doc.text(`Conciliado el ${formatDate(fechaConciliacion)} · Área: ${area}`, PDF_MARGEN, h - 8);
+  doc.text(`Conciliado el ${formatDate(fechaConciliacion)}`, PDF_MARGEN, h - 8);
   doc.text(`Página ${doc.getNumberOfPages()}`, pageW - PDF_MARGEN, h - 8, { align: 'right' });
   doc.setTextColor(...NEGRO);
 }
@@ -120,10 +128,11 @@ export async function loadOrdenesConciliacion<R extends { id: string; areaId: st
 // Detalle por orden: Mandao se queda con el % (comisión) del importe y el
 // negocio/mensajero con el resto — en lo Por Cobrar (Efectivo) lo cobra
 // Mandao (CxC), en lo Por Pagar lo paga (CxP); el reparto es el mismo.
-export function repartir<T extends { montoCup: number }>(ordenes: T[], pct: number, factor = 1) {
+// `pct` (fracción): uno solo o, por orden, el % de su línea del desglose.
+export function repartir<T extends { montoCup: number }>(ordenes: T[], pct: number | ((o: T) => number), factor = 1) {
   return ordenes.map(o => {
     const importe = o.montoCup * factor;
-    const comision = importe * pct;
+    const comision = importe * (typeof pct === 'number' ? pct : pct(o));
     return { ...o, importe, beneficio: importe - comision, comision };
   });
 }

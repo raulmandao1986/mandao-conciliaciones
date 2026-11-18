@@ -12,11 +12,12 @@ import {
 } from '../../lib/conciliacion/paymentBuckets';
 import {
   loadCatalogoPagos, computeDesglose, convertirLineas, totales, columnasLegado, parseDesglose,
-  type CatalogoPagos, type LineaGrupo,
+  pctPorMoneda, type CatalogoPagos, type LineaGrupo, type Comisiones,
 } from '../../lib/conciliacion/catalogoPagos';
 import { GruposDesglose } from './GruposDesglose';
 import { fetchAllRows } from '../../lib/conciliacion/fetchAllRows';
 import { EstadoConciliacionControl, ReconciliacionesLog } from '../../lib/conciliacion/EstadoBadge';
+import { Monto } from '../../design-system/primitives/Monto';
 import { puedeReconciliar, parseEstado, cambiarEstadoConciliacion } from '../../lib/conciliacion/estados';
 import { useEnvioConciliaciones, puedeEnviar, type EnvioItem } from './EnvioCorreo';
 import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn, nombreArchivoPdf } from '../../lib/conciliacion/drivePdf';
@@ -30,6 +31,7 @@ import {
   GitMerge, Loader2, Search, Calculator, AlertTriangle, CheckCircle2, XCircle,
   ChevronDown, ChevronUp, FileText, UserPlus, Info, UploadCloud, RotateCcw, Mail, History
 } from 'lucide-react';
+import { notificar } from '../../lib/notificaciones';
 
 // =====================================================================
 // Conciliación de Negocios — ver Instrucciones Conciliaciones Mandao.md
@@ -180,7 +182,7 @@ function buildSettlements(params: {
   businessId: string | null;
   metodoPagoNegocio: string;
   ordenes: OrderRow[];
-  commissionPercent: number;
+  commissionPercent: Comisiones;
   exchangeRateCup: number | null;
   catalogo: CatalogoPagos;
 }): Array<Omit<Settlement, 'yaConciliado' | 'previa' | 'coincidencia'>> {
@@ -332,6 +334,8 @@ export function ConciliacionNegociosPage() {
   const [fechaInicio, setFechaInicio] = useState(() => toLocalISODate());
   const [fechaFin, setFechaFin] = useState(() => toLocalISODate());
   const [commissionPercent, setCommissionPercent] = useState(20);
+  const [commissionUSD, setCommissionUSD] = useState<number | null>(null);
+  const comisiones = { CUP: commissionPercent, USD: commissionUSD };
   const [exchangeRate, setExchangeRate] = useState<number | null>(null);
 
   const [calculating, setCalculating] = useState(false);
@@ -387,9 +391,15 @@ export function ConciliacionNegociosPage() {
   };
 
   const loadCommission = async () => {
-    const { data, error } = await supabase.from('commission_settings').select('percentage').eq('entity_type', 'businesses').maybeSingle();
+    // Comisión CUP (base) y, si existe, la de USD (migración 2026-11-16).
+    let { data, error } = await supabase.from('commission_settings').select('percentage, currency').eq('entity_type', 'businesses');
+    if (error && /currency/.test(error.message || '')) ({ data, error } = await supabase.from('commission_settings').select('percentage').eq('entity_type', 'businesses') as any);
     if (error) { console.error('Error loading commission_settings:', error.message); return; }
-    if (data) setCommissionPercent(Number(data.percentage));
+    const filas = (data || []) as { percentage: number; currency?: string }[];
+    const cup = filas.find(r => !r.currency || r.currency === 'CUP');
+    const usd = filas.find(r => r.currency === 'USD');
+    if (cup) setCommissionPercent(Number(cup.percentage));
+    setCommissionUSD(usd ? Number(usd.percentage) : null);
   };
 
   // Tasa de cambio activa (Configuración -> Razón de Cambio) — usada solo
@@ -502,7 +512,7 @@ export function ConciliacionNegociosPage() {
         businessId: matchBusiness?.id || null,
         metodoPagoNegocio: matchBusiness?.metodoPago || '',
         ordenes: ordenesGrupo,
-        commissionPercent,
+        commissionPercent: comisiones,
         exchangeRateCup: exchangeRate,
         catalogo,
       });
@@ -552,7 +562,7 @@ export function ConciliacionNegociosPage() {
       }
     }, 400);
     return () => clearTimeout(timer);
-  }, [mode, selectedAreaId, fechaInicio, fechaFin, businesses, areas, commissionPercent, exchangeRate, pendientesVersion]);
+  }, [mode, selectedAreaId, fechaInicio, fechaFin, businesses, areas, commissionPercent, commissionUSD, exchangeRate, pendientesVersion]);
 
   const handleCalcular = async () => {
     if (mode === 'individual' && !selectedNegocioKey) {
@@ -611,7 +621,7 @@ export function ConciliacionNegociosPage() {
       setPendientesVersion(v => v + 1);
       await handleCalcular();
     } catch (err: any) {
-      alert('No se pudo activar el negocio: ' + (err?.message || err));
+      notificar('No se pudo activar el negocio: ' + (err?.message || err));
     }
   };
   const nombreArea = (areaId: string | null) => areas.find(a => a.id === areaId)?.nombre || 'N/D';
@@ -639,14 +649,14 @@ export function ConciliacionNegociosPage() {
         });
       }
       if (existentes.length > 0) {
-        alert(`${existentes.map(f => f.negocioNombre).join(', ')} ya existe(n) en Gestión de Negocios con otro estado o en otra Área: no se registró de nuevo. Revise el aviso de cada uno para activarlo o modificar su información.`);
+        notificar(`${existentes.map(f => f.negocioNombre).join(', ')} ya existe(n) en Gestión de Negocios con otro estado o en otra Área: no se registró de nuevo. Revise el aviso de cada uno para activarlo o modificar su información.`);
       }
       await loadBusinesses();
       setPendientesVersion(v => v + 1);
       await handleCalcular();
     } catch (err: any) {
       console.error('Error registrando negocios faltantes:', err);
-      alert('Error al registrar negocios. Detalle: ' + (err?.message || err));
+      notificar('Error al registrar negocios. Detalle: ' + (err?.message || err));
     } finally {
       setRegistering(false);
     }
@@ -730,7 +740,8 @@ export function ConciliacionNegociosPage() {
         responsable_id: userData?.user?.id || null,
         conciliacion: `${s.negocioNombre} (${s.subtipo}) ${fechaInicio} - ${fechaFin}`,
         estado: 'Nuevo',
-        comision_pct: commissionPercent,
+        // % guardado con la fila: el de su moneda (líneas USD -> comisión USD).
+        comision_pct: s.moneda === 'USD' ? pctPorMoneda(comisiones, 'USD') : commissionPercent,
         tasa_cambio: s.moneda === 'USD' ? exchangeRate : null,
       });
       const nuevos = elegiblesParaConciliar.filter(s => !s.yaConciliado);
@@ -868,7 +879,7 @@ export function ConciliacionNegociosPage() {
       await cambiarEstadoConciliacion('conciliaciones_businesses', { id: rec.id, estado: rec.estado, nombre: rec.conciliacion, consecutivo: rec.consecutivo }, nuevo);
       setHistory(prev => prev.map(h => (h.id === rec.id ? { ...h, estado: nuevo } : h)));
     } catch (err: any) {
-      alert('No se pudo cambiar el estado: ' + (err?.message || err));
+      notificar('No se pudo cambiar el estado: ' + (err?.message || err));
     }
   };
 
@@ -900,20 +911,17 @@ export function ConciliacionNegociosPage() {
         fileName: pdfFileNameNegocio,
         displayName: r => `${r.establecimiento} (${r.viaPago})`,
       });
-      alert(describeDriveResult(drive));
+      notificar(describeDriveResult(drive));
       await loadHistory();
     } finally {
       setSubiendoId(null);
     }
   };
 
-  // Si el PDF está en Google Drive se abre desde allí; si no, se genera al
-  // momento a partir de la fila guardada y se abre en una pestaña nueva.
+  // El PDF se genera al momento con el diseño vigente a partir de la fila
+  // guardada y se abre en una pestaña nueva (2026-11-18: la copia de Google
+  // Drive puede tener un diseño anterior; queda como archivo del envío).
   const handleGenerarPDF = async (rec: ConciliacionRecord) => {
-    if (rec.pdfDriveUrl) {
-      window.open(rec.pdfDriveUrl, '_blank', 'noopener');
-      return;
-    }
     // La pestaña se abre antes del await para que el navegador no la bloquee.
     const win = window.open('', '_blank');
     try {
@@ -924,7 +932,7 @@ export function ConciliacionNegociosPage() {
     } catch (err: any) {
       win?.close();
       console.error('Error generando PDF:', err);
-      alert('Error al generar el PDF: ' + (err?.message || err));
+      notificar('Error al generar el PDF: ' + (err?.message || err));
     }
   };
 
@@ -1059,7 +1067,7 @@ export function ConciliacionNegociosPage() {
         <div className="flex items-center justify-between gap-3">
           <p className="text-[11px] text-[var(--color-text-faint)] flex items-center gap-1.5">
             <Info size={12} />
-            Comisión: <strong className="text-[var(--color-text-muted)]">{commissionPercent}%</strong> · Tasa de cambio activa: <strong className="text-[var(--color-text-muted)]">{exchangeRate ? `1 CUP = ${exchangeRate} USD` : 'No definida'}</strong> (Transferencia-Exterior)
+            Comisión: <strong className="text-[var(--color-text-muted)]">{commissionPercent}%{commissionUSD !== null ? ` CUP · ${commissionUSD}% USD` : ''}</strong> · Tasa de cambio activa: <strong className="text-[var(--color-text-muted)]">{exchangeRate ? `1 CUP = ${exchangeRate} USD` : 'No definida'}</strong> (Transferencia-Exterior)
           </p>
           <Button variant="brand" className="gap-2" onClick={handleCalcular} disabled={calculating || (mode === 'individual' && !selectedNegocioKey)}>
             {calculating ? <Loader2 size={16} className="animate-spin" /> : <Calculator size={16} />}
@@ -1222,8 +1230,8 @@ export function ConciliacionNegociosPage() {
               <option value="">Todas las Áreas</option>
               {areas.map(a => <option key={a.id} value={a.nombre}>{a.nombre}</option>)}
             </select>
-            <select value={historyViaFilter} onChange={(e) => setHistoryViaFilter(e.target.value)} aria-label="Todos los Rieles" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
-              <option value="">Todos los Rieles</option>
+            <select value={historyViaFilter} onChange={(e) => setHistoryViaFilter(e.target.value)} aria-label="Todas las Vías de pago" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
+              <option value="">Todas las Vías de pago</option>
               {viasDisponibles.map(v => <option key={v} value={v}>{v}</option>)}
             </select>
             <select value={historyMonedaFilter} onChange={(e) => setHistoryMonedaFilter(e.target.value)} aria-label="Todas las Monedas" className="h-9 w-full px-3 bg-white border border-[var(--color-border)] rounded-[var(--radius-sm)] text-sm outline-none focus:border-[var(--color-primary)] flex-1 min-w-[10rem]">
@@ -1268,7 +1276,7 @@ export function ConciliacionNegociosPage() {
                 <th className="w-5 p-4"></th>
                 <th className="p-4">Establecimiento</th>
                 <th className="p-4">Período</th>
-                <th className="p-4">Riel</th>
+                <th className="p-4">Vía de pago</th>
                 <th className="p-4 text-right">Total</th>
                 <th className="p-4">Estado</th>
                 <th className="p-4">Conciliación</th>
@@ -1311,14 +1319,8 @@ export function ConciliacionNegociosPage() {
                         </td>
                         <td className="p-4 text-xs font-mono text-slate-600">{formatDate(r.fechaInicial)} — {formatDate(r.fechaFinal)}</td>
                         <td className="p-4 text-xs font-semibold text-slate-600">{r.viaPago} <span className="text-[10px] text-slate-400">({r.moneda})</span></td>
-                        <td className="p-4 text-right">
-                          {totalCxP > r.cxcCU ? (
-                            <span className="font-bold text-sm text-[var(--color-danger)] tabular-nums">Pagar {formatCurrency(totalCxP - r.cxcCU, r.moneda)}</span>
-                          ) : r.cxcCU > totalCxP ? (
-                            <span className="font-bold text-sm text-[var(--color-success)] tabular-nums">Cobrar {formatCurrency(r.cxcCU - totalCxP, r.moneda)}</span>
-                          ) : (
-                            <span className="font-bold text-sm text-slate-400 tabular-nums">{formatCurrency(0, r.moneda)}</span>
-                          )}
+                        <td className="p-4 text-right text-sm">
+                          <Monto valor={totalCxP - r.cxcCU} moneda={r.moneda} />
                         </td>
                         <td className="p-4">
                           <EstadoConciliacionControl estado={r.estado} neto={totalCxP - r.cxcCU} editable={canExecute} onCambiar={nuevo => handleCambiarEstado(r, nuevo)} />
@@ -1327,11 +1329,11 @@ export function ConciliacionNegociosPage() {
                           <div className="flex items-center gap-2">
                             <button
                               onClick={() => handleGenerarPDF(r)}
-                              className="text-xs font-bold text-blue-600 hover:underline flex items-center gap-1"
-                              title={r.pdfDriveUrl ? 'Abrir PDF en Google Drive' : 'Generar/Descargar PDF'}
+                              className="p-1.5 rounded-[var(--radius-sm)] text-[var(--color-danger)] hover:bg-[var(--color-danger-bg)]"
+                              aria-label={`Abrir PDF ${r.conciliacion}`}
+                              title={`Abrir PDF: ${r.conciliacion}`}
                             >
-                              <FileText size={12} />
-                              {r.conciliacion}
+                              <FileText size={18} />
                             </button>
                             {!r.pdfDriveUrl && canExecute && (
                               <button
@@ -1500,16 +1502,12 @@ function NegocioResultCard({
             </div>
           )}
 
-          {(totalCxP > totalCxC) && (
-            <div className="bg-[var(--color-brand)] rounded-lg p-4 flex justify-between items-center">
-              <span className="font-black text-xs uppercase text-[var(--color-brand-ink)]">Total a Pagar al Negocio ({calculo.moneda})</span>
-              <span className="text-xl font-black text-[var(--color-brand-ink)]">{formatCurrency(totalCxP - totalCxC, calculo.moneda)}</span>
-            </div>
-          )}
-          {(totalCxC > totalCxP) && (
-            <div className="bg-[var(--color-brand)] rounded-lg p-4 flex justify-between items-center">
-              <span className="font-black text-xs uppercase text-[var(--color-brand-ink)]">Total a Cobrar al Negocio ({calculo.moneda})</span>
-              <span className="text-xl font-black text-[var(--color-brand-ink)]">{formatCurrency(totalCxC - totalCxP, calculo.moneda)}</span>
+          {!esSaldoCero(totalCxP, totalCxC) && (
+            // Resumen antes de conciliar: CUP en amarillo de marca; USD con fondo
+            // negro y letras blancas para distinguirlo (2026-11-18).
+            <div className={cn('rounded-lg p-4 flex justify-between items-center', calculo.moneda === 'USD' ? 'bg-[var(--color-brand-ink)] text-white' : 'bg-[var(--color-brand)] text-[var(--color-brand-ink)]')}>
+              <span className="font-black text-xs uppercase">{totalCxP > totalCxC ? 'Total a Pagar al Negocio' : 'Total a Cobrar al Negocio'}</span>
+              <span className="text-xl font-black tabular-nums">{formatCurrency(Math.abs(totalCxP - totalCxC), calculo.moneda)}</span>
             </div>
           )}
           {esSaldoCero(totalCxP, totalCxC) && (
@@ -1610,7 +1608,7 @@ function MasivaResultTable({
             <tr className="text-[10px] font-black text-[var(--color-text-faint)] uppercase tracking-wider">
               <th className="w-10 p-3"></th>
               <th className="p-3">Negocio</th>
-              <th className="p-3" title="Cómo se le entrega el dinero al negocio — no tiene relación con el método de pago de las órdenes">Riel</th>
+              <th className="p-3" title="Cómo se le entrega el dinero al negocio — no tiene relación con el método de pago de las órdenes">Vía de pago</th>
               <th className="p-3">Área</th>
               <th className="p-3 text-right">Órdenes</th>
               <th className="p-3 text-right">Total</th>
@@ -1640,8 +1638,8 @@ function MasivaResultTable({
                     <td className="p-3 text-xs text-slate-500">{r.subtipo} <span className="text-[9px] text-slate-400">({r.moneda})</span></td>
                     <td className="p-3 text-xs text-slate-500">{r.areaNombre}</td>
                     <td className="p-3 text-right text-xs font-mono">{r.ordenesEnJuego}</td>
-                    <td className="p-3 text-right text-xs font-mono font-bold">
-                      {r.totalCxP > r.totalCxC ? formatCurrency(r.totalCxP - r.totalCxC, r.moneda) : r.totalCxC > r.totalCxP ? formatCurrency(r.totalCxC - r.totalCxP, r.moneda) : formatCurrency(0, r.moneda)}
+                    <td className="p-3 text-right text-xs">
+                      <Monto valor={r.totalCxP - r.totalCxC} moneda={r.moneda} />
                     </td>
                     <td className="p-3">
                       {r.ordenesEnJuego === 0 ? (
