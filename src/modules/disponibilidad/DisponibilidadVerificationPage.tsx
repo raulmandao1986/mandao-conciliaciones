@@ -28,6 +28,7 @@ import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
 import { useAuth } from '../../lib/auth';
+import { usePermisos } from '../../lib/permisos';
 import { parseSheetDate, normalizeSheetDateStr } from '../../lib/sheetDateParser';
 import { locateHeaderRow, DISPONIBILIDAD_HEADERS, columnLetter } from '../../lib/sheetHeaders';
 import { toLocalISODate } from '../../lib/formatters';
@@ -168,6 +169,11 @@ function fuzzyNormalizedString(str: any): string {
 
 export function DisponibilidadVerificationPage() {
   const { user } = useAuth();
+  const permisos = usePermisos('disponibilidad-verificacion');
+  const puedeVerificar = permisos.puede('verificar');
+  const puedeImportar = permisos.puede('importar');
+  const puedeEnviarCorreo = permisos.puede('enviar_correo');
+  const puedeExportar = permisos.puede('exportar');
   
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -1123,7 +1129,7 @@ export function DisponibilidadVerificationPage() {
                   variant="primary" 
                   className="w-full h-11 text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2"
                   onClick={handleVerify}
-                  disabled={loading || !selectedAreaId}
+                  disabled={!puedeVerificar || loading || !selectedAreaId}
                 >
                   {loading ? (
                     <>
@@ -1358,6 +1364,7 @@ export function DisponibilidadVerificationPage() {
                           variant="ghost" 
                           className="flex-1 sm:flex-none h-10 px-4 text-xs font-bold border border-slate-200 hover:bg-slate-50 text-slate-700"
                           onClick={exportToPDF}
+                          disabled={!puedeExportar}
                         >
                           <Download size={14} className="mr-2" />
                           EXPORTAR PDF
@@ -1367,7 +1374,7 @@ export function DisponibilidadVerificationPage() {
                           variant="ghost" 
                           className="flex-1 sm:flex-none h-10 px-4 text-xs font-bold border border-slate-200 hover:bg-slate-50 text-slate-700"
                           onClick={handleSendEmail}
-                          disabled={isSendingEmail}
+                          disabled={!puedeEnviarCorreo || isSendingEmail}
                         >
                           {isSendingEmail ? (
                             <Loader2 size={14} className="animate-spin mr-2" />
@@ -1383,7 +1390,7 @@ export function DisponibilidadVerificationPage() {
                       variant="primary" 
                       className="flex-1 sm:flex-none h-10 px-6 text-xs font-black uppercase tracking-wider bg-[var(--color-brand)] text-[var(--color-brand-ink)] hover:bg-[var(--color-brand-dark)] border-transparent shadow-sm"
                       onClick={handleImport}
-                      disabled={importing || !canImport}
+                      disabled={!puedeImportar || importing || !canImport}
                     >
                       {importing ? (
                         <>

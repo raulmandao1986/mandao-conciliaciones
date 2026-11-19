@@ -3,7 +3,7 @@ import { DataTable } from '../../design-system/patterns/DataTable';
 import { StatusBadge } from '../../design-system/primitives/StatusBadge';
 import { Button } from '../../design-system/primitives/Button';
 import { supabase, logAuditEvent } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
 import { usePermisos } from '../../lib/permisos';
 import {
   Plus,
@@ -72,13 +72,15 @@ export function GestionMensajerosPage() {
   const { user } = useAuth();
   // RLS "manage_messengers" en Supabase ya restringe la escritura a Super
   // Admin a nivel de base de datos — este check es solo para la UI.
-  const canWrite = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
   // Permisos por menú del Rol de Acceso (Configuración → Roles): cada acción
   // se muestra solo si el rol la permite Y el permiso del menú también.
   const permisos = usePermisos('gestion-mensajeros');
-  const puedeCrear = canWrite && permisos.crear;
-  const puedeEditar = canWrite && permisos.editar;
-  const puedeEliminar = canWrite && permisos.eliminar;
+  const puedeCrear = permisos.crear;
+  const puedeEditar = permisos.editar;
+  const puedeEliminar = permisos.eliminar;
+  const canWrite = puedeCrear || puedeEditar || puedeEliminar;
+  const puedeImportar = permisos.puede('importar');
+  const puedeExportar = permisos.puede('exportar');
 
   const [data, setData] = useState<MessengerRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -460,6 +462,7 @@ export function GestionMensajerosPage() {
               variant="outline"
               className="gap-2"
               onClick={() => setShowExportMenu(!showExportMenu)}
+              disabled={!puedeExportar}
             >
               <Download size={16} />
               Exportar
@@ -485,7 +488,7 @@ export function GestionMensajerosPage() {
             )}
           </div>
 
-          {puedeCrear && (
+          {puedeImportar && (
             <Button variant="outline" className="gap-2" onClick={() => setIsBulkImportOpen(true)}>
               <FileSpreadsheet size={16} />
               Importación Masiva

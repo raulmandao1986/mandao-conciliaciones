@@ -52,12 +52,23 @@ Deno.serve(async (req) => {
       });
       const { data: userData } = await asUser.auth.getUser(jwt);
       if (userData?.user) {
-        const { data: profile } = await admin
-          .from('profiles')
-          .select('role')
-          .eq('id', userData.user.id)
-          .maybeSingle();
-        isAuthorizedUser = profile?.role === 'super_admin' || profile?.role === 'supervisor';
+        // Permiso "Sincronizar con El Toque" del rol (Configuración -> Roles
+        // y Usuarios, 2026-11-19c). Si la función tiene_permiso aún no existe
+        // en la BD, se mantiene la regla anterior (Super Admin / Supervisor).
+        const { data: permitido, error: permErr } = await asUser.rpc('tiene_permiso', {
+          p_menu: 'razon-cambio',
+          p_accion: 'sincronizar',
+        });
+        if (!permErr) {
+          isAuthorizedUser = permitido === true;
+        } else {
+          const { data: profile } = await admin
+            .from('profiles')
+            .select('role')
+            .eq('id', userData.user.id)
+            .maybeSingle();
+          isAuthorizedUser = profile?.role === 'super_admin' || profile?.role === 'supervisor';
+        }
       }
     }
   }

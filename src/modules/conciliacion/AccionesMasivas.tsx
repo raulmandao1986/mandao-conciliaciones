@@ -28,13 +28,16 @@ interface AccionesMasivasProps {
   onLimpiar: () => void;
   // Recarga el histórico tras el cambio de estado masivo.
   onTerminado: () => Promise<void> | void;
+  // Permisos del rol (Configuración -> Roles y Usuarios).
+  puedeEnviarCorreo?: boolean;
+  puedeCambiarEstado?: boolean;
 }
 
 const plural = (n: number, uno: string, varios: string) => `${n} ${n === 1 ? uno : varios}`;
 
 // Barra de acciones masivas del histórico (BulkActionsBar): envío por correo y
 // cambio de estado de varias conciliaciones respetando transicionesEstado().
-export function AccionesMasivas({ table, items, envioOcupado, envioPreparando, onEnviar, onLimpiar, onTerminado }: AccionesMasivasProps) {
+export function AccionesMasivas({ table, items, envioOcupado, envioPreparando, onEnviar, onLimpiar, onTerminado, puedeEnviarCorreo = true, puedeCambiarEstado = true }: AccionesMasivasProps) {
   const [destino, setDestino] = useState<EstadoConciliacion | ''>('');
   const [aplicando, setAplicando] = useState(false);
 
@@ -114,6 +117,7 @@ export function AccionesMasivas({ table, items, envioOcupado, envioPreparando, o
       >
         <X size={14} /> Limpiar
       </Button>
+      {puedeEnviarCorreo && (<>
       <span className="mx-1 h-5 w-px bg-[var(--color-border)]" aria-hidden="true" />
       <Button
         variant="outline"
@@ -126,6 +130,8 @@ export function AccionesMasivas({ table, items, envioOcupado, envioPreparando, o
         {envioPreparando ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} />}
         Enviar por correo ({enviables})
       </Button>
+      </>)}
+      {puedeCambiarEstado && (<>
       <span className="mx-1 h-5 w-px bg-[var(--color-border)]" aria-hidden="true" />
       <label className="flex items-center gap-2">
         <span className="text-xs font-medium text-[var(--color-text-muted)]">Cambiar estado a…</span>
@@ -150,6 +156,7 @@ export function AccionesMasivas({ table, items, envioOcupado, envioPreparando, o
         {aplicando ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
         {aplicando ? 'Aplicando…' : 'Aplicar'}
       </Button>
+      </>)}
     </div>
   );
 }

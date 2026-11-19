@@ -4,7 +4,7 @@ import {
   CalendarPlus, X, Lock,
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
 import { usePermisos } from '../../lib/permisos';
 import { cn } from '../../lib/utils';
 import { formatDate } from '../../lib/formatters';
@@ -34,7 +34,8 @@ function Monto({ neto, moneda }: { neto: number; moneda: Moneda }) {
 export function CobrosPagosPage({ entidad }: { entidad: EntidadCobros }) {
   const { user } = useAuth();
   const permisos = usePermisos(entidad === 'negocios' ? 'cobros-pagos-negocio' : 'cobros-pagos-mensajero');
-  const puedeGenerar = ROLE_CAN_IMPORT(user?.role || 'visitante') && permisos.crear;
+  const puedeGenerar = permisos.puede('generar_planificacion');
+  const puedeExportar = permisos.puede('exportar');
   const e = entidad === 'negocios'
     ? { uno: 'negocio', Uno: 'Negocio', varios: 'negocios', modulo: 'Negocios' }
     : { uno: 'mensajero', Uno: 'Mensajero', varios: 'mensajeros', modulo: 'Mensajeros' };
@@ -262,10 +263,10 @@ export function CobrosPagosPage({ entidad }: { entidad: EntidadCobros }) {
             )}
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" className="gap-1.5" disabled={grupos.length === 0 || !!exportando} onClick={() => exportar('excel')}>
+            <Button variant="outline" size="sm" className="gap-1.5" disabled={!puedeExportar || grupos.length === 0 || !!exportando} onClick={() => exportar('excel')}>
               {exportando === 'excel' ? <Loader2 size={14} className="animate-spin" /> : <FileSpreadsheet size={14} />} Exportar Excel
             </Button>
-            <Button variant="outline" size="sm" className="gap-1.5" disabled={grupos.length === 0 || !!exportando} onClick={() => exportar('pdf')}>
+            <Button variant="outline" size="sm" className="gap-1.5" disabled={!puedeExportar || grupos.length === 0 || !!exportando} onClick={() => exportar('pdf')}>
               {exportando === 'pdf' ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />} Planificación PDF
             </Button>
             {puedeGenerar && (

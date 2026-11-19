@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_IMPORT, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
 import { usePermisos } from '../../lib/permisos';
 import { formatCurrency, formatDate, formatDatetime, toLocalISODate } from '../../lib/formatters';
 import { cn } from '../../lib/utils';
@@ -326,10 +326,15 @@ export function ConciliacionNegociosPage() {
   // Conciliar, cambiar estados, enviar y reconciliar: el rol debe permitirlo
   // y el Rol de Acceso tener 'Editar' en este menú (2026-11-19).
   const permisosMenu = usePermisos('conciliacion-negocio');
-  const canExecute = ROLE_CAN_IMPORT(user?.role || 'visitante') && permisosMenu.editar;
+  // Permisos por acción del rol (Configuración -> Roles y Usuarios).
+  const canExecute = permisosMenu.puede('conciliar');
+  const puedeReconciliarRol = permisosMenu.puede('reconciliar');
+  const puedeCambiarEstado = permisosMenu.puede('cambiar_estado');
+  const puedeEnviarCorreo = permisosMenu.puede('enviar_correo');
+  const puedeSeleccionar = puedeCambiarEstado || puedeEnviarCorreo;
   // Registrar negocios faltantes usa la misma política que Gestión de
   // Negocios (manage_businesses) — solo Super Admin puede insertar ahí.
-  const canRegisterBusinesses = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
+  const canRegisterBusinesses = permisosMenu.puede('registrar_entidad');
 
   const [mode, setMode] = useState<'individual' | 'masiva'>('individual');
   const [areas, setAreas] = useState<AreaOption[]>([]);
@@ -1166,7 +1171,7 @@ export function ConciliacionNegociosPage() {
         periodo={bitacora?.soloPeriodo ? { fechaInicial: bitacora.rec.fechaInicial, fechaFinal: bitacora.rec.fechaFinal } : null}
         seleccionInicial={bitacora?.rec.id}
         onAbrirPdf={id => { const rec = history.find(h => h.id === id); if (rec) void handleGenerarPDF(rec); }}
-        accion={bitacora?.soloPeriodo && canExecute && puedeReconciliar(bitacora.rec.estado)
+        accion={bitacora?.soloPeriodo && puedeReconciliarRol && puedeReconciliar(bitacora.rec.estado)
           ? { label: 'Continuar con la reconciliación', onClick: () => { const rec = bitacora.rec; setBitacora(null); handleReconciliarDesdeHistorico(rec); } }
           : null}
       />
@@ -1249,9 +1254,11 @@ export function ConciliacionNegociosPage() {
           </div>
         </div>
 
-        {canExecute && (
+        {puedeSeleccionar && (
           <AccionesMasivas
             table="conciliaciones_businesses"
+            puedeEnviarCorreo={puedeEnviarCorreo}
+            puedeCambiarEstado={puedeCambiarEstado}
             items={seleccionadas.map(r => ({ id: r.id, estado: r.estado, neto: r.cxpTM + r.cxpSM + r.cxpUS - r.cxcCU, nombre: r.conciliacion, consecutivo: r.consecutivo }))}
             envioOcupado={envio.ocupado}
             envioPreparando={envio.preparando}
@@ -1266,7 +1273,7 @@ export function ConciliacionNegociosPage() {
             <thead className="bg-slate-50 border-b border-[var(--color-border)]">
               <tr className="text-[10px] font-black text-[var(--color-text-faint)] uppercase tracking-wider">
                 <th className="w-10 pl-4 py-4">
-                  {canExecute && (
+                  {puedeSeleccionar && (
                     <input
                       type="checkbox"
                       className="w-4 h-4 align-middle"
@@ -1300,7 +1307,7 @@ export function ConciliacionNegociosPage() {
                     <React.Fragment key={r.id}>
                       <tr className="hover:bg-slate-50 cursor-pointer group" onClick={() => setExpandedHistoryId(isExpanded ? null : r.id)}>
                         <td className="pl-4 py-4" onClick={(e) => e.stopPropagation()}>
-                          {canExecute && (
+                          {puedeSeleccionar && (
                             <input
                               type="checkbox"
                               className="w-4 h-4 align-middle"
@@ -1328,7 +1335,7 @@ export function ConciliacionNegociosPage() {
                           <Monto valor={totalCxP - r.cxcCU} moneda={r.moneda} />
                         </td>
                         <td className="p-4">
-                          <EstadoConciliacionControl estado={r.estado} neto={totalCxP - r.cxcCU} editable={canExecute} onCambiar={nuevo => handleCambiarEstado(r, nuevo)} />
+                          <EstadoConciliacionControl estado={r.estado} neto={totalCxP - r.cxcCU} editable={puedeCambiarEstado} onCambiar={nuevo => handleCambiarEstado(r, nuevo)} />
                         </td>
                         <td className="p-4" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center gap-2">
@@ -1340,7 +1347,7 @@ export function ConciliacionNegociosPage() {
                             >
                               <FileText size={18} />
                             </button>
-                            {!r.pdfDriveUrl && canExecute && (
+                            {!r.pdfDriveUrl && puedeEnviarCorreo && (
                               <button
                                 onClick={() => handleSubirPdf(r)}
                                 disabled={subiendoId === r.id}
@@ -1351,7 +1358,7 @@ export function ConciliacionNegociosPage() {
                                 {subiendoId === r.id ? <Loader2 size={13} className="animate-spin" /> : <UploadCloud size={13} />}
                               </button>
                             )}
-                            {canExecute && puedeEnviar(r.estado) && (
+                            {puedeEnviarCorreo && puedeEnviar(r.estado) && (
                               <button
                                 onClick={() => enviarNegocio(r)}
                                 disabled={envio.ocupado}
@@ -1362,7 +1369,7 @@ export function ConciliacionNegociosPage() {
                                 <Mail size={13} />
                               </button>
                             )}
-                            {canExecute && puedeReconciliar(r.estado) && (
+                            {puedeReconciliarRol && puedeReconciliar(r.estado) && (
                               <button
                                 onClick={() => setBitacora({ rec: r, soloPeriodo: true })}
                                 aria-label="Reconciliar"
@@ -1588,7 +1595,7 @@ function MasivaResultTable({
                 Registrar {faltantes} Negocio{faltantes === 1 ? '' : 's'} Faltante{faltantes === 1 ? '' : 's'}
               </Button>
             ) : (
-              <span className="text-[10px] text-red-700 font-bold">{faltantes} negocio(s) sin registrar — requiere Super Admin</span>
+              <span className="text-[10px] text-red-700 font-bold">{faltantes} negocio(s) sin registrar — requiere permiso para registrar</span>
             )
           )}
           {canExecute && (

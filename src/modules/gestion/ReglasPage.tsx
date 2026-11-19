@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
 import { usePermisos } from '../../lib/permisos';
 import { ListChecks, Plus, Edit2, Trash2, Loader2, Save, Search, AlertTriangle, RefreshCw, Store as StoreIcon } from 'lucide-react';
 import { Button } from '../../design-system/primitives/Button';
@@ -57,13 +57,13 @@ const emptyForm = (): FormState => ({
 export function ReglasPage({ actor }: { actor: RuleActor }) {
   const { user } = useAuth();
   // RLS "manage_dispatcher_rules" ya restringe la escritura a Super Admin.
-  const canWrite = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
   // Permisos por menú del Rol de Acceso (Configuración → Roles): cada acción
   // se muestra solo si el rol la permite Y el permiso del menú también.
   const permisos = usePermisos(actor === 'negocios' ? 'reglas-negocios' : 'reglas-mensajeros');
-  const puedeCrear = canWrite && permisos.crear;
-  const puedeEditar = canWrite && permisos.editar;
-  const puedeEliminar = canWrite && permisos.eliminar;
+  const puedeCrear = permisos.crear;
+  const puedeEditar = permisos.editar;
+  const puedeEliminar = permisos.eliminar;
+  const canWrite = puedeCrear || puedeEditar || puedeEliminar;
 
   const [data, setData] = useState<DispatcherRule[]>([]);
   const [storeNames, setStoreNames] = useState<string[]>([]);

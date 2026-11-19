@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
 import { usePermisos } from '../../lib/permisos';
 import { CreditCard, Plus, Edit2, Trash2, Loader2, Save, Search } from 'lucide-react';
 import { Button } from '../../design-system/primitives/Button';
@@ -34,13 +34,13 @@ export function MetodosPagoPage({ type }: { type?: 'negocios' | 'mensajeros' | '
   const { user } = useAuth();
   // RLS "manage_payment_methods" en Supabase ya restringe la escritura a
   // Super Admin a nivel de base de datos — este check es solo para la UI.
-  const canWrite = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
   // Permisos por menú del Rol de Acceso (Configuración → Roles): cada acción
   // se muestra solo si el rol la permite Y el permiso del menú también.
   const permisos = usePermisos(`metodos-pago-${type ?? 'negocios'}`);
-  const puedeCrear = canWrite && permisos.crear;
-  const puedeEditar = canWrite && permisos.editar;
-  const puedeEliminar = canWrite && permisos.eliminar;
+  const puedeCrear = permisos.crear;
+  const puedeEditar = permisos.editar;
+  const puedeEliminar = permisos.eliminar;
+  const canWrite = puedeCrear || puedeEditar || puedeEliminar;
 
   const [data, setData] = useState<PaymentMethodRecord[]>([]);
   const [loading, setLoading] = useState(true);

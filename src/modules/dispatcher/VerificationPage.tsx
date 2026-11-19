@@ -25,7 +25,8 @@ import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
+import { usePermisos } from '../../lib/permisos';
 import { parseSheetDate, normalizeSheetDateStr } from '../../lib/sheetDateParser';
 import { loadActiveDispatcherRules, resolveExemptions, readRuleColumns, presentRuleColumns, ORDER_COLUMNS, RULE_COLUMN_KEYS, ACTIONS, describeCondition, type DispatcherRule } from '../../lib/dispatcherRules';
 // El dispatcher siempre registra los montos en CUP (confirmado por el
@@ -160,7 +161,11 @@ export function VerificationPage() {
   // política RLS "insert_dispatcher_rows"/"insert_availability_rows" de
   // supabase_schema.sql, que ya rechaza el insert a nivel de base de datos
   // para cualquier otro rol (RN-007: la validación real vive en el backend).
-  const canImport = ROLE_CAN_IMPORT(user?.role || 'visitante');
+  const permisos = usePermisos('dispatcher-verificacion');
+  const canImport = permisos.puede('importar');
+  const puedeVerificar = permisos.puede('verificar');
+  const puedeEnviarCorreo = permisos.puede('enviar_correo');
+  const puedeExportar = permisos.puede('exportar');
 
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -1533,8 +1538,8 @@ export function VerificationPage() {
               <Button 
                 variant="brand" 
                 className="w-full gap-1.5 font-bold h-10 shadow-sm uppercase tracking-wider text-xs" 
-                onClick={handleVerify} 
-                disabled={loading || !spreadsheetId.trim()}
+                onClick={handleVerify}
+                disabled={!puedeVerificar || loading || !spreadsheetId.trim()}
               >
                 {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
                 {loading ? 'Validando...' : 'Verificar Dispatcher'}
@@ -1604,20 +1609,20 @@ export function VerificationPage() {
                   <div className="pt-2 border-t border-[var(--color-border)]">
                     <div className="flex items-center gap-2 p-3 rounded-[var(--radius-sm)] bg-[var(--color-surface-2)] border border-[var(--color-border)] text-xs text-[var(--color-text-muted)]">
                       <Lock size={14} className="text-[var(--color-text-faint)] shrink-0" />
-                      Solo Super Admin o Supervisor pueden importar a la Base de Datos.
+                      Tu rol no tiene permiso para importar a la Base de Datos.
                     </div>
                   </div>
                 )}
 
                 <div className="grid grid-cols-2 gap-3 pt-1">
-                  <Button variant="outline" className="text-xs gap-2" onClick={exportToPDF}>
+                  <Button variant="outline" className="text-xs gap-2" onClick={exportToPDF} disabled={!puedeExportar}>
                     <Download size={14} /> Descargar PDF
                   </Button>
                   <Button 
                     variant="outline" 
                     className="text-xs gap-2" 
-                    onClick={sendEmailReport} 
-                    disabled={isSendingEmail}
+                    onClick={sendEmailReport}
+                    disabled={!puedeEnviarCorreo || isSendingEmail}
                   >
                     {isSendingEmail ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} />}
                     {isSendingEmail ? 'Enviando...' : 'Enviar Reporte'}

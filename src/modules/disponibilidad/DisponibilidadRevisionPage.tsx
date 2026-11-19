@@ -31,7 +31,8 @@ import {
 import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
 import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
+import { usePermisos } from '../../lib/permisos';
 import { parseSheetDate, normalizeSheetDateStr } from '../../lib/sheetDateParser';
 import { locateHeaderRow, DISPONIBILIDAD_HEADERS } from '../../lib/sheetHeaders';
 import { toLocalISODate } from '../../lib/formatters';
@@ -193,7 +194,10 @@ export function DisponibilidadRevisionPage() {
   // La edición/eliminación manual de disponibilidades solo la permiten
   // super_admin/supervisor — coincide con las políticas RLS de
   // UPDATE/DELETE de la tabla 'availabilities'.
-  const canWrite = ROLE_CAN_IMPORT(user?.role || 'visitante');
+  const permisos = usePermisos('disponibilidad-revision');
+  const canWrite = permisos.puede('editar');
+  const puedeEliminar = permisos.puede('eliminar');
+  const puedeDetectar = permisos.puede('detectar');
 
   const loadRecords = async () => {
     setLoading(true);
@@ -615,7 +619,7 @@ export function DisponibilidadRevisionPage() {
             variant="ghost"
             className="h-10 text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50"
             onClick={handleDetectChanges}
-            disabled={detecting || !selectedAreaId}
+            disabled={!puedeDetectar || detecting || !selectedAreaId}
           >
             {detecting ? (
               <>
@@ -741,7 +745,7 @@ export function DisponibilidadRevisionPage() {
       {/* Table & actions menu */}
       <div className="bg-[var(--color-surface)] rounded-[var(--radius-md)] border border-[var(--color-border)] shadow-sm overflow-hidden flex flex-col">
         {/* Bulk action toolbar */}
-        {Object.keys(selectedRows).filter(k => selectedRows[k]).length > 0 && (
+        {puedeEliminar && Object.keys(selectedRows).filter(k => selectedRows[k]).length > 0 && (
           <div className="bg-rose-50 border-b border-rose-100 p-4 flex items-center justify-between text-xs text-rose-900 font-bold transition-all">
             <span className="flex items-center gap-2">
               <AlertCircle size={14} className="text-rose-600 animate-pulse" />
@@ -868,22 +872,22 @@ export function DisponibilidadRevisionPage() {
                             >
                               {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                             </button>
-                            {hasWritePermission && (
+                            {(hasWritePermission || puedeEliminar) && (
                               <>
-                                <button 
+                                {hasWritePermission && <button
                                   onClick={() => handleOpenEdit(r)}
                                   className="p-1.5 text-slate-400 hover:text-teal-700 hover:bg-teal-50 rounded"
                                   title="Editar registro"
                                 >
                                   <Edit2 size={13} />
-                                </button>
-                                <button 
+                                </button>}
+                                {puedeEliminar && <button
                                   onClick={() => handleConfirmDelete(r)}
                                   className="p-1.5 text-slate-400 hover:text-red-700 hover:bg-red-50 rounded"
                                   title="Eliminar registro"
                                 >
                                   <Trash2 size={13} />
-                                </button>
+                                </button>}
                               </>
                             )}
                           </div>

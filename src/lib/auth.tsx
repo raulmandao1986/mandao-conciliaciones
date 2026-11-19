@@ -21,7 +21,8 @@ export interface User {
   // AppShell.tsx hasPermission(). null = sin asignar, se usa el comportamiento
   // histórico basado en `role`.
   accessModules: string[] | null;
-  // Permisos de interfaz por menú (access_roles.permisos). null = sin Rol de
+  // Permisos por menú y acción (access_roles.permisos, 2026-11-19c; la BD los
+  // aplica con public.tiene_permiso). null = sin Rol de
   // Acceso o columna aún no migrada. Usar siempre vía usePermisos() de
   // src/lib/permisos.ts, no directamente.
   permisos: PermisosPorModulo | null;
@@ -38,6 +39,9 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Desde 2026-11-19c lo que cada rol puede ejecutar se configura por menú y
+// acción (usePermisos en src/lib/permisos.ts). Solo ROLE_CAN_MANAGE_CATALOGS
+// sigue en uso (Usuarios y Roles = Super Admin). Texto original:
 // Los 4 roles fijos y lo que cada uno puede hacer están implementados
 // como políticas RLS en Supabase (ver supabase_schema.sql) y como checks
 // de UI usando este mapa — no como permisos configurables en base de

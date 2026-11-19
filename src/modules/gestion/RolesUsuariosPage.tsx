@@ -11,7 +11,8 @@ import { SlideOver } from '../../design-system/primitives/SlideOver';
 import { cn } from '../../lib/utils';
 import { formatDate } from '../../lib/formatters';
 import { notificar } from '../../lib/notificaciones';
-import { normalizarPermisos, PERMISOS_TODOS, type PermisosModulo, type PermisosPorModulo } from '../../lib/permisos';
+import { normalizarPermisos, FORMATO_PERMISOS, type PermisosPorModulo } from '../../lib/permisos';
+import { accionesDe, plantillaPermisos } from '../../lib/permisosCatalogo';
 import { diffCambios, datosLegibles } from '../../lib/auditDiff';
 
 interface UserRecord {
@@ -35,14 +36,6 @@ interface AccessRoleRecord {
   permisos: PermisosPorModulo;
 }
 
-type Accion = keyof PermisosModulo;
-const ACCIONES: { key: Accion; label: string }[] = [
-  { key: 'ver', label: 'Ver' },
-  { key: 'crear', label: 'Crear' },
-  { key: 'editar', label: 'Editar' },
-  { key: 'eliminar', label: 'Eliminar' },
-];
-
 // La columna access_roles.permisos llega con la migración
 // 2026-11-19_permisos_roles.sql; si aún no existe se trabaja solo con module_keys.
 const esErrorColumnaPermisos = (err: { message?: string } | null | undefined) =>
@@ -58,8 +51,21 @@ const ETIQUETAS_LOG_ROL: Record<string, string> = {
   permisos: 'Permisos',
 };
 
-const accionesLegibles = (p: PermisosModulo) =>
-  ACCIONES.filter(a => p[a.key]).map(a => a.label).join(', ') || 'Ninguno';
+// Acciones de un menú con su valor efectivo: lo marcado en el rol o, si no
+// está marcado, la plantilla de su nivel de seguridad (misma regla que
+// public.tiene_permiso en la base de datos).
+function accionesEfectivas(baseRole: UserRole, permisos: PermisosPorModulo, menu: string): Record<string, boolean> {
+  const plantilla = plantillaPermisos(baseRole, [menu])[menu];
+  const out: Record<string, boolean> = {};
+  accionesDe(menu).forEach(a => {
+    const v = permisos[menu]?.[a.id];
+    out[a.id] = baseRole === 'super_admin' || a.id === 'ver' ? true : (typeof v === 'boolean' ? v : plantilla[a.id]);
+  });
+  return out;
+}
+
+const accionesLegibles = (menu: string, valores: Record<string, boolean>) =>
+  accionesDe(menu).filter(a => valores[a.id]).map(a => a.label).join(', ') || 'Ninguna';
 
 // Versión legible de un rol para el Log de Auditoría (antes/después).
 function rolParaLog(r: { nombre: string; descripcion: string; baseRole: UserRole; moduleKeys: string[]; permisos: PermisosPorModulo }) {
@@ -70,7 +76,7 @@ function rolParaLog(r: { nombre: string; descripcion: string; baseRole: UserRole
     nivelSeguridad: ROLE_LABELS[r.baseRole],
     menus: r.moduleKeys.map(k => MODULE_LABEL[k] || k).sort().join(', '),
     permisos: Object.fromEntries(
-      r.moduleKeys.map(k => [MODULE_LABEL[k] || k, esSuper ? 'Todos (Super Admin)' : accionesLegibles({ ...(r.permisos[k] ?? PERMISOS_TODOS), ver: true })])
+      r.moduleKeys.map(k => [MODULE_LABEL[k] || k, esSuper ? 'Todas (Super Admin)' : accionesLegibles(k, accionesEfectivas(r.baseRole, r.permisos, k))])
     ),
   };
 }
@@ -689,52 +695,51 @@ function RolesTab({
 
   const handleEdit = (r: AccessRoleRecord) => {
     setSelectedRole(r);
-    // Menús visibles sin entrada en permisos = todas las acciones (comportamiento previo).
+    // Se materializa cada menú visible con su valor efectivo (lo guardado o,
+    // si falta, la plantilla de su nivel de seguridad).
     const permisos: PermisosPorModulo = {};
-    r.moduleKeys.forEach(k => { permisos[k] = { ...(r.permisos[k] ?? PERMISOS_TODOS), ver: true }; });
+    r.moduleKeys.forEach(k => { permisos[k] = accionesEfectivas(r.baseRole, r.permisos, k); });
     setFormData({ nombre: r.nombre, descripcion: r.descripcion, baseRole: r.baseRole, moduleKeys: [...r.moduleKeys], permisos });
     setIsFormOpen(true);
   };
 
-  // Super Admin siempre tiene todas las acciones: en su matriz solo se edita "Ver" (menú visible).
+  // Super Admin siempre tiene todas las acciones: en su matriz solo se elige qué menús ve.
   const esSuperAdmin = formData.baseRole === 'super_admin';
 
-  const valorCelda = (id: string, accion: Accion): boolean => {
+  const valorCelda = (id: string, accion: string): boolean => {
     if (!formData.moduleKeys.includes(id)) return false;
     if (accion === 'ver' || esSuperAdmin) return true;
-    return (formData.permisos[id] ?? PERMISOS_TODOS)[accion];
+    return accionesEfectivas(formData.baseRole, formData.permisos, id)[accion];
   };
 
-  // Marca/desmarca una acción en varios menús a la vez. "Ver" = el menú entra
-  // o sale de module_keys; las demás solo aplican a menús visibles.
-  const setCeldas = (ids: string[], accion: Accion, valor: boolean) => {
+  // "Ver" = el menú entra o sale de module_keys (al entrar arranca con la
+  // plantilla de su nivel de seguridad); las demás acciones solo aplican a
+  // menús visibles.
+  const setCelda = (id: string, accion: string, valor: boolean) => {
     setFormData(p => {
       let moduleKeys = [...p.moduleKeys];
       const permisos: PermisosPorModulo = { ...p.permisos };
       if (accion === 'ver') {
-        if (valor) {
-          ids.forEach(id => {
-            if (!moduleKeys.includes(id)) {
-              moduleKeys.push(id);
-              permisos[id] = { ...PERMISOS_TODOS };
-            }
-          });
-        } else {
-          moduleKeys = moduleKeys.filter(k => !ids.includes(k));
-          ids.forEach(id => { delete permisos[id]; });
+        if (valor && !moduleKeys.includes(id)) {
+          moduleKeys.push(id);
+          permisos[id] = accionesEfectivas(p.baseRole, {}, id);
+        } else if (!valor) {
+          moduleKeys = moduleKeys.filter(k => k !== id);
+          delete permisos[id];
         }
-      } else {
-        ids.filter(id => moduleKeys.includes(id)).forEach(id => {
-          permisos[id] = { ...(permisos[id] ?? PERMISOS_TODOS), ver: true, [accion]: valor };
-        });
+      } else if (moduleKeys.includes(id)) {
+        permisos[id] = { ...accionesEfectivas(p.baseRole, p.permisos, id), [accion]: valor };
       }
       return { ...p, moduleKeys, permisos };
     });
   };
 
-  // Atajo por sección: si todo está marcado lo desmarca; si no, marca todo.
-  const toggleSeccion = (ids: string[]) => {
-    const todoMarcado = ids.every(id => ACCIONES.every(a => valorCelda(id, a.key)));
+  const menuCompleto = (id: string) => accionesDe(id).every(a => valorCelda(id, a.id));
+
+  // Atajo por menú o por sección: si todo está marcado lo quita (menú oculto);
+  // si no, marca el menú y todas sus acciones.
+  const toggleMenus = (ids: string[]) => {
+    const todoMarcado = ids.every(menuCompleto);
     setFormData(p => {
       let moduleKeys = [...p.moduleKeys];
       const permisos: PermisosPorModulo = { ...p.permisos };
@@ -744,20 +749,28 @@ function RolesTab({
       } else {
         ids.forEach(id => {
           if (!moduleKeys.includes(id)) moduleKeys.push(id);
-          permisos[id] = { ...PERMISOS_TODOS };
+          permisos[id] = Object.fromEntries(accionesDe(id).map(a => [a.id, true]));
         });
       }
       return { ...p, moduleKeys, permisos };
     });
   };
 
+  // Restablece las acciones de los menús visibles a la plantilla del nivel de seguridad.
+  const aplicarPlantilla = () => {
+    setFormData(p => ({ ...p, permisos: plantillaPermisos(p.baseRole, p.moduleKeys) }));
+  };
+
   const handleSave = async () => {
     if (!formData.nombre.trim()) return;
     setSaving(true);
     try {
-      const permisosPayload: PermisosPorModulo = esSuperAdmin
+      const permisosPayload: Record<string, unknown> = esSuperAdmin
         ? {}
-        : Object.fromEntries(formData.moduleKeys.map(k => [k, { ...(formData.permisos[k] ?? PERMISOS_TODOS), ver: true }]));
+        : {
+            _formato: FORMATO_PERMISOS,
+            ...Object.fromEntries(formData.moduleKeys.map(k => [k, accionesEfectivas(formData.baseRole, formData.permisos, k)])),
+          };
       const base = {
         name: formData.nombre.trim(),
         description: formData.descripcion.trim() || null,
@@ -777,11 +790,11 @@ function RolesTab({
       if (error) throw error;
       if (!permisosGuardados) {
         notificar.advertencia(
-          'Se guardaron los menús visibles, pero no los permisos Crear/Editar/Eliminar: falta aplicar la migración 2026-11-19_permisos_roles.sql en Supabase.'
+          'Se guardaron los menús visibles, pero no los permisos por acción: falta aplicar la migración 2026-11-19_permisos_roles.sql en Supabase.'
         );
       }
 
-      const despues = rolParaLog({ ...formData, nombre: base.name, permisos: permisosGuardados ? permisosPayload : {} });
+      const despues = rolParaLog({ ...formData, nombre: base.name, permisos: permisosGuardados ? normalizarPermisos(permisosPayload) : {} });
       if (selectedRole) {
         logAuditEvent('Configuraciones', 'Rol de Acceso Actualizado', {
           rolId: selectedRole.id,
@@ -1016,25 +1029,39 @@ function RolesTab({
           </div>
 
           <div className="space-y-3">
-            <div>
-              <span className="text-xs font-bold text-[var(--color-text)] block">Permisos por menú</span>
-              <p className="text-[10px] text-[var(--color-text-faint)] mt-0.5">
-                "Ver" muestra el menú; Crear, Editar y Eliminar controlan qué acciones aparecen en él. Desmarcar "Ver"
-                quita el resto de esa fila. Usa la casilla de cada columna o sección para marcar/desmarcar en bloque.
-                ({formData.moduleKeys.length} de {MODULE_CATALOG.length} menús visibles)
-              </p>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <span className="text-xs font-bold text-[var(--color-text)] block">Permisos por menú</span>
+                <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5">
+                  Marca el menú para que el rol lo vea y luego las acciones que puede ejecutar en él. Lo que no se marque
+                  queda bloqueado también en la base de datos. La casilla de la sección marca o quita todo de una vez.
+                  ({formData.moduleKeys.length} de {MODULE_CATALOG.length} menús visibles)
+                </p>
+              </div>
+              {!esSuperAdmin && permisosDisponibles && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={aplicarPlantilla}
+                  disabled={formData.moduleKeys.length === 0}
+                  title={`Pone en los menús marcados las acciones que ${ROLE_LABELS[formData.baseRole]} tenía por defecto`}
+                >
+                  Usar plantilla de {ROLE_LABELS[formData.baseRole]}
+                </Button>
+              )}
             </div>
 
             {esSuperAdmin && (
               <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)] bg-[var(--color-surface-2)] p-3 rounded-[var(--radius-sm)] border border-[var(--color-border)]">
                 <Lock size={14} className="shrink-0" />
-                Super Admin siempre puede crear, editar y eliminar: aquí solo se eligen los menús que ve.
+                Super Admin siempre puede ejecutar todas las acciones: aquí solo se eligen los menús que ve.
               </div>
             )}
             {!permisosDisponibles && !esSuperAdmin && (
               <div className="flex items-center gap-2 text-xs text-[var(--color-warning)] bg-[var(--color-warning-bg)] p-3 rounded-[var(--radius-sm)]">
                 <ShieldCheck size={14} className="shrink-0" />
-                Falta aplicar la migración de permisos en Supabase: por ahora solo se guarda la columna "Ver".
+                Falta aplicar la migración de permisos en Supabase: por ahora solo se guardan los menús visibles.
               </div>
             )}
 
@@ -1042,45 +1069,25 @@ function RolesTab({
               <table className="w-full text-sm">
                 <thead className="bg-[var(--color-surface-2)]">
                   <tr className="border-b border-[var(--color-border)]">
-                    <th className="text-left text-xs font-bold text-[var(--color-text-muted)] px-3 h-10">Menú</th>
-                    {ACCIONES.map(a => {
-                      const filas = a.key === 'ver' ? MODULE_CATALOG.map(m => m.id) : formData.moduleKeys;
-                      const deshabilitada = a.key !== 'ver' && (esSuperAdmin || !permisosDisponibles || filas.length === 0);
-                      const todas = filas.length > 0 && filas.every(id => valorCelda(id, a.key));
-                      return (
-                        <th key={a.key} className="w-20 px-2 h-10 text-center">
-                          <label className="inline-flex flex-col items-center gap-1 text-xs font-bold text-[var(--color-text-muted)]">
-                            {a.label}
-                            <input
-                              type="checkbox"
-                              checked={todas}
-                              disabled={deshabilitada}
-                              onChange={() => setCeldas(filas, a.key, !todas)}
-                              aria-label={`Marcar o desmarcar "${a.label}" en todos los menús`}
-                              title={`Marcar o desmarcar "${a.label}" en todos los menús`}
-                              className="h-4 w-4 accent-[var(--color-primary)] disabled:opacity-40"
-                            />
-                          </label>
-                        </th>
-                      );
-                    })}
+                    <th className="text-left text-xs font-bold text-[var(--color-text-muted)] px-3 h-10 w-56">Menú</th>
+                    <th className="text-left text-xs font-bold text-[var(--color-text-muted)] px-3 h-10">Acciones permitidas</th>
                   </tr>
                 </thead>
                 <tbody>
                   {MODULE_SECTIONS.map(([section, items]) => {
                     const ids = items.map(m => m.id);
-                    const seccionCompleta = ids.every(id => ACCIONES.every(a => valorCelda(id, a.key)));
+                    const seccionCompleta = ids.every(menuCompleto);
                     return (
                       <React.Fragment key={section}>
                         <tr className="bg-[var(--color-surface-3)] border-b border-[var(--color-border)]">
-                          <td colSpan={ACCIONES.length + 1} className="px-3 h-9">
+                          <td colSpan={2} className="px-3 h-9">
                             <label className="inline-flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-muted)] cursor-pointer">
                               <input
                                 type="checkbox"
                                 checked={seccionCompleta}
-                                onChange={() => toggleSeccion(ids)}
-                                aria-label={`Marcar o desmarcar todos los permisos de ${section}`}
-                                title={`Marcar o desmarcar todos los permisos de ${section}`}
+                                onChange={() => toggleMenus(ids)}
+                                aria-label={`Marcar o quitar todos los permisos de ${section}`}
+                                title={`Marcar o quitar todos los permisos de ${section}`}
                                 className="h-4 w-4 accent-[var(--color-primary)]"
                               />
                               {section}
@@ -1089,27 +1096,49 @@ function RolesTab({
                         </tr>
                         {items.map(m => {
                           const visible = formData.moduleKeys.includes(m.id);
+                          const acciones = accionesDe(m.id).filter(a => a.id !== 'ver');
                           return (
-                            <tr key={m.id} className="border-b border-[var(--color-border)] last:border-b-0 hover:bg-[var(--color-surface-2)] transition-colors h-10">
-                              <td className={cn('px-3 text-sm', visible ? 'text-[var(--color-text)] font-medium' : 'text-[var(--color-text-faint)]')}>
-                                {m.label}
+                            <tr key={m.id} className="border-b border-[var(--color-border)] last:border-b-0 hover:bg-[var(--color-surface-2)] transition-colors align-top">
+                              <td className="px-3 py-2.5">
+                                <label className={cn('inline-flex items-center gap-2 text-sm cursor-pointer', visible ? 'text-[var(--color-text)] font-medium' : 'text-[var(--color-text-faint)]')}>
+                                  <input
+                                    type="checkbox"
+                                    checked={visible}
+                                    onChange={(e) => setCelda(m.id, 'ver', e.target.checked)}
+                                    aria-label={`Ver · ${m.label} (${section})`}
+                                    title="Ver el menú"
+                                    className="h-4 w-4 accent-[var(--color-primary)]"
+                                  />
+                                  {m.label}
+                                </label>
                               </td>
-                              {ACCIONES.map(a => {
-                                const deshabilitada = a.key !== 'ver' && (!visible || esSuperAdmin || !permisosDisponibles);
-                                return (
-                                  <td key={a.key} className="px-2 text-center">
-                                    <input
-                                      type="checkbox"
-                                      checked={valorCelda(m.id, a.key)}
-                                      disabled={deshabilitada}
-                                      onChange={(e) => setCeldas([m.id], a.key, e.target.checked)}
-                                      aria-label={`${a.label} · ${m.label} (${section})`}
-                                      title={`${a.label} · ${m.label}`}
-                                      className="h-4 w-4 accent-[var(--color-primary)] disabled:opacity-40"
-                                    />
-                                  </td>
-                                );
-                              })}
+                              <td className="px-3 py-2.5">
+                                {acciones.length === 0 ? (
+                                  <span className="text-xs text-[var(--color-text-faint)]">Solo consulta</span>
+                                ) : (
+                                  <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                                    {acciones.map(a => {
+                                      const deshabilitada = !visible || esSuperAdmin || !permisosDisponibles;
+                                      return (
+                                        <label
+                                          key={a.id}
+                                          className={cn('inline-flex items-center gap-1.5 text-xs', deshabilitada ? 'text-[var(--color-text-faint)]' : 'text-[var(--color-text)] cursor-pointer')}
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={valorCelda(m.id, a.id)}
+                                            disabled={deshabilitada}
+                                            onChange={(e) => setCelda(m.id, a.id, e.target.checked)}
+                                            aria-label={`${a.label} · ${m.label} (${section})`}
+                                            className="h-4 w-4 accent-[var(--color-primary)] disabled:opacity-40"
+                                          />
+                                          {a.label}
+                                        </label>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </td>
                             </tr>
                           );
                         })}
@@ -1119,6 +1148,9 @@ function RolesTab({
                 </tbody>
               </table>
             </div>
+            <p className="text-[10px] text-[var(--color-text-faint)]">
+              Usuarios y Roles solo los modifica Super Admin (si otro rol pudiera, podría darse a sí mismo cualquier permiso).
+            </p>
           </div>
         </div>
       </SlideOver>

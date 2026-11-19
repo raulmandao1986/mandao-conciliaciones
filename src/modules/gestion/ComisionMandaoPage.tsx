@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
+import { usePermisos } from '../../lib/permisos';
 import { Percent, Loader2, Save, Building2, Users, Package, CalendarClock, Plus, Trash2 } from 'lucide-react';
 import { Button } from '../../design-system/primitives/Button';
 import { formatCurrency } from '../../lib/formatters';
@@ -41,7 +42,10 @@ interface BackpackRateRecord {
 // `conciliaciones_messengers.alquiler_mochila`.
 export function ComisionMandaoPage() {
   const { user } = useAuth();
-  const canWrite = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
+  const permisos = usePermisos('comision-mandao');
+  const canWrite = permisos.editar;
+  const puedeCrear = permisos.crear;
+  const puedeEliminar = permisos.eliminar;
 
   const [records, setRecords] = useState<CommissionRecord[]>([]);
   // false = falta la migración 2026-11-16 (sin columna currency): solo CUP.
@@ -134,7 +138,7 @@ export function ComisionMandaoPage() {
             <Percent size={16} className="text-[var(--color-primary)]" />
             Comisiones
           </h2>
-          {canWrite && (
+          {puedeCrear && (
             <Button
               variant="outline"
               size="sm"
@@ -161,6 +165,7 @@ export function ComisionMandaoPage() {
                 record={r}
                 conMoneda={conMoneda}
                 canWrite={canWrite}
+                puedeEliminar={puedeEliminar}
                 onSaved={load}
               />
             </React.Fragment>
@@ -212,8 +217,9 @@ export function ComisionMandaoPage() {
 }
 
 function CommissionCard({
-  icon: Icon, label, record, conMoneda, canWrite, onSaved, note
+  icon: Icon, label, record, conMoneda, canWrite, puedeEliminar = false, onSaved, note
 }: {
+  puedeEliminar?: boolean;
   icon: React.ElementType;
   label: string;
   record: CommissionRecord | null;
@@ -281,7 +287,7 @@ function CommissionCard({
       <div className="flex items-center gap-2 text-sm font-bold text-[var(--color-text)]">
         <Icon size={16} className="text-[var(--color-primary)]" />
         {label}
-        {canWrite && record?.currency === 'USD' && !editing && (
+        {puedeEliminar && record?.currency === 'USD' && !editing && (
           <button
             type="button"
             onClick={() => { void handleEliminar(); }}
