@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Hash, Loader2, Save, AlertTriangle, RefreshCw, Info, Plus, Trash2 } from 'lucide-react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
+import { usePermisos } from '../../lib/permisos';
 import { Button } from '../../design-system/primitives/Button';
 import { SlideOver } from '../../design-system/primitives/SlideOver';
 import { cn } from '../../lib/utils';
@@ -84,7 +85,10 @@ function validar(d: Draft, otros: Serie[]): string | null {
 
 export function FormatoConsecutivoPage() {
   const { user } = useAuth();
-  const canWrite = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
+  const permisos = usePermisos('formato-consecutivo');
+  const canWrite = permisos.editar || permisos.eliminar;
+  const puedeCrear = permisos.crear;
+  const puedeEliminar = permisos.eliminar;
   const [series, setSeries] = useState<Serie[]>([]);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [loading, setLoading] = useState(true);
@@ -269,7 +273,7 @@ export function FormatoConsecutivoPage() {
             Se usa para hacer el match contra caja y en el nombre del PDF.
           </p>
         </div>
-        {canWrite && (
+        {puedeCrear && (
           <Button variant="brand" className="gap-2 shrink-0 self-start" onClick={abrirNueva}>
             <Plus size={16} /> Agregar serie
           </Button>
@@ -365,7 +369,7 @@ export function FormatoConsecutivoPage() {
                             type="button"
                             aria-label={`Eliminar serie ${s.serie}`}
                             title={`Eliminar serie ${s.serie}`}
-                            disabled={eliminando === s.serie}
+                            disabled={!puedeEliminar || eliminando === s.serie}
                             onClick={() => eliminar(s)}
                             className="h-8 w-8 inline-flex items-center justify-center rounded-[var(--radius-sm)] text-[var(--color-text-faint)] hover:text-[var(--color-danger)] hover:bg-[var(--color-danger-bg)] transition-colors disabled:opacity-50"
                           >

@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Mail, Loader2, Save, AlertTriangle, RefreshCw, RotateCcw } from 'lucide-react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
+import { usePermisos } from '../../lib/permisos';
 import { formatDate, toLocalISODate } from '../../lib/formatters';
 import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
@@ -27,7 +28,10 @@ const EJEMPLO = {
 
 export function CorreoConciliacionPage() {
   const { user } = useAuth();
-  const canWrite = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
+  const permisos = usePermisos('correo-conciliacion');
+  const canWrite = permisos.editar;
+  const puedeCrear = permisos.crear;
+  const puedeEliminar = permisos.eliminar;
   const [guardada, setGuardada] = useState<PlantillaCorreo | null>(null);
   const [form, setForm] = useState<PlantillaCorreo>(PLANTILLA_DEFECTO);
   const [loading, setLoading] = useState(true);

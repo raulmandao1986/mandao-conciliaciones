@@ -28,7 +28,8 @@ import {
 import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
 import { supabase, logAuditEvent, reconnectGoogle } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
+import { usePermisos } from '../../lib/permisos';
 import { motion, AnimatePresence } from 'motion/react';
 import { normalizeSheetDateStr } from '../../lib/sheetDateParser';
 // Misma lectura de "Orders" y mismo armado de fila de BD que la Verificación
@@ -342,7 +343,11 @@ export function RevisionPage() {
   // La edición/eliminación manual de registros ya importados solo la
   // permiten super_admin/supervisor — coincide con las políticas RLS de
   // UPDATE/DELETE de la tabla 'dispatcher' (ver supabase_schema.sql).
-  const canWrite = ROLE_CAN_IMPORT(user?.role || 'visitante');
+  const permisos = usePermisos('dispatcher-revision');
+  const canWrite = permisos.puede('sincronizar');
+  const puedeEliminar = permisos.puede('eliminar');
+  const puedeDetectar = permisos.puede('detectar');
+  const puedeExportar = permisos.puede('exportar');
 
   const loadOrders = async () => {
     setLoading(true);
@@ -1201,6 +1206,7 @@ export function RevisionPage() {
             variant="outline"
             className="gap-2 text-xs font-bold uppercase tracking-wider h-10 border-slate-200"
             onClick={handleExportPDF}
+            disabled={!puedeExportar}
           >
             <Download size={15} />
             Exportar PDF
@@ -1242,7 +1248,7 @@ export function RevisionPage() {
                   <li>La tabla despliega solo los campos principales inicialmente para optimizar espacio.</li>
                   <li>Haz clic en cualquier fila para desplegar el panel completo, donde se muestra el resto de la información correspondiente de forma detallada.</li>
                   <li><strong>Detectar Cambios:</strong> compara la BD contra el documento Google Sheets del área seleccionada y lista discrepancias, registros eliminados y registros nuevos sin importar.</li>
-                  <li><strong>Forzar Sincronización:</strong> solo disponible para Super Admin/Supervisor — edita, crea o elimina en BD para igualar el documento Dispatcher.</li>
+                  <li><strong>Forzar Sincronización:</strong> solo para roles con el permiso "Sincronizar diferencias" — edita, crea o elimina en BD para igualar el documento Dispatcher.</li>
                 </ul>
               </div>
             </div>
@@ -1315,7 +1321,7 @@ export function RevisionPage() {
               variant="brand" 
               className="flex-1 gap-1.5 font-bold h-10 text-xs shadow-sm uppercase tracking-widest text-[9px]" 
               onClick={handleDetectExternalChanges}
-              disabled={comparing || !spreadsheetId}
+              disabled={!puedeDetectar || comparing || !spreadsheetId}
             >
               {comparing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
               Detectar Cambios
@@ -1818,7 +1824,7 @@ export function RevisionPage() {
                           <span className="text-[10px] font-bold uppercase text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">{item.area || 'N/A'}</span>
                         </td>
                         <td className="px-6 py-4 text-right" onClick={(e) => e.stopPropagation()}>
-                          {canWrite && (
+                          {puedeEliminar && (
                             <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                               <button
                                 onClick={() => handleDelete(item.id)}

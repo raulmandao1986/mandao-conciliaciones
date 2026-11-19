@@ -718,7 +718,7 @@ Menú Configuración:
 
 | Ítem | Qué gestiona |
 |---|---|
-| Roles y Usuarios | Usuarios, rol de seguridad (`profiles.role`) y Rol de Acceso: por cada menú, permisos **Ver / Crear / Editar / Eliminar** (`access_roles.module_keys` + `access_roles.permisos`, 2026-11-19). Son permisos de interfaz (ocultan acciones); la seguridad real sigue siendo `profiles.role` + RLS — ver sección 19.3 |
+| Roles y Usuarios | Usuarios y Roles de Acceso. Por cada menú, el rol marca si lo **ve** y **qué acciones puede ejecutar** en él (catálogo propio por menú; `access_roles.module_keys` + `access_roles.permisos`). Desde 2026-11-19c la base de datos los aplica de verdad con `tiene_permiso(menú, acción)` — ver sección 19.3.3 |
 | Áreas | Catálogo `areas` |
 | Métodos de Pago → Negocios / Mensajeros / Órdenes / **Grupos de Pago** | Ver 8.1–8.3 |
 | Razón de Cambio | Tasa de cambio activa, USD por 1 CUP (`exchange_rates`, RN-010, sincronizable con El Toque — sección 22) |
@@ -1970,6 +1970,33 @@ Pertenecer al dominio `@mandao.app` (Google Workspace) permite **autenticarse**,
 - Si un usuario **no** tiene Rol de Acceso asignado (`access_role_id = NULL`, el caso de todo usuario creado antes de este cambio), el menú se sigue filtrando exactamente como antes, según su rol fijo (`hasPermission()` en `AppShell.tsx`).
 - Si **sí** tiene uno asignado, el menú lateral muestra únicamente los módulos de `access_roles.module_keys` — sin importar el rol fijo.
 - **Esto no cambia la seguridad real del sistema**: lo que un usuario puede leer/escribir en Supabase lo siguen decidiendo exclusivamente `profiles.role` y las políticas RLS (sección 12), que no fueron tocadas. Un Rol de Acceso solo decide qué ítems de menú se muestran; si un usuario llegara a ver un módulo para el que su rol fijo no tiene permiso de escritura, Supabase seguiría rechazando esa escritura vía RLS.
+
+### 19.3.3 Permisos por acción y por rol (2026-11-19c)
+
+Reemplaza a la regla "lo que puede ejecutar un usuario lo decide solo `profiles.role`" de la sección 19.3.2 para todo lo que no sea Usuarios y Roles.
+
+- **Dónde se configura**: Configuración → Roles y Usuarios → Roles → editar un rol. Cada menú tiene su casilla (ver el menú) y sus propias acciones. Atajos: casilla por sección (marca o quita todo) y botón **"Usar plantilla de <nivel>"** (vuelve a lo que ese nivel de seguridad podía hacer antes del cambio).
+- **Catálogo de acciones** (`src/lib/permisosCatalogo.ts`):
+
+  | Menú | Acciones |
+  |---|---|
+  | Dispatcher / Disponibilidad · Verificación | Ver, Verificar, Importar a la BD, Enviar correo, Exportar |
+  | Dispatcher · Revisión | Ver, Detectar cambios, Sincronizar diferencias, Editar, Eliminar, Exportar |
+  | Disponibilidad · Revisión | Ver, Detectar cambios, Editar, Eliminar, Exportar |
+  | Conciliación (Negocios / Mensajeros) | Ver, Conciliar, Reconciliar, Cambiar estado, Enviar correo (incluye subir el PDF a Drive), Registrar / activar negocio o mensajero |
+  | Cobros y Pagos | Ver, Generar Planificación, Exportar |
+  | Planificación de Pagos | Ver, Editar, Eliminar, Exportar |
+  | Gestión de Negocios / Mensajeros | Ver, Crear, Editar, Eliminar, Importación masiva, Exportar |
+  | Catálogos de Configuración (Áreas, Métodos de Pago, Grupos, Formato de Consecutivo, Comisión, Reglas, Data) | Ver, Crear, Editar, Eliminar |
+  | Razón de Cambio | Ver, Crear, Editar, Eliminar, Sincronizar con El Toque |
+  | Correo de Conciliación | Ver, Editar |
+  | Dashboards, Facturación, Log, Roles y Usuarios | Ver |
+
+- **Regla** (igual en la app, `usePermisos(menú).puede(acción)`, y en la BD, `public.tiene_permiso(menú, acción)`): Super Admin siempre puede todo; usuario inactivo o menú no visible → no; "Ver" = tener el menú; acción marcada en el rol → su valor; acción sin marcar → plantilla del nivel de seguridad (`public.plantilla_permiso`).
+- **Plantillas** (= comportamiento anterior): Supervisor importa, sincroniza/edita/elimina en Revisión, concilia, reconcilia, cambia estado, envía, genera y gestiona planificaciones y sincroniza la tasa de El Toque; Operador verifica, detecta cambios y envía el reporte de Dispatcher/Disponibilidad; Visitante solo ve y exporta. Los catálogos y la Gestión de Negocios/Mensajeros quedan solo para Super Admin hasta que se marquen en un rol.
+- **Seguridad real**: la migración `2026-11-19c_permisos_por_accion.sql` reescribe las políticas RLS de escritura (dispatcher*, availability*, businesses, messengers, catálogos, conciliaciones_*, planificaciones_pago, planificacion_items, consecutivo_series, app_settings…) para que usen `tiene_permiso`. La función `sync-exchange-rate` también lo consulta (requiere volver a desplegarla; mientras tanto mantiene Super Admin / Supervisor).
+- **Formato guardado**: `access_roles.permisos = { "_formato": 2, "<menú>": { "<acción>": true|false } }`. La migración descarta los permisos Ver/Crear/Editar/Eliminar guardados antes (sin la marca `_formato`), que no tenían efecto real.
+- **Usuarios y Roles** siguen siendo solo de Super Admin: si otro rol pudiera modificarlos, podría darse a sí mismo cualquier permiso.
 
 ### 19.4 Actores del sistema (actualización de la sección 4)
 

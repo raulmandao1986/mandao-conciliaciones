@@ -3,7 +3,7 @@ import {
   CalendarClock, Search, Loader2, AlertTriangle, RefreshCw, Eye, Pencil, Trash2, FileSpreadsheet, FileText, X,
   Clock, CircleDashed, BadgeCheck, Save,
 } from 'lucide-react';
-import { useAuth, ROLE_CAN_IMPORT } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
 import { usePermisos } from '../../lib/permisos';
 import { cn } from '../../lib/utils';
 import { formatDate } from '../../lib/formatters';
@@ -46,9 +46,9 @@ const actorLabel = (e: string) => (e === 'negocios' ? 'Negocios' : 'Mensajeros')
 export function PlanificacionesPage() {
   const { user } = useAuth();
   const permisos = usePermisos('planificacion-pagos');
-  const puedeEscribir = ROLE_CAN_IMPORT(user?.role || 'visitante');
-  const puedeEditar = puedeEscribir && permisos.editar;
-  const puedeEliminar = puedeEscribir && permisos.eliminar;
+  const puedeEditar = permisos.puede('editar');
+  const puedeEliminar = permisos.puede('eliminar');
+  const puedeExportar = permisos.puede('exportar');
 
   const [lista, setLista] = useState<Planificacion[]>([]);
   const [loading, setLoading] = useState(true);
@@ -214,10 +214,10 @@ export function PlanificacionesPage() {
         <div className="px-4 py-3 border-b border-[var(--color-border)] flex flex-wrap items-center justify-between gap-3">
           <span className="text-sm text-[var(--color-text-muted)]">{filtrada.length} planificación(es)</span>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" className="gap-1.5" disabled={filtrada.length === 0 || !!exportando} onClick={() => exportar('excel')}>
+            <Button variant="outline" size="sm" className="gap-1.5" disabled={!puedeExportar || filtrada.length === 0 || !!exportando} onClick={() => exportar('excel')}>
               {exportando === 'excel' ? <Loader2 size={14} className="animate-spin" /> : <FileSpreadsheet size={14} />} Exportar Excel
             </Button>
-            <Button variant="outline" size="sm" className="gap-1.5" disabled={filtrada.length === 0 || !!exportando} onClick={() => exportar('pdf')}>
+            <Button variant="outline" size="sm" className="gap-1.5" disabled={!puedeExportar || filtrada.length === 0 || !!exportando} onClick={() => exportar('pdf')}>
               {exportando === 'pdf' ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />} Exportar PDF
             </Button>
           </div>
@@ -297,10 +297,10 @@ export function PlanificacionesPage() {
         width="max-w-3xl"
         footer={viendo && (
           <div className="flex flex-wrap justify-end gap-2">
-            <Button variant="outline" className="gap-1.5" disabled={!!exportando} onClick={() => descargar(viendo, 'excel')}>
+            <Button variant="outline" className="gap-1.5" disabled={!puedeExportar || !!exportando} onClick={() => descargar(viendo, 'excel')}>
               {exportando === viendo.id + 'excel' ? <Loader2 size={14} className="animate-spin" /> : <FileSpreadsheet size={14} />} Excel
             </Button>
-            <Button variant="brand" className="gap-1.5" disabled={!!exportando} onClick={() => descargar(viendo, 'pdf')}>
+            <Button variant="brand" className="gap-1.5" disabled={!puedeExportar || !!exportando} onClick={() => descargar(viendo, 'pdf')}>
               {exportando === viendo.id + 'pdf' ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />} Planificación PDF
             </Button>
           </div>

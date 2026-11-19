@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
 import { usePermisos } from '../../lib/permisos';
 import { DollarSign, Plus, Edit2, Trash2, Loader2, Save, Search, TrendingUp, RefreshCw } from 'lucide-react';
 import { Button } from '../../design-system/primitives/Button';
@@ -42,13 +42,14 @@ export function RazonCambioPage() {
   const { user } = useAuth();
   // RLS "manage_exchange_rates" en Supabase ya restringe la escritura a
   // Super Admin a nivel de base de datos — este check es solo para la UI.
-  const canWrite = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
   // Permisos por menú del Rol de Acceso (Configuración → Roles): cada acción
   // se muestra solo si el rol la permite Y el permiso del menú también.
   const permisos = usePermisos('razon-cambio');
-  const puedeCrear = canWrite && permisos.crear;
-  const puedeEditar = canWrite && permisos.editar;
-  const puedeEliminar = canWrite && permisos.eliminar;
+  const puedeCrear = permisos.crear;
+  const puedeEditar = permisos.editar;
+  const puedeEliminar = permisos.eliminar;
+  const canWrite = puedeCrear || puedeEditar || puedeEliminar;
+  const puedeSincronizar = permisos.puede('sincronizar');
 
   const [data, setData] = useState<ExchangeRateRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -232,16 +233,20 @@ export function RazonCambioPage() {
             </p>
           </div>
         </div>
-        {puedeCrear && (
+        {(puedeCrear || puedeSincronizar) && (
           <div className="flex items-center gap-2">
-            <Button variant="ghost" className="gap-2" onClick={handleSyncElToque} disabled={syncing}>
-              <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
-              {syncing ? 'Sincronizando…' : 'Sincronizar con El Toque'}
-            </Button>
-            <Button variant="brand" className="gap-2" onClick={handleNew}>
-              <Plus size={18} />
-              Nueva Tasa
-            </Button>
+            {puedeSincronizar && (
+              <Button variant="ghost" className="gap-2" onClick={handleSyncElToque} disabled={syncing}>
+                <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
+                {syncing ? 'Sincronizando…' : 'Sincronizar con El Toque'}
+              </Button>
+            )}
+            {puedeCrear && (
+              <Button variant="brand" className="gap-2" onClick={handleNew}>
+                <Plus size={18} />
+                Nueva Tasa
+              </Button>
+            )}
           </div>
         )}
       </div>

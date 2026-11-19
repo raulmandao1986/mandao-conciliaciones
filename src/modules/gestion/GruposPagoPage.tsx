@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Layers, Loader2, Plus, Save, AlertTriangle, RefreshCw, Trash2 } from 'lucide-react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
-import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { useAuth } from '../../lib/auth';
+import { usePermisos } from '../../lib/permisos';
 import { Button } from '../../design-system/primitives/Button';
 import { ConfirmDialog } from '../../design-system/primitives/ConfirmDialog';
 import { cn } from '../../lib/utils';
@@ -19,7 +20,10 @@ const fieldCls = 'h-9 w-full px-3 bg-white border border-[var(--color-border)] r
 
 export function GruposPagoPage() {
   const { user } = useAuth();
-  const canWrite = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
+  const permisos = usePermisos('grupos-pago');
+  const canWrite = permisos.editar || permisos.eliminar;
+  const puedeCrear = permisos.crear;
+  const puedeEliminar = permisos.eliminar;
   const [grupos, setGrupos] = useState<Grupo[]>([]);
   const [nombres, setNombres] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -162,7 +166,7 @@ export function GruposPagoPage() {
                           size="sm"
                           aria-label={`Eliminar ${g.nombre}`}
                           title={g.metodos > 0 ? `No se puede eliminar: lo usan ${g.metodos} método(s) de pago` : 'Eliminar grupo'}
-                          disabled={g.metodos > 0 || guardandoId === g.id}
+                          disabled={!puedeEliminar || g.metodos > 0 || guardandoId === g.id}
                           onClick={() => setAEliminar(g)}
                         >
                           <Trash2 size={14} />
@@ -175,7 +179,7 @@ export function GruposPagoPage() {
             })}
           </tbody>
         </table>
-        {canWrite && (
+        {puedeCrear && (
           <div className="p-4 border-t border-[var(--color-border)] flex flex-wrap items-start gap-2">
             <label className="flex flex-col gap-1.5 flex-1 min-w-[14rem]">
               <span className="text-sm font-medium text-[var(--color-text)]">Nuevo grupo</span>
