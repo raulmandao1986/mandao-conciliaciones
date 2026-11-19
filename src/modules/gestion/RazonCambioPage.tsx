@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { usePermisos } from '../../lib/permisos';
 import { DollarSign, Plus, Edit2, Trash2, Loader2, Save, Search, TrendingUp, RefreshCw } from 'lucide-react';
 import { Button } from '../../design-system/primitives/Button';
 import { SlideOver } from '../../design-system/primitives/SlideOver';
@@ -42,6 +43,12 @@ export function RazonCambioPage() {
   // RLS "manage_exchange_rates" en Supabase ya restringe la escritura a
   // Super Admin a nivel de base de datos — este check es solo para la UI.
   const canWrite = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
+  // Permisos por menú del Rol de Acceso (Configuración → Roles): cada acción
+  // se muestra solo si el rol la permite Y el permiso del menú también.
+  const permisos = usePermisos('razon-cambio');
+  const puedeCrear = canWrite && permisos.crear;
+  const puedeEditar = canWrite && permisos.editar;
+  const puedeEliminar = canWrite && permisos.eliminar;
 
   const [data, setData] = useState<ExchangeRateRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -225,7 +232,7 @@ export function RazonCambioPage() {
             </p>
           </div>
         </div>
-        {canWrite && (
+        {puedeCrear && (
           <div className="flex items-center gap-2">
             <Button variant="ghost" className="gap-2" onClick={handleSyncElToque} disabled={syncing}>
               <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
@@ -334,12 +341,13 @@ export function RazonCambioPage() {
                 <div className="flex items-center justify-end gap-2">
                   <button
                     onClick={(e) => { e.stopPropagation(); handleEdit(item); }}
-                    title={canWrite ? 'Editar Tasa' : 'Ver detalles'}
+                    title={puedeEditar ? 'Editar Tasa' : 'Ver detalles'}
+                    aria-label={puedeEditar ? 'Editar Tasa' : 'Ver detalles'}
                     className="p-2 text-[var(--color-text-faint)] hover:text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10 rounded-md transition-all"
                   >
                     <Edit2 size={16} />
                   </button>
-                  {canWrite && (
+                  {puedeEliminar && (
                     <button
                       onClick={(e) => { e.stopPropagation(); handleDeleteRequest(item.id); }}
                       title="Eliminar Tasa"

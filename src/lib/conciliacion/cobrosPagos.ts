@@ -2,14 +2,29 @@ import { supabase } from '../supabase';
 import { fetchAllRows } from './fetchAllRows';
 import { formatCurrency, formatDate, toLocalISODate } from '../formatters';
 
-// Cobros y Pagos (Fase 4 "Nuevos cambios", 2026-11-05): cuentas pendientes de
-// pagar o cobrar = conciliaciones en estado Confirmado (ni Pagadas ni
-// Cobradas), agrupadas por negocio/mensajero y moneda. El neto de cada grupo
-// descuenta lo Por Cobrar contra lo Por Pagar y dice si hay que pagarle o
-// cobrarle. Sirve para armar la planificación de pagos de la caja.
+// Cobros y Pagos (Fase 4 "Nuevos cambios", 2026-11-05; vía de pago y
+// planificación 2026-11-19): cuentas pendientes de pagar o cobrar =
+// conciliaciones en estado Confirmado (ni Pagadas ni Cobradas), agrupadas por
+// negocio/mensajero, moneda y vía de pago. El neto de cada grupo descuenta lo
+// Por Cobrar contra lo Por Pagar y dice si hay que pagarle o cobrarle. Los
+// grupos seleccionados se registran como una Planificación de Pagos.
 
 export type EntidadCobros = 'negocios' | 'mensajeros';
 export type Moneda = 'CUP' | 'USD';
+
+// Vías de pago por actor y moneda (confirmado con el usuario 2026-11-19).
+export const VIAS_PAGO: Record<EntidadCobros, Record<Moneda, string[]>> = {
+  negocios: {
+    CUP: ['Transferencia', 'Efectivo'],
+    USD: ['Zelle', 'Tropipay', 'Transferencia Internacional'],
+  },
+  mensajeros: {
+    CUP: ['Efectivo', 'Transferencia'],
+    USD: ['Efectivo', 'Transferencia'],
+  },
+};
+export const TODAS_LAS_VIAS = ['Transferencia', 'Efectivo', 'Zelle', 'Tropipay', 'Transferencia Internacional'];
+export const SIN_CUENTA_USD = 'Sin cuenta USD';
 
 export interface ConciliacionPendiente {
   id: string;
@@ -27,16 +42,21 @@ export interface ConciliacionPendiente {
   neto: number; // cxp − cxc: positivo = pagar, negativo = cobrar
   consecutivo: string | null;
   conciliacion: string;
+  planificacion: string | null; // consecutivo de la planificación que la incluye
 }
 
 export interface DatoPago { label: string; value: string }
+
+interface CuentaUSD { via: string; prioridad: number; dato: DatoPago }
 
 export interface EntidadPago {
   id: string;
   nombre: string;
   viaPago: string;
   correo: string;
-  datos: Record<Moneda, DatoPago[]>;
+  cup: DatoPago[];          // cuentas CUP (Cuenta Fiscal primero)
+  cuentasUSD: CuentaUSD[];  // habilitadas, por prioridad
+  contacto: DatoPago[];     // CI / teléfono (mensajeros)
 }
 
 export interface GrupoCobro {
@@ -51,12 +71,27 @@ export interface GrupoCobro {
   totalCxP: number;
   neto: number;
   datosPago: DatoPago[];
+  planificaciones: string[]; // consecutivos de planificaciones que ya lo incluyen
 }
 
 const n = (v: unknown) => Number(v) || 0;
 const txt = (v: unknown) => (typeof v === 'string' ? v.trim() : v == null ? '' : String(v).trim());
+const importe = (v: number) => new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v);
+
+// Conciliaciones ya incluidas en una planificación (si la tabla aún no existe, ninguna).
+async function loadPlanificadas(entidad: EntidadCobros): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const { data, error } = await supabase
+    .from('planificacion_items')
+    .select('conciliacion_id, planificaciones_pago(consecutivo)')
+    .eq('entidad', entidad);
+  if (error) return out;
+  (data || []).forEach((r: any) => out.set(r.conciliacion_id, r.planificaciones_pago?.consecutivo || 'Planificación'));
+  return out;
+}
 
 export async function loadPendientes(entidad: EntidadCobros): Promise<ConciliacionPendiente[]> {
+  const planificadas = await loadPlanificadas(entidad);
   if (entidad === 'negocios') {
     const rows = await fetchAllRows<any>((from, to) => supabase
       .from('conciliaciones_businesses')
@@ -70,7 +105,8 @@ export async function loadPendientes(entidad: EntidadCobros): Promise<Conciliaci
       return {
         id: r.conciliacion_id, entidadId: r.business_id, nombre: r.establecimiento, areaId: r.area_id, area: r.area,
         fecha: r.fecha, fechaInicial: r.fecha_inicial, fechaFinal: r.fecha_final, riel: r.via_pago || 'N/D',
-        moneda: r.moneda === 'USD' ? 'USD' : 'CUP', cxc, cxp, neto: cxp - cxc, consecutivo: r.consecutivo || null, conciliacion: r.conciliacion,
+        moneda: r.moneda === 'USD' ? 'USD' : 'CUP', cxc, cxp, neto: cxp - cxc, consecutivo: r.consecutivo || null,
+        conciliacion: r.conciliacion, planificacion: planificadas.get(r.conciliacion_id) || null,
       };
     });
   }
@@ -86,7 +122,8 @@ export async function loadPendientes(entidad: EntidadCobros): Promise<Conciliaci
     return {
       id: r.conciliacion_id, entidadId: r.messenger_id, nombre: r.mensajero, areaId: r.area_id, area: r.area,
       fecha: r.fecha, fechaInicial: r.fecha_inicial, fechaFinal: r.fecha_final, riel: r.via_pago || 'N/D',
-      moneda: r.moneda === 'USD' ? 'USD' : 'CUP', cxc, cxp, neto: cxp - cxc, consecutivo: r.consecutivo || null, conciliacion: r.conciliacion,
+      moneda: r.moneda === 'USD' ? 'USD' : 'CUP', cxc, cxp, neto: cxp - cxc, consecutivo: r.consecutivo || null,
+      conciliacion: r.conciliacion, planificacion: planificadas.get(r.conciliacion_id) || null,
     };
   });
 }
@@ -110,16 +147,19 @@ export async function loadEntidadesPago(entidad: EntidadCobros, ids: string[]): 
     if (error) throw new Error(error.message);
     (data || []).forEach((b: any) => {
       const cup = [
-        cuenta('Cuenta CUP', b.cup_account, [['titular', 'Titular'], ['cuenta', 'Cuenta'], ['banco', 'Banco'], ['sucursal', 'Sucursal']]),
+        cuenta('Cuenta Fiscal CUP', b.cup_account, [['titular', 'Titular'], ['cuenta', 'Cuenta'], ['banco', 'Banco'], ['sucursal', 'Sucursal']]),
         cuenta('Cuenta Personal', b.personal_account, [['titular', 'Titular'], ['cuenta', 'Cuenta'], ['banco', 'Banco'], ['sucursal', 'Sucursal']]),
         cuenta('Cuenta Cheque', b.check_account, [['titular', 'Titular'], ['cuenta', 'Cuenta'], ['banco', 'Banco']]),
       ].filter((x): x is DatoPago => !!x);
-      const usd = [
-        cuenta('Zelle', b.exterior_zelle, [['titular', 'Titular'], ['cuenta', 'Cuenta']]),
-        cuenta('Tropipay', b.exterior_tropipay, [['titular', 'Titular'], ['cuenta', 'Cuenta']]),
-        cuenta('Transferencia Internacional', b.exterior_transfer, [['titular', 'Titular'], ['cuenta', 'Cuenta'], ['banco', 'Banco'], ['swift', 'SWIFT'], ['moneda', 'Moneda']]),
-      ].filter((x): x is DatoPago => !!x);
-      out.set(b.business_id, { id: b.business_id, nombre: b.name, viaPago: b.payment_method || 'N/D', correo: b.email || '', datos: { CUP: cup, USD: usd } });
+      const usd: CuentaUSD[] = [];
+      const z = cuenta('Zelle', b.exterior_zelle, [['titular', 'Titular'], ['cuenta', 'Cuenta']]);
+      if (z) usd.push({ via: 'Zelle', prioridad: n(b.exterior_zelle?.prioridad) || 1, dato: z });
+      const t = cuenta('Tropipay', b.exterior_tropipay, [['titular', 'Titular'], ['cuenta', 'Cuenta']]);
+      if (t) usd.push({ via: 'Tropipay', prioridad: n(b.exterior_tropipay?.prioridad) || 2, dato: t });
+      const ti = cuenta('Transferencia Internacional', b.exterior_transfer, [['titular', 'Titular'], ['cuenta', 'Cuenta'], ['banco', 'Banco'], ['swift', 'SWIFT'], ['moneda', 'Moneda']]);
+      if (ti) usd.push({ via: 'Transferencia Internacional', prioridad: n(b.exterior_transfer?.prioridad) || 3, dato: ti });
+      usd.sort((a, b2) => a.prioridad - b2.prioridad);
+      out.set(b.business_id, { id: b.business_id, nombre: b.name, viaPago: b.payment_method || 'N/D', correo: b.email || '', cup, cuentasUSD: usd, contacto: [] });
     });
     return out;
   }
@@ -129,29 +169,54 @@ export async function loadEntidadesPago(entidad: EntidadCobros, ids: string[]): 
     .in('messenger_id', ids);
   if (error) throw new Error(error.message);
   (data || []).forEach((m: any) => {
-    const datos = [
+    const cup = [
       txt(m.fiscal_card) ? { label: 'Tarjeta Fiscal', value: txt(m.fiscal_card) } : null,
       txt(m.fiscal_account) ? { label: 'Cuenta Fiscal', value: txt(m.fiscal_account) } : null,
+    ].filter((x): x is DatoPago => !!x);
+    const contacto = [
       txt(m.ci) ? { label: 'CI', value: txt(m.ci) } : null,
       txt(m.phone) ? { label: 'Teléfono', value: txt(m.phone) } : null,
     ].filter((x): x is DatoPago => !!x);
-    out.set(m.messenger_id, { id: m.messenger_id, nombre: m.name, viaPago: m.payment_method || 'N/D', correo: '', datos: { CUP: datos, USD: datos } });
+    out.set(m.messenger_id, { id: m.messenger_id, nombre: m.name, viaPago: m.payment_method || 'N/D', correo: '', cup, cuentasUSD: [], contacto });
   });
   return out;
 }
 
-// Un grupo por negocio/mensajero y moneda (CUP y USD no se suman).
-export function agrupar(pendientes: ConciliacionPendiente[], entidades: Map<string, EntidadPago>): GrupoCobro[] {
+// Vía de pago de una conciliación pendiente.
+// Negocios: riel Transferencia -> Transferencia (Cuenta Fiscal CUP); riel
+// Efectivo -> Efectivo; riel Exterior -> la cuenta USD habilitada de mayor
+// prioridad (Zelle / Tropipay / Transferencia Internacional).
+// Mensajeros: su vía registrada (Efectivo o Transferencia).
+export function viaDe(entidad: EntidadCobros, c: ConciliacionPendiente, ent?: EntidadPago): string {
+  const riel = c.riel.toLowerCase();
+  if (entidad === 'mensajeros') return riel.includes('efectivo') ? 'Efectivo' : 'Transferencia';
+  if (riel.includes('efectivo')) return 'Efectivo';
+  if (riel.includes('exterior') || c.moneda === 'USD') return ent?.cuentasUSD[0]?.via || SIN_CUENTA_USD;
+  return 'Transferencia';
+}
+
+function datosDe(entidad: EntidadCobros, via: string, ent?: EntidadPago): DatoPago[] {
+  if (!ent) return [];
+  if (via === 'Efectivo') return [{ label: 'Efectivo', value: 'Pago en mano' }, ...ent.contacto];
+  if (entidad === 'mensajeros') return [...ent.cup, ...ent.contacto];
+  if (via === 'Transferencia') return ent.cup;
+  const usd = ent.cuentasUSD.find(c => c.via === via);
+  return usd ? [usd.dato] : ent.cuentasUSD.map(c => c.dato);
+}
+
+// Un grupo por negocio/mensajero, moneda y vía de pago (CUP y USD no se suman).
+export function agrupar(entidad: EntidadCobros, pendientes: ConciliacionPendiente[], entidades: Map<string, EntidadPago>): GrupoCobro[] {
   const map = new Map<string, GrupoCobro>();
   for (const c of pendientes) {
-    const key = `${c.entidadId || c.nombre}|${c.moneda}`;
+    const ent = c.entidadId ? entidades.get(c.entidadId) : undefined;
+    const via = viaDe(entidad, c, ent);
+    const key = `${c.entidadId || c.nombre}|${c.moneda}|${via}`;
     let g = map.get(key);
     if (!g) {
-      const ent = c.entidadId ? entidades.get(c.entidadId) : undefined;
       g = {
         key, entidadId: c.entidadId, nombre: ent?.nombre || c.nombre, areas: [], moneda: c.moneda,
-        viaPago: ent?.viaPago || c.riel, conciliaciones: [], totalCxC: 0, totalCxP: 0, neto: 0,
-        datosPago: ent?.datos[c.moneda] || [],
+        viaPago: via, conciliaciones: [], totalCxC: 0, totalCxP: 0, neto: 0,
+        datosPago: datosDe(entidad, via, ent), planificaciones: [],
       };
       map.set(key, g);
     }
@@ -160,14 +225,15 @@ export function agrupar(pendientes: ConciliacionPendiente[], entidades: Map<stri
     g.totalCxP += c.cxp;
     g.neto = g.totalCxP - g.totalCxC;
     if (c.area && !g.areas.includes(c.area)) g.areas.push(c.area);
+    if (c.planificacion && !g.planificaciones.includes(c.planificacion)) g.planificaciones.push(c.planificacion);
   }
-  return Array.from(map.values()).sort((a, b) => a.nombre.localeCompare(b.nombre) || a.moneda.localeCompare(b.moneda));
+  return Array.from(map.values()).sort((a, b) => a.nombre.localeCompare(b.nombre) || a.moneda.localeCompare(b.moneda) || a.viaPago.localeCompare(b.viaPago));
 }
 
 export const accionDe = (neto: number) => (neto > 0.005 ? 'Pagar' : neto < -0.005 ? 'Cobrar' : 'En cero');
 
-// Totales de un conjunto de grupos, por moneda.
-export function totalesPorMoneda(grupos: GrupoCobro[]) {
+// Totales de un conjunto de grupos, por moneda (nunca se suman monedas distintas).
+export function totalesPorMoneda(grupos: { moneda: Moneda; neto: number }[]) {
   const t: Record<Moneda, { pagar: number; cobrar: number; grupos: number }> = {
     CUP: { pagar: 0, cobrar: 0, grupos: 0 },
     USD: { pagar: 0, cobrar: 0, grupos: 0 },
@@ -180,72 +246,178 @@ export function totalesPorMoneda(grupos: GrupoCobro[]) {
   return t;
 }
 
-const ETIQUETA: Record<EntidadCobros, string> = { negocios: 'Negocio', mensajeros: 'Mensajero' };
-
-// Excel: hoja "Planificación" (un renglón por grupo) y hoja "Detalle" (una
-// conciliación por renglón).
-export async function exportarExcel(entidad: EntidadCobros, grupos: GrupoCobro[]) {
-  const XLSX = await import('xlsx');
-  const plan = grupos.map(g => ({
-    [ETIQUETA[entidad]]: g.nombre,
-    'Área': g.areas.join(', '),
-    'Vía de pago': g.viaPago,
-    'Moneda': g.moneda,
-    'Conciliaciones': g.conciliaciones.length,
-    'Por Cobrar': Number(g.totalCxC.toFixed(2)),
-    'Por Pagar': Number(g.totalCxP.toFixed(2)),
-    'Acción': accionDe(g.neto),
-    'Monto': Number(Math.abs(g.neto).toFixed(2)),
-    'Datos de pago': g.datosPago.map(d => `${d.label}: ${d.value}`).join(' | ') || 'Sin datos registrados',
-  }));
-  const detalle = grupos.flatMap(g => g.conciliaciones.map(c => ({
-    [ETIQUETA[entidad]]: g.nombre,
-    'Consecutivo': c.consecutivo || '',
-    'Período': `${formatDate(c.fechaInicial)} - ${formatDate(c.fechaFinal)}`,
-    'Riel': c.riel,
-    'Moneda': c.moneda,
-    'Por Cobrar': Number(c.cxc.toFixed(2)),
-    'Por Pagar': Number(c.cxp.toFixed(2)),
-    'Neto': Number(c.neto.toFixed(2)),
-    'Área': c.area,
-  })));
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(plan), 'Planificación');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detalle), 'Detalle');
-  XLSX.writeFile(wb, `Cobros y Pagos ${entidad === 'negocios' ? 'Negocios' : 'Mensajeros'} ${toLocalISODate()}.xlsx`);
+// ---------------------------------------------------------------------------
+// Filas de la planificación (exportación): una por negocio/mensajero y vía.
+// Sirven tanto para lo seleccionado en Cobros y Pagos como para una
+// Planificación de Pagos ya guardada.
+// ---------------------------------------------------------------------------
+export interface FilaPlanificacion {
+  nombre: string;
+  via: string;
+  moneda: Moneda;
+  neto: number;
+  datosPago: string[];
+  conceptos: { consecutivo: string | null; neto: number }[];
 }
 
-// PDF "Planificación de pagos" para la caja.
-export async function exportarPdf(entidad: EntidadCobros, grupos: GrupoCobro[], responsable: string) {
+export const filaDeGrupo = (g: GrupoCobro): FilaPlanificacion => ({
+  nombre: g.nombre,
+  via: g.viaPago,
+  moneda: g.moneda,
+  neto: g.neto,
+  datosPago: g.datosPago.map(d => `${d.label}: ${d.value}`),
+  conceptos: g.conciliaciones.map(c => ({ consecutivo: c.consecutivo, neto: c.neto })),
+});
+
+// "PN260017 31.292,50 / CN260001 26.921,00": cada cuenta con su importe.
+export const conceptoDe = (f: FilaPlanificacion) =>
+  f.conceptos.map(c => `${c.consecutivo || 'Sin consecutivo'} ${importe(Math.abs(c.neto))}`).join(' / ');
+
+const ETIQUETA: Record<EntidadCobros, string> = { negocios: 'Negocio', mensajeros: 'Mensajero' };
+const PLURAL: Record<EntidadCobros, string> = { negocios: 'Negocios', mensajeros: 'Mensajeros' };
+
+// Excel: una hoja por moneda (no se mezclan) con la estructura de la
+// planificación, más la hoja "Detalle" (una cuenta por renglón).
+export async function exportarExcel(entidad: EntidadCobros, filas: FilaPlanificacion[], titulo?: string) {
+  const XLSX = await import('xlsx');
+  const wb = XLSX.utils.book_new();
+  (['CUP', 'USD'] as Moneda[]).forEach(m => {
+    const fs = filas.filter(f => f.moneda === m);
+    if (fs.length === 0) return;
+    const t = totalesPorMoneda(fs);
+    const hoja = fs.map(f => ({
+      [ETIQUETA[entidad]]: f.nombre,
+      'Vía de Pago': f.via,
+      'Importe': Number(Math.abs(f.neto).toFixed(2)),
+      'Moneda': f.moneda,
+      'Acción': accionDe(f.neto),
+      'Datos de Pago': f.datosPago.join(' | ') || 'Sin datos registrados',
+      'Concepto': conceptoDe(f),
+    }));
+    hoja.push({} as any);
+    hoja.push({ [ETIQUETA[entidad]]: `Total a pagar (${m})`, 'Importe': Number(t[m].pagar.toFixed(2)), 'Moneda': m } as any);
+    hoja.push({ [ETIQUETA[entidad]]: `Total a cobrar (${m})`, 'Importe': Number(t[m].cobrar.toFixed(2)), 'Moneda': m } as any);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(hoja), `Planificación ${m}`);
+  });
+  const detalle = filas.flatMap(f => f.conceptos.map(c => ({
+    [ETIQUETA[entidad]]: f.nombre,
+    'Consecutivo': c.consecutivo || '',
+    'Vía de Pago': f.via,
+    'Importe': Number(Math.abs(c.neto).toFixed(2)),
+    'Moneda': f.moneda,
+    'Acción': accionDe(c.neto),
+  })));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detalle), 'Detalle');
+  XLSX.writeFile(wb, `${titulo || `Planificacion ${PLURAL[entidad]}`} ${toLocalISODate()}.xlsx`);
+}
+
+// PDF "Planificación de pagos" para la caja. Regla: nunca se mezclan monedas
+// (2026-11-19): una sección por moneda, cada una con sus propios totales.
+export async function exportarPdf(entidad: EntidadCobros, filas: FilaPlanificacion[], responsable: string, opciones: { titulo?: string; subtitulo?: string } = {}) {
   const { jsPDF } = await import('jspdf');
   const autoTable = (await import('jspdf-autotable')).default;
   const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
   const M = 12;
+  const titulo = opciones.titulo || `Planificación de pagos y cobros — ${PLURAL[entidad]}`;
+  doc.setProperties({ title: titulo });
+  doc.viewerPreferences({ DisplayDocTitle: true });
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(16);
-  doc.text(`Planificación de pagos y cobros — ${entidad === 'negocios' ? 'Negocios' : 'Mensajeros'}`, M, 16);
+  doc.text(titulo, M, 16);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
-  doc.text(`Generado el ${formatDate(toLocalISODate())} por ${responsable} · ${grupos.length} ${entidad === 'negocios' ? 'negocio(s)' : 'mensajero(s)'}`, M, 22);
+  doc.text(opciones.subtitulo || `Generado el ${formatDate(toLocalISODate())} por ${responsable}`, M, 22);
 
-  const t = totalesPorMoneda(grupos);
-  const resumen = (['CUP', 'USD'] as Moneda[]).filter(m => t[m].grupos > 0)
-    .map(m => `${m}: a pagar ${formatCurrency(t[m].pagar, m)} · a cobrar ${formatCurrency(t[m].cobrar, m)}`).join('     ');
-  doc.text(resumen, M, 27);
-
-  autoTable(doc, {
-    startY: 31,
-    margin: { left: M, right: M },
-    head: [[ETIQUETA[entidad], 'Moneda', 'Vía de pago', 'Por Cobrar', 'Por Pagar', 'Acción', 'Monto', 'Datos de pago']],
-    body: grupos.map(g => [
-      g.nombre, g.moneda, g.viaPago,
-      formatCurrency(g.totalCxC, g.moneda), formatCurrency(g.totalCxP, g.moneda),
-      accionDe(g.neto), formatCurrency(Math.abs(g.neto), g.moneda),
-      g.datosPago.map(d => `${d.label}: ${d.value}`).join('\n') || 'Sin datos registrados',
-    ]),
-    styles: { fontSize: 8, cellPadding: 1.8, valign: 'top', lineColor: [23, 23, 23], lineWidth: 0.1 },
-    headStyles: { fillColor: [255, 191, 0], textColor: [23, 23, 23], fontStyle: 'bold' },
-    columnStyles: { 3: { halign: 'right' }, 4: { halign: 'right' }, 6: { halign: 'right', fontStyle: 'bold' }, 7: { cellWidth: 90 } },
+  let y = 28;
+  (['CUP', 'USD'] as Moneda[]).forEach(m => {
+    const fs = filas.filter(f => f.moneda === m);
+    if (fs.length === 0) return;
+    const t = totalesPorMoneda(fs);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.text(`Moneda ${m} · ${fs.length} ${fs.length === 1 ? ETIQUETA[entidad].toLowerCase() : PLURAL[entidad].toLowerCase()}`, M, y);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.text(`Total a pagar: ${formatCurrency(t[m].pagar, m)}    Total a cobrar: ${formatCurrency(t[m].cobrar, m)}`, M, y + 5);
+    autoTable(doc, {
+      startY: y + 8,
+      margin: { left: M, right: M },
+      head: [[ETIQUETA[entidad], 'Vía de Pago', 'Importe', 'Moneda', 'Acción', 'Datos de Pago', 'Concepto']],
+      body: fs.map(f => [
+        f.nombre, f.via, importe(Math.abs(f.neto)), f.moneda, accionDe(f.neto),
+        f.datosPago.join('\n') || 'Sin datos registrados',
+        conceptoDe(f),
+      ]),
+      styles: { fontSize: 8, cellPadding: 1.8, valign: 'top', lineColor: [23, 23, 23], lineWidth: 0.1 },
+      headStyles: { fillColor: [255, 191, 0], textColor: [23, 23, 23], fontStyle: 'bold' },
+      columnStyles: { 2: { halign: 'right', fontStyle: 'bold' }, 5: { cellWidth: 75 }, 6: { cellWidth: 70 } },
+    });
+    y = (doc as any).lastAutoTable.finalY + 10;
+    if (y > doc.internal.pageSize.getHeight() - 30) { doc.addPage(); y = 16; }
   });
-  doc.save(`Planificacion de pagos ${entidad === 'negocios' ? 'Negocios' : 'Mensajeros'} ${toLocalISODate()}.pdf`);
+  doc.save(`${titulo.replace(/[\\/:*?"<>|]+/g, '-')} ${toLocalISODate()}.pdf`);
+}
+
+// ---------------------------------------------------------------------------
+// Generar Planificación: registra los grupos seleccionados (una sola moneda y
+// una sola vía) en planificaciones_pago + planificacion_items.
+// ---------------------------------------------------------------------------
+export async function generarPlanificacion(params: {
+  entidad: EntidadCobros;
+  grupos: GrupoCobro[];
+  filtros: Record<string, string>;
+  responsable: string;
+  responsableId: string | null;
+}): Promise<string> {
+  const { entidad, grupos } = params;
+  const monedas = new Set(grupos.map(g => g.moneda));
+  const vias = new Set(grupos.map(g => g.viaPago));
+  if (grupos.length === 0) throw new Error('Seleccione al menos un registro.');
+  if (monedas.size > 1) throw new Error('No se pueden mezclar monedas en una planificación: seleccione solo CUP o solo USD.');
+  if (vias.size > 1) throw new Error('Una planificación es de una sola vía de pago: filtre o seleccione registros con la misma vía.');
+  if (grupos.some(g => g.planificaciones.length > 0)) throw new Error('Hay registros que ya están en otra planificación.');
+  const moneda = grupos[0].moneda;
+  const t = totalesPorMoneda(grupos)[moneda];
+  const areas = Array.from(new Set(grupos.flatMap(g => g.areas))).sort();
+
+  const { data: cab, error } = await supabase.from('planificaciones_pago').insert({
+    entidad,
+    via_pago: grupos[0].viaPago,
+    moneda,
+    cantidad: new Set(grupos.map(g => g.entidadId || g.nombre)).size,
+    monto_pagar: Number(t.pagar.toFixed(2)),
+    monto_cobrar: Number(t.cobrar.toFixed(2)),
+    neto: Number((t.pagar - t.cobrar).toFixed(2)),
+    areas,
+    filtros: params.filtros,
+    responsable: params.responsable,
+    responsable_id: params.responsableId,
+  }).select('planificacion_id, consecutivo').single();
+  if (error) {
+    throw new Error(/planificaciones_pago/.test(error.message)
+      ? 'Falta correr en Supabase la migración 2026-11-19b_planificacion_pagos.sql.'
+      : error.message);
+  }
+
+  const items = grupos.flatMap(g => g.conciliaciones.map(c => ({
+    planificacion_id: cab.planificacion_id,
+    entidad,
+    conciliacion_id: c.id,
+    entidad_id: c.entidadId,
+    nombre: g.nombre,
+    area: c.area,
+    consecutivo: c.consecutivo,
+    periodo_inicial: c.fechaInicial,
+    periodo_final: c.fechaFinal,
+    riel: g.viaPago,
+    neto: Number(c.neto.toFixed(2)),
+    datos_pago: g.datosPago.map(d => `${d.label}: ${d.value}`).join('\n'),
+  })));
+  const { error: e2 } = await supabase.from('planificacion_items').insert(items);
+  if (e2) {
+    // Sin ítems la planificación no sirve: se deshace la cabecera.
+    await supabase.from('planificaciones_pago').delete().eq('planificacion_id', cab.planificacion_id);
+    throw new Error(e2.code === '23505' ? 'Alguna de las cuentas ya fue incluida en otra planificación. Actualice la página.' : e2.message);
+  }
+  return cab.consecutivo || '';
 }

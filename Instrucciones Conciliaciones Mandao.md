@@ -630,6 +630,31 @@ Quedan en el Log de Auditoría (Configuración → Log): registro de conciliacio
 
 **Menú:** "Cobros y Pagos" (`cobros-pagos-negocio` / `cobros-pagos-mensajero`); la migración `2026-11-05_cobros_pagos_menu.sql` lo habilita en los Roles de Acceso que veían Cuentas por Pagar / por Cobrar o la Conciliación del módulo.
 
+### 6.14 Cobros y Pagos — vía de pago y Generar Planificación (2026-11-19)
+
+- **Agrupación**: un renglón por negocio/mensajero, **moneda y vía de pago**. Columnas: Negocio, Vía de pago, Moneda, Cuentas, Importe (neto; rojo = pagar, verde = cobrar) y Acción. Al desplegar: Consecutivo, Período, Vía de pago, Importe, Moneda y Acción de cada cuenta, más los datos de pago de esa vía.
+- **Vía de pago** (filtro dependiente de la moneda):
+
+  | Actor | CUP | USD |
+  |---|---|---|
+  | Negocios | Transferencia (Cuenta Fiscal CUP; riel Transferencia), Efectivo (riel Efectivo) | Zelle, Tropipay, Transferencia Internacional (la cuenta habilitada de mayor prioridad del negocio; riel Exterior) |
+  | Mensajeros | Efectivo, Transferencia (su vía registrada) | — |
+
+- **Generar Planificación** (reemplaza a "Registrar pago / cobro"): los registros marcados se guardan como una Planificación de Pagos. Reglas: una sola moneda y una sola vía por planificación; nunca se mezclan CUP y USD. Los registros ya incluidos en una planificación se siguen mostrando con la marca **"En planificación PLN…"** y no se pueden incluir en otra (índice único por conciliación).
+- **Exportar (Excel / Planificación PDF)**: lo marcado o, sin marcar, todo lo filtrado. Estructura: Negocio, Vía de Pago, Importe (total a pagar o cobrar), Moneda, Acción, Datos de Pago y **Concepto** (cada cuenta con su consecutivo e importe separados por "/", ej. `PN260017 31.292,50 / CN260001 26.921,00`). **Regla**: una sección (PDF) u hoja (Excel) por moneda, cada una con sus totales; nunca se suman monedas distintas.
+
+### 6.15 Planificación de Pagos (menú propio "Pagos", 2026-11-19)
+
+- Reemplaza a los ítems "Planificación Pagos" de Negocios y Mensajeros (eran maquetas). `src/modules/conciliacion/PlanificacionesPage.tsx`, lógica en `src/lib/conciliacion/planificaciones.ts`; tablas `planificaciones_pago` y `planificacion_items` (sección 12).
+- Cada planificación: **consecutivo** (series PLN en CUP / PLNU en USD de Formato de Consecutivo), fecha de emisión, actor (Negocios / Mensajeros), cantidad, vía de pago, moneda, importes (a pagar, a cobrar, neto), áreas, responsable, notas y las cuentas incluidas.
+- **Estado** (calculado, no se guarda): **Pendiente** si todas sus conciliaciones están Confirmado; **Pagado** si todas están Pagado o Cobrado; **En Proceso** en cualquier otro caso. El pago o cobro se registra en el **histórico de Conciliación** (uno a uno o con el cambio de estado masivo).
+- Filtros: rango de fecha (Desde–Hasta), Actor, Vía de pago, Área, Moneda, Estado y buscador general (consecutivo, negocio/mensajero, cuenta, responsable, notas).
+- **CRUD**: Ver (detalle con cuentas y estado de cada conciliación; descarga de la planificación en PDF/Excel para la caja), Editar (fecha, notas y quitar cuentas aún Confirmadas, que vuelven a Cobros y Pagos), Eliminar (solo si está Pendiente; sus cuentas vuelven a Cobros y Pagos). Exportación del listado a PDF y Excel (separado por moneda).
+
+### 6.16 Histórico de Conciliaciones — acciones masivas (2026-11-19)
+
+Casillas en todas las filas (cualquier estado) y casilla de encabezado para todo el filtro. Barra de acciones: **Enviar por correo** (solo las que están en Nuevo/Enviado) y **Cambiar estado a…** (aplica solo a las que admiten esa transición; avisa cuántas se omiten y por qué). Además, una conciliación en **Nuevo** puede pasar directamente a **Confirmado**.
+
 ---
 
 ## 7. Módulo Mensajeros
@@ -693,7 +718,7 @@ Menú Configuración:
 
 | Ítem | Qué gestiona |
 |---|---|
-| Roles y Usuarios | Usuarios, rol de seguridad (`profiles.role`) y Rol de Acceso (qué ítems de menú ve, `access_roles.module_keys`) — ver sección 19.3 |
+| Roles y Usuarios | Usuarios, rol de seguridad (`profiles.role`) y Rol de Acceso: por cada menú, permisos **Ver / Crear / Editar / Eliminar** (`access_roles.module_keys` + `access_roles.permisos`, 2026-11-19). Son permisos de interfaz (ocultan acciones); la seguridad real sigue siendo `profiles.role` + RLS — ver sección 19.3 |
 | Áreas | Catálogo `areas` |
 | Métodos de Pago → Negocios / Mensajeros / Órdenes / **Grupos de Pago** | Ver 8.1–8.3 |
 | Razón de Cambio | Tasa de cambio activa, USD por 1 CUP (`exchange_rates`, RN-010, sincronizable con El Toque — sección 22) |
@@ -727,7 +752,7 @@ Catálogo `payment_groups`: las **columnas de la tabla de órdenes del PDF** de 
 - **Dígitos** del número (1–10).
 - **Reinicio**: cada año o nunca (sin año en el código, obligatoriamente "nunca").
 
-Con vista previa. Los cambios aplican a las conciliaciones nuevas; cambiar el prefijo o el formato **no reinicia** la numeración (el contador va ligado a la clave fija de la serie) y nunca se repite un código ya emitido.
+Con vista previa. Desde 2026-11-19 también se pueden **agregar** (combinaciones que no existan, incluida la entidad **Planificaciones**: PLN / PLNU) y **eliminar** series (las conciliaciones nuevas de esa combinación usan el formato por defecto, prefijo = clave, hasta que se vuelva a crear). Los cambios aplican a las conciliaciones nuevas; cambiar el prefijo o el formato **no reinicia** la numeración (el contador va ligado a la clave fija de la serie) y nunca se repite un código ya emitido.
 
 > ⏳ El equipo está analizando si el formato definitivo es este (pendiente de confirmar).
 

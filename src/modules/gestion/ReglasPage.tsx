@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { usePermisos } from '../../lib/permisos';
 import { ListChecks, Plus, Edit2, Trash2, Loader2, Save, Search, AlertTriangle, RefreshCw, Store as StoreIcon } from 'lucide-react';
 import { Button } from '../../design-system/primitives/Button';
 import { SlideOver } from '../../design-system/primitives/SlideOver';
@@ -57,6 +58,12 @@ export function ReglasPage({ actor }: { actor: RuleActor }) {
   const { user } = useAuth();
   // RLS "manage_dispatcher_rules" ya restringe la escritura a Super Admin.
   const canWrite = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
+  // Permisos por menú del Rol de Acceso (Configuración → Roles): cada acción
+  // se muestra solo si el rol la permite Y el permiso del menú también.
+  const permisos = usePermisos(actor === 'negocios' ? 'reglas-negocios' : 'reglas-mensajeros');
+  const puedeCrear = canWrite && permisos.crear;
+  const puedeEditar = canWrite && permisos.editar;
+  const puedeEliminar = canWrite && permisos.eliminar;
 
   const [data, setData] = useState<DispatcherRule[]>([]);
   const [storeNames, setStoreNames] = useState<string[]>([]);
@@ -65,6 +72,8 @@ export function ReglasPage({ actor }: { actor: RuleActor }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [selected, setSelected] = useState<DispatcherRule | null>(null);
+  // El formulario es editable si se crea (permiso Crear) o se edita (permiso Editar).
+  const puedeGuardar = selected ? puedeEditar : puedeCrear;
   const [form, setForm] = useState<FormState>(emptyForm());
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -278,13 +287,13 @@ export function ReglasPage({ actor }: { actor: RuleActor }) {
         <div className="flex items-center justify-end gap-2">
           <button
             onClick={(e) => { e.stopPropagation(); handleEdit(r); }}
-            title={canWrite ? 'Editar regla' : 'Ver detalles'}
-            aria-label={canWrite ? 'Editar regla' : 'Ver detalles'}
+            title={puedeEditar ? 'Editar regla' : 'Ver detalles'}
+            aria-label={puedeEditar ? 'Editar regla' : 'Ver detalles'}
             className="p-2 text-[var(--color-text-faint)] hover:text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10 rounded-md transition-all"
           >
             <Edit2 size={16} />
           </button>
-          {canWrite && (
+          {puedeEliminar && (
             <button
               onClick={(e) => { e.stopPropagation(); setRuleToDelete(r); }}
               title="Eliminar regla"
@@ -315,7 +324,7 @@ export function ReglasPage({ actor }: { actor: RuleActor }) {
             </p>
           </div>
         </div>
-        {canWrite && (
+        {puedeCrear && (
           <Button variant="brand" className="gap-2" onClick={handleNew}>
             <Plus size={18} />
             Nueva Regla
@@ -363,7 +372,7 @@ export function ReglasPage({ actor }: { actor: RuleActor }) {
                 <p className="text-sm text-[var(--color-text-muted)] mt-1 max-w-sm">
                   Cree una regla cuando un Store registre órdenes con columnas vacías de forma legítima.
                 </p>
-                {canWrite && (
+                {puedeCrear && (
                   <Button variant="outline" className="gap-2 mt-4" onClick={handleNew}>
                     <Plus size={16} /> Nueva Regla
                   </Button>
@@ -377,13 +386,13 @@ export function ReglasPage({ actor }: { actor: RuleActor }) {
       <SlideOver
         isOpen={isFormOpen}
         onClose={() => setIsFormOpen(false)}
-        title={selected ? (canWrite ? 'Editar Regla' : 'Detalle de Regla') : `Nueva Regla - ${actorLabel}`}
+        title={selected ? (puedeGuardar ? 'Editar Regla' : 'Detalle de Regla') : `Nueva Regla - ${actorLabel}`}
         footer={
           <div className="flex gap-3">
             <Button variant="ghost" className="flex-1" onClick={() => setIsFormOpen(false)}>
-              {canWrite ? 'Cancelar' : 'Cerrar'}
+              {puedeGuardar ? 'Cancelar' : 'Cerrar'}
             </Button>
-            {canWrite && (
+            {puedeGuardar && (
               <Button variant="brand" className="flex-1" onClick={handleSave} disabled={saving}>
                 {saving ? <Loader2 size={16} className="mr-2 inline animate-spin" /> : <Save size={16} className="mr-2 inline" />}
                 Guardar Regla
@@ -393,7 +402,7 @@ export function ReglasPage({ actor }: { actor: RuleActor }) {
         }
       >
         <form onSubmit={handleSave} className="space-y-6">
-          <fieldset disabled={!canWrite} className="space-y-6">
+          <fieldset disabled={!puedeGuardar} className="space-y-6">
             <div className="space-y-3">
               <label className="flex flex-col gap-1.5">
                 <span className="text-sm font-medium text-[var(--color-text)]">

@@ -17,7 +17,7 @@ const ConciliacionNegociosPage = lazy(() => import('./conciliacion/ConciliacionN
 const ConciliacionMensajerosPage = lazy(() => import('./conciliacion/ConciliacionMensajerosPage').then(m => ({ default: m.ConciliacionMensajerosPage })));
 const FacturacionPage = lazy(() => import('./conciliacion/FacturacionPage').then(m => ({ default: m.FacturacionPage })));
 const CobrosPagosPage = lazy(() => import('./conciliacion/CobrosPagosPage').then(m => ({ default: m.CobrosPagosPage })));
-const PlanificacionPagosPage = lazy(() => import('./conciliacion/PlanificacionPagosPage').then(m => ({ default: m.PlanificacionPagosPage })));
+const PlanificacionesPage = lazy(() => import('./conciliacion/PlanificacionesPage').then(m => ({ default: m.PlanificacionesPage })));
 const GestionNegociosPage = lazy(() => import('./gestion/GestionNegociosPage').then(m => ({ default: m.GestionNegociosPage })));
 const GestionMensajerosPage = lazy(() => import('./gestion/GestionMensajerosPage').then(m => ({ default: m.GestionMensajerosPage })));
 const RolesUsuariosPage = lazy(() => import('./gestion/RolesUsuariosPage').then(m => ({ default: m.RolesUsuariosPage })));
@@ -76,9 +76,10 @@ function renderModule(activeTab: string) {
     case 'cuentas-pagar-mensajero':
     case 'cuentas-cobrar-mensajero':
       return <CobrosPagosPage entidad="mensajeros" />;
+    case 'planificacion-pagos':
     case 'planificacion-pagos-negocio':
     case 'planificacion-pagos-mensajero':
-      return <PlanificacionPagosPage />;
+      return <PlanificacionesPage />;
     case 'gestion-negocios':
       return <GestionNegociosPage />;
     case 'gestion-mensajeros':

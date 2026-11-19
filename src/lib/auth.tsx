@@ -1,6 +1,7 @@
 import { createContext, useContext, ReactNode, useState, useEffect } from 'react';
 import { supabase, syncGoogleTokenToSessionStorage, renovarGoogleToken, googleTokenPorVencer, ALLOWED_EMAIL_DOMAIN } from './supabase';
 import type { Session } from '@supabase/supabase-js';
+import { normalizarPermisos, type PermisosPorModulo } from './permisos';
 
 // Modelo de roles fijo — decisión confirmada: solo estos 4 existen.
 // Se elimina por completo el cálculo de rol por patrón de email
@@ -20,6 +21,10 @@ export interface User {
   // AppShell.tsx hasPermission(). null = sin asignar, se usa el comportamiento
   // histórico basado en `role`.
   accessModules: string[] | null;
+  // Permisos de interfaz por menú (access_roles.permisos). null = sin Rol de
+  // Acceso o columna aún no migrada. Usar siempre vía usePermisos() de
+  // src/lib/permisos.ts, no directamente.
+  permisos: PermisosPorModulo | null;
 }
 
 interface AuthContextType {
@@ -49,14 +54,25 @@ interface Profile {
   active: boolean;
   full_name: string;
   accessModules: string[] | null;
+  permisos: PermisosPorModulo | null;
 }
 
 async function fetchProfile(userId: string): Promise<Profile | null> {
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from('profiles')
-    .select('role, active, full_name, access_roles ( module_keys )')
+    .select('role, active, full_name, access_roles ( module_keys, permisos )')
     .eq('id', userId)
     .single();
+
+  // Fallback: si la migración 2026-11-19_permisos_roles.sql aún no se aplicó,
+  // la columna access_roles.permisos no existe — se carga sin ella.
+  if (error && /permisos/i.test(error.message || '')) {
+    ({ data, error } = await supabase
+      .from('profiles')
+      .select('role, active, full_name, access_roles ( module_keys )')
+      .eq('id', userId)
+      .single());
+  }
 
   if (error) {
     console.error('[Auth] No se pudo cargar el perfil desde Supabase:', error.message);
@@ -68,6 +84,9 @@ async function fetchProfile(userId: string): Promise<Profile | null> {
     active: row.active,
     full_name: row.full_name,
     accessModules: row.access_roles?.module_keys ?? null,
+    permisos: row.access_roles && row.access_roles.permisos !== undefined
+      ? normalizarPermisos(row.access_roles.permisos)
+      : null,
   };
 }
 
@@ -161,6 +180,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         uid: session.user.id,
         active: profile.active,
         accessModules: profile.accessModules,
+        permisos: profile.permisos,
       }
     : null;
 
