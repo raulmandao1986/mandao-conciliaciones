@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { supabase, logAuditEvent } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_IMPORT, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { usePermisos } from '../../lib/permisos';
 import { formatCurrency, formatDate, formatDatetime, toLocalISODate } from '../../lib/formatters';
 import { cn } from '../../lib/utils';
 import { Button } from '../../design-system/primitives/Button';
@@ -20,6 +21,7 @@ import { EstadoConciliacionControl, ReconciliacionesLog } from '../../lib/concil
 import { Monto } from '../../design-system/primitives/Monto';
 import { puedeReconciliar, parseEstado, cambiarEstadoConciliacion } from '../../lib/conciliacion/estados';
 import { useEnvioConciliaciones, puedeEnviar, type EnvioItem } from './EnvioCorreo';
+import { AccionesMasivas } from './AccionesMasivas';
 import { subirPdfsConciliacion, describeDriveResult, isMissingPdfColumn, nombreArchivoPdf } from '../../lib/conciliacion/drivePdf';
 import { buscarEnCatalogo, leerCatalogo, activarEnCatalogo, type Coincidencia } from '../../lib/conciliacion/catalogoEntidad';
 import { EntidadNoRegistradaAviso, etiquetaNoRegistrado } from './EntidadNoRegistrada';
@@ -321,7 +323,10 @@ export function ConciliacionNegociosPage() {
   // Ejecutar/corregir Conciliaciones queda al mismo nivel que Importación
   // (Super Admin/Supervisor) — es un proceso que mueve dinero, no una
   // simple verificación de lectura (ver política "manage_conciliaciones").
-  const canExecute = ROLE_CAN_IMPORT(user?.role || 'visitante');
+  // Conciliar, cambiar estados, enviar y reconciliar: el rol debe permitirlo
+  // y el Rol de Acceso tener 'Editar' en este menú (2026-11-19).
+  const permisosMenu = usePermisos('conciliacion-negocio');
+  const canExecute = ROLE_CAN_IMPORT(user?.role || 'visitante') && permisosMenu.editar;
   // Registrar negocios faltantes usa la misma política que Gestión de
   // Negocios (manage_businesses) — solo Super Admin puede insertar ahí.
   const canRegisterBusinesses = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
@@ -953,10 +958,11 @@ export function ConciliacionNegociosPage() {
     }).sort(compareConsecutivoDesc);
   }, [history, historySearch, historyAreaFilter, historyViaFilter, historyEstadoFilter, historyMonedaFilter, historyFechaInicio, historyFechaFin]);
   const historyPag = usePagination(filteredHistory, 20, [history, historySearch, historyAreaFilter, historyViaFilter, historyEstadoFilter, historyMonedaFilter, historyFechaInicio, historyFechaFin]);
-  const nuevasFiltradas = useMemo(() => filteredHistory.filter(h => h.estado === 'Nuevo'), [filteredHistory]);
-  const seleccionadas = nuevasFiltradas.filter(h => seleccionEnvio[h.id]);
-  const todasMarcadas = nuevasFiltradas.length > 0 && seleccionadas.length === nuevasFiltradas.length;
-  const marcarTodas = (marcar: boolean) => setSeleccionEnvio(marcar ? Object.fromEntries(nuevasFiltradas.map(h => [h.id, true])) : {});
+  // Selección para acciones masivas (envío por correo y cambio de estado):
+  // cualquier fila del filtro actual, en todas las páginas.
+  const seleccionadas = filteredHistory.filter(h => seleccionEnvio[h.id]);
+  const todasMarcadas = filteredHistory.length > 0 && seleccionadas.length === filteredHistory.length;
+  const marcarTodas = (marcar: boolean) => setSeleccionEnvio(marcar ? Object.fromEntries(filteredHistory.map(h => [h.id, true])) : {});
 
   const viasDisponibles = useMemo(() => Array.from(new Set(history.map(h => h.viaPago))).filter(Boolean), [history]);
 
@@ -1199,19 +1205,6 @@ export function ConciliacionNegociosPage() {
         <div className="p-4 border-b border-[var(--color-border)] bg-[var(--color-surface-2)] space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-xs font-black uppercase tracking-widest text-slate-500">Histórico de Conciliaciones ({filteredHistory.length})</h3>
-            {canExecute && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-1.5"
-                disabled={envio.ocupado || seleccionadas.length === 0}
-                onClick={() => envio.solicitar(seleccionadas.map(envioItem))}
-                title="Envía por correo, a cada negocio, las conciliaciones marcadas (un correo por negocio y período)"
-              >
-                {envio.preparando ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} />}
-                Enviar seleccionadas ({seleccionadas.length})
-              </Button>
-            )}
           </div>
           {/* Filtros: se acomodan en varias líneas según el ancho disponible. */}
           <div className="flex flex-wrap gap-3">
@@ -1256,6 +1249,18 @@ export function ConciliacionNegociosPage() {
           </div>
         </div>
 
+        {canExecute && (
+          <AccionesMasivas
+            table="conciliaciones_businesses"
+            items={seleccionadas.map(r => ({ id: r.id, estado: r.estado, neto: r.cxpTM + r.cxpSM + r.cxpUS - r.cxcCU, nombre: r.conciliacion, consecutivo: r.consecutivo }))}
+            envioOcupado={envio.ocupado}
+            envioPreparando={envio.preparando}
+            onEnviar={() => envio.solicitar(seleccionadas.filter(h => puedeEnviar(h.estado)).map(envioItem))}
+            onLimpiar={() => setSeleccionEnvio({})}
+            onTerminado={loadHistory}
+          />
+        )}
+
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead className="bg-slate-50 border-b border-[var(--color-border)]">
@@ -1265,9 +1270,9 @@ export function ConciliacionNegociosPage() {
                     <input
                       type="checkbox"
                       className="w-4 h-4 align-middle"
-                      aria-label="Marcar todas las conciliaciones en Nuevo"
-                      title={`Marcar las ${nuevasFiltradas.length} conciliación(es) en Nuevo del filtro`}
-                      disabled={nuevasFiltradas.length === 0}
+                      aria-label="Marcar todas las conciliaciones del filtro"
+                      title={`Marcar las ${filteredHistory.length} conciliación(es) del filtro (todas las páginas)`}
+                      disabled={filteredHistory.length === 0}
                       checked={todasMarcadas}
                       onChange={(e) => marcarTodas(e.target.checked)}
                     />
@@ -1295,11 +1300,11 @@ export function ConciliacionNegociosPage() {
                     <React.Fragment key={r.id}>
                       <tr className="hover:bg-slate-50 cursor-pointer group" onClick={() => setExpandedHistoryId(isExpanded ? null : r.id)}>
                         <td className="pl-4 py-4" onClick={(e) => e.stopPropagation()}>
-                          {canExecute && r.estado === 'Nuevo' && (
+                          {canExecute && (
                             <input
                               type="checkbox"
                               className="w-4 h-4 align-middle"
-                              aria-label={`Marcar para enviar por correo`}
+                              aria-label={`Seleccionar ${r.establecimiento}${r.consecutivo ? ` (${r.consecutivo})` : ''}`}
                               checked={!!seleccionEnvio[r.id]}
                               onChange={(e) => setSeleccionEnvio(prev => ({ ...prev, [r.id]: e.target.checked }))}
                             />

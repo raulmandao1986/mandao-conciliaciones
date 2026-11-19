@@ -4,6 +4,7 @@ import { StatusBadge } from '../../design-system/primitives/StatusBadge';
 import { Button } from '../../design-system/primitives/Button';
 import { supabase, logAuditEvent } from '../../lib/supabase';
 import { useAuth, ROLE_CAN_MANAGE_CATALOGS } from '../../lib/auth';
+import { usePermisos } from '../../lib/permisos';
 import {
   Plus,
   Store,
@@ -117,6 +118,12 @@ export function GestionNegociosPage() {
   // RLS "manage_businesses" en Supabase ya restringe la escritura a Super
   // Admin a nivel de base de datos — este check es solo para la UI.
   const canWrite = ROLE_CAN_MANAGE_CATALOGS(user?.role || 'visitante');
+  // Permisos por menú del Rol de Acceso (Configuración → Roles): cada acción
+  // se muestra solo si el rol la permite Y el permiso del menú también.
+  const permisos = usePermisos('gestion-negocios');
+  const puedeCrear = canWrite && permisos.crear;
+  const puedeEditar = canWrite && permisos.editar;
+  const puedeEliminar = canWrite && permisos.eliminar;
 
   const [data, setData] = useState<BusinessRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -578,14 +585,14 @@ export function GestionNegociosPage() {
             )}
           </div>
 
-          {canWrite && (
+          {puedeCrear && (
             <Button variant="outline" className="gap-2" onClick={() => setIsBulkImportOpen(true)}>
               <FileSpreadsheet size={16} />
               Importación Masiva
             </Button>
           )}
 
-          {canWrite && (
+          {puedeCrear && (
             <Button variant="brand" className="gap-2" onClick={handleNew}>
               <Plus size={18} />
               Nuevo Negocio
@@ -831,14 +838,15 @@ export function GestionNegociosPage() {
                   onClick={(e) => { e.stopPropagation(); handleEdit(item); }}
                   className={cn(
                     "p-2 rounded-md transition-all group",
-                    canWrite ? "text-[var(--color-text-faint)] hover:text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10" : "opacity-0 invisible select-none"
+                    puedeEditar ? "text-[var(--color-text-faint)] hover:text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10" : "opacity-0 invisible select-none"
                   )}
                   title="Editar Negocio"
-                  disabled={!canWrite}
+                  aria-label="Editar Negocio"
+                  disabled={!puedeEditar}
                 >
                   <Edit2 size={18} className="group-hover:scale-110 transition-transform" />
                 </button>
-                {canWrite && (
+                {puedeEliminar && (
                   <button
                     onClick={(e) => { e.stopPropagation(); handleDeleteRequest(item.id); }}
                     className="p-2 text-[var(--color-text-faint)] hover:text-[var(--color-danger)] hover:bg-[var(--color-danger-bg)] rounded-md transition-all group"

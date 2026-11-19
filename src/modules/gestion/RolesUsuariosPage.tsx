@@ -11,6 +11,8 @@ import { SlideOver } from '../../design-system/primitives/SlideOver';
 import { cn } from '../../lib/utils';
 import { formatDate } from '../../lib/formatters';
 import { notificar } from '../../lib/notificaciones';
+import { normalizarPermisos, PERMISOS_TODOS, type PermisosModulo, type PermisosPorModulo } from '../../lib/permisos';
+import { diffCambios, datosLegibles } from '../../lib/auditDiff';
 
 interface UserRecord {
   id: string;
@@ -30,6 +32,47 @@ interface AccessRoleRecord {
   baseRole: UserRole;
   isSystem: boolean;
   moduleKeys: string[];
+  permisos: PermisosPorModulo;
+}
+
+type Accion = keyof PermisosModulo;
+const ACCIONES: { key: Accion; label: string }[] = [
+  { key: 'ver', label: 'Ver' },
+  { key: 'crear', label: 'Crear' },
+  { key: 'editar', label: 'Editar' },
+  { key: 'eliminar', label: 'Eliminar' },
+];
+
+// La columna access_roles.permisos llega con la migración
+// 2026-11-19_permisos_roles.sql; si aún no existe se trabaja solo con module_keys.
+const esErrorColumnaPermisos = (err: { message?: string } | null | undefined) =>
+  !!err && /permisos/i.test(err.message || '');
+
+const MODULE_LABEL: Record<string, string> = Object.fromEntries(MODULE_CATALOG.map(m => [m.id, `${m.section} · ${m.label}`]));
+
+const ETIQUETAS_LOG_ROL: Record<string, string> = {
+  nombre: 'Nombre',
+  descripcion: 'Descripción',
+  nivelSeguridad: 'Nivel de seguridad',
+  menus: 'Menús visibles',
+  permisos: 'Permisos',
+};
+
+const accionesLegibles = (p: PermisosModulo) =>
+  ACCIONES.filter(a => p[a.key]).map(a => a.label).join(', ') || 'Ninguno';
+
+// Versión legible de un rol para el Log de Auditoría (antes/después).
+function rolParaLog(r: { nombre: string; descripcion: string; baseRole: UserRole; moduleKeys: string[]; permisos: PermisosPorModulo }) {
+  const esSuper = r.baseRole === 'super_admin';
+  return {
+    nombre: r.nombre,
+    descripcion: r.descripcion,
+    nivelSeguridad: ROLE_LABELS[r.baseRole],
+    menus: r.moduleKeys.map(k => MODULE_LABEL[k] || k).sort().join(', '),
+    permisos: Object.fromEntries(
+      r.moduleKeys.map(k => [MODULE_LABEL[k] || k, esSuper ? 'Todos (Super Admin)' : accionesLegibles({ ...(r.permisos[k] ?? PERMISOS_TODOS), ver: true })])
+    ),
+  };
 }
 
 const ROLE_LABELS: Record<UserRole, string> = {
@@ -80,14 +123,23 @@ export function RolesUsuariosPage() {
 
   const [accessRoles, setAccessRoles] = useState<AccessRoleRecord[]>([]);
   const [accessRolesLoading, setAccessRolesLoading] = useState(true);
+  // false = la columna access_roles.permisos aún no existe (migración pendiente).
+  const [permisosDisponibles, setPermisosDisponibles] = useState(true);
 
   const loadAccessRoles = async () => {
     setAccessRolesLoading(true);
-    const { data, error } = await supabase
+    const consultar = (columnas: string) => supabase
       .from('access_roles')
-      .select('access_role_id, name, description, base_role, is_system, module_keys')
+      .select(columnas)
       .order('is_system', { ascending: false })
       .order('name', { ascending: true });
+    let { data, error } = await consultar('access_role_id, name, description, base_role, is_system, module_keys, permisos');
+    let conPermisos = true;
+    if (esErrorColumnaPermisos(error)) {
+      conPermisos = false;
+      ({ data, error } = await consultar('access_role_id, name, description, base_role, is_system, module_keys'));
+    }
+    setPermisosDisponibles(conPermisos);
     if (error) {
       console.error('Error fetching access_roles:', error.message);
       setAccessRolesLoading(false);
@@ -99,7 +151,8 @@ export function RolesUsuariosPage() {
       descripcion: r.description || '',
       baseRole: r.base_role,
       isSystem: r.is_system,
-      moduleKeys: r.module_keys || []
+      moduleKeys: r.module_keys || [],
+      permisos: normalizarPermisos(r.permisos)
     }));
     setAccessRoles(records);
     setAccessRolesLoading(false);
@@ -161,6 +214,7 @@ export function RolesUsuariosPage() {
           accessRoles={accessRoles}
           loading={accessRolesLoading}
           onReload={loadAccessRoles}
+          permisosDisponibles={permisosDisponibles}
         />
       )}
     </div>
@@ -597,17 +651,25 @@ function RolesTab({
   canWrite,
   accessRoles,
   loading,
-  onReload
+  onReload,
+  permisosDisponibles
 }: {
   canWrite: boolean;
   accessRoles: AccessRoleRecord[];
   loading: boolean;
   onReload: () => Promise<void>;
+  permisosDisponibles: boolean;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [selectedRole, setSelectedRole] = useState<AccessRoleRecord | null>(null);
-  const [formData, setFormData] = useState({ nombre: '', descripcion: '', baseRole: 'visitante' as UserRole, moduleKeys: [] as string[] });
+  const [formData, setFormData] = useState({
+    nombre: '',
+    descripcion: '',
+    baseRole: 'visitante' as UserRole,
+    moduleKeys: [] as string[],
+    permisos: {} as PermisosPorModulo
+  });
   const [saving, setSaving] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [roleIdToDelete, setRoleIdToDelete] = useState<string | null>(null);
@@ -621,39 +683,117 @@ function RolesTab({
 
   const handleNew = () => {
     setSelectedRole(null);
-    setFormData({ nombre: '', descripcion: '', baseRole: 'visitante', moduleKeys: [] });
+    setFormData({ nombre: '', descripcion: '', baseRole: 'visitante', moduleKeys: [], permisos: {} });
     setIsFormOpen(true);
   };
 
   const handleEdit = (r: AccessRoleRecord) => {
     setSelectedRole(r);
-    setFormData({ nombre: r.nombre, descripcion: r.descripcion, baseRole: r.baseRole, moduleKeys: [...r.moduleKeys] });
+    // Menús visibles sin entrada en permisos = todas las acciones (comportamiento previo).
+    const permisos: PermisosPorModulo = {};
+    r.moduleKeys.forEach(k => { permisos[k] = { ...(r.permisos[k] ?? PERMISOS_TODOS), ver: true }; });
+    setFormData({ nombre: r.nombre, descripcion: r.descripcion, baseRole: r.baseRole, moduleKeys: [...r.moduleKeys], permisos });
     setIsFormOpen(true);
   };
 
-  const toggleModule = (id: string) => {
-    setFormData(p => ({
-      ...p,
-      moduleKeys: p.moduleKeys.includes(id) ? p.moduleKeys.filter(m => m !== id) : [...p.moduleKeys, id]
-    }));
+  // Super Admin siempre tiene todas las acciones: en su matriz solo se edita "Ver" (menú visible).
+  const esSuperAdmin = formData.baseRole === 'super_admin';
+
+  const valorCelda = (id: string, accion: Accion): boolean => {
+    if (!formData.moduleKeys.includes(id)) return false;
+    if (accion === 'ver' || esSuperAdmin) return true;
+    return (formData.permisos[id] ?? PERMISOS_TODOS)[accion];
+  };
+
+  // Marca/desmarca una acción en varios menús a la vez. "Ver" = el menú entra
+  // o sale de module_keys; las demás solo aplican a menús visibles.
+  const setCeldas = (ids: string[], accion: Accion, valor: boolean) => {
+    setFormData(p => {
+      let moduleKeys = [...p.moduleKeys];
+      const permisos: PermisosPorModulo = { ...p.permisos };
+      if (accion === 'ver') {
+        if (valor) {
+          ids.forEach(id => {
+            if (!moduleKeys.includes(id)) {
+              moduleKeys.push(id);
+              permisos[id] = { ...PERMISOS_TODOS };
+            }
+          });
+        } else {
+          moduleKeys = moduleKeys.filter(k => !ids.includes(k));
+          ids.forEach(id => { delete permisos[id]; });
+        }
+      } else {
+        ids.filter(id => moduleKeys.includes(id)).forEach(id => {
+          permisos[id] = { ...(permisos[id] ?? PERMISOS_TODOS), ver: true, [accion]: valor };
+        });
+      }
+      return { ...p, moduleKeys, permisos };
+    });
+  };
+
+  // Atajo por sección: si todo está marcado lo desmarca; si no, marca todo.
+  const toggleSeccion = (ids: string[]) => {
+    const todoMarcado = ids.every(id => ACCIONES.every(a => valorCelda(id, a.key)));
+    setFormData(p => {
+      let moduleKeys = [...p.moduleKeys];
+      const permisos: PermisosPorModulo = { ...p.permisos };
+      if (todoMarcado) {
+        moduleKeys = moduleKeys.filter(k => !ids.includes(k));
+        ids.forEach(id => { delete permisos[id]; });
+      } else {
+        ids.forEach(id => {
+          if (!moduleKeys.includes(id)) moduleKeys.push(id);
+          permisos[id] = { ...PERMISOS_TODOS };
+        });
+      }
+      return { ...p, moduleKeys, permisos };
+    });
   };
 
   const handleSave = async () => {
     if (!formData.nombre.trim()) return;
     setSaving(true);
     try {
-      const payload = {
+      const permisosPayload: PermisosPorModulo = esSuperAdmin
+        ? {}
+        : Object.fromEntries(formData.moduleKeys.map(k => [k, { ...(formData.permisos[k] ?? PERMISOS_TODOS), ver: true }]));
+      const base = {
         name: formData.nombre.trim(),
         description: formData.descripcion.trim() || null,
         base_role: formData.baseRole,
         module_keys: formData.moduleKeys
       };
+      const guardar = (payload: Record<string, unknown>) => selectedRole
+        ? supabase.from('access_roles').update(payload).eq('access_role_id', selectedRole.id)
+        : supabase.from('access_roles').insert(payload);
+
+      let permisosGuardados = permisosDisponibles;
+      let { error } = await guardar(permisosDisponibles ? { ...base, permisos: permisosPayload } : base);
+      if (error && permisosDisponibles && esErrorColumnaPermisos(error)) {
+        permisosGuardados = false;
+        ({ error } = await guardar(base));
+      }
+      if (error) throw error;
+      if (!permisosGuardados) {
+        notificar.advertencia(
+          'Se guardaron los menús visibles, pero no los permisos Crear/Editar/Eliminar: falta aplicar la migración 2026-11-19_permisos_roles.sql en Supabase.'
+        );
+      }
+
+      const despues = rolParaLog({ ...formData, nombre: base.name, permisos: permisosGuardados ? permisosPayload : {} });
       if (selectedRole) {
-        const { error } = await supabase.from('access_roles').update(payload).eq('access_role_id', selectedRole.id);
-        if (error) throw error;
+        logAuditEvent('Configuraciones', 'Rol de Acceso Actualizado', {
+          rolId: selectedRole.id,
+          rol: base.name,
+          cambios: diffCambios(rolParaLog(selectedRole), despues, ETIQUETAS_LOG_ROL),
+        });
       } else {
-        const { error } = await supabase.from('access_roles').insert(payload);
-        if (error) throw error;
+        logAuditEvent('Configuraciones', 'Rol de Acceso Creado', {
+          rol: base.name,
+          datos: datosLegibles(despues, ETIQUETAS_LOG_ROL),
+          permisos: despues.permisos,
+        });
       }
       setIsFormOpen(false);
       await onReload();
@@ -675,6 +815,12 @@ function RolesTab({
     try {
       const { error } = await supabase.from('access_roles').delete().eq('access_role_id', roleIdToDelete);
       if (error) throw error;
+      const eliminado = accessRoles.find(r => r.id === roleIdToDelete);
+      logAuditEvent('Configuraciones', 'Rol de Acceso Eliminado', {
+        rolId: roleIdToDelete,
+        rol: eliminado?.nombre,
+        datos: eliminado ? datosLegibles(rolParaLog(eliminado), ETIQUETAS_LOG_ROL) : undefined,
+      });
       await onReload();
     } catch (err: any) {
       console.error('Error deleting access role:', err);
@@ -871,37 +1017,108 @@ function RolesTab({
 
           <div className="space-y-3">
             <div>
-              <label className="text-xs font-bold text-[var(--color-text)] block">Módulos y Accesos</label>
+              <span className="text-xs font-bold text-[var(--color-text)] block">Permisos por menú</span>
               <p className="text-[10px] text-[var(--color-text-faint)] mt-0.5">
-                Click en cada etiqueta para marcar/desmarcar los módulos que este rol podrá ver en el menú. ({formData.moduleKeys.length} seleccionados)
+                "Ver" muestra el menú; Crear, Editar y Eliminar controlan qué acciones aparecen en él. Desmarcar "Ver"
+                quita el resto de esa fila. Usa la casilla de cada columna o sección para marcar/desmarcar en bloque.
+                ({formData.moduleKeys.length} de {MODULE_CATALOG.length} menús visibles)
               </p>
             </div>
 
-            {MODULE_SECTIONS.map(([section, items]) => (
-              <div key={section} className="space-y-1.5">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-faint)]">{section}</span>
-                <div className="flex flex-wrap gap-1.5">
-                  {items.map(m => {
-                    const selected = formData.moduleKeys.includes(m.id);
+            {esSuperAdmin && (
+              <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)] bg-[var(--color-surface-2)] p-3 rounded-[var(--radius-sm)] border border-[var(--color-border)]">
+                <Lock size={14} className="shrink-0" />
+                Super Admin siempre puede crear, editar y eliminar: aquí solo se eligen los menús que ve.
+              </div>
+            )}
+            {!permisosDisponibles && !esSuperAdmin && (
+              <div className="flex items-center gap-2 text-xs text-[var(--color-warning)] bg-[var(--color-warning-bg)] p-3 rounded-[var(--radius-sm)]">
+                <ShieldCheck size={14} className="shrink-0" />
+                Falta aplicar la migración de permisos en Supabase: por ahora solo se guarda la columna "Ver".
+              </div>
+            )}
+
+            <div className="border border-[var(--color-border)] rounded-[var(--radius-md)] overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-[var(--color-surface-2)]">
+                  <tr className="border-b border-[var(--color-border)]">
+                    <th className="text-left text-xs font-bold text-[var(--color-text-muted)] px-3 h-10">Menú</th>
+                    {ACCIONES.map(a => {
+                      const filas = a.key === 'ver' ? MODULE_CATALOG.map(m => m.id) : formData.moduleKeys;
+                      const deshabilitada = a.key !== 'ver' && (esSuperAdmin || !permisosDisponibles || filas.length === 0);
+                      const todas = filas.length > 0 && filas.every(id => valorCelda(id, a.key));
+                      return (
+                        <th key={a.key} className="w-20 px-2 h-10 text-center">
+                          <label className="inline-flex flex-col items-center gap-1 text-xs font-bold text-[var(--color-text-muted)]">
+                            {a.label}
+                            <input
+                              type="checkbox"
+                              checked={todas}
+                              disabled={deshabilitada}
+                              onChange={() => setCeldas(filas, a.key, !todas)}
+                              aria-label={`Marcar o desmarcar "${a.label}" en todos los menús`}
+                              title={`Marcar o desmarcar "${a.label}" en todos los menús`}
+                              className="h-4 w-4 accent-[var(--color-primary)] disabled:opacity-40"
+                            />
+                          </label>
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {MODULE_SECTIONS.map(([section, items]) => {
+                    const ids = items.map(m => m.id);
+                    const seccionCompleta = ids.every(id => ACCIONES.every(a => valorCelda(id, a.key)));
                     return (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => toggleModule(m.id)}
-                        className={cn(
-                          'px-3 py-1.5 rounded-full text-xs font-semibold border transition-all',
-                          selected
-                            ? 'bg-teal-50 border-teal-500 text-teal-700'
-                            : 'bg-white border-[var(--color-border)] text-[var(--color-text-muted)] hover:bg-gray-50'
-                        )}
-                      >
-                        {m.label}
-                      </button>
+                      <React.Fragment key={section}>
+                        <tr className="bg-[var(--color-surface-3)] border-b border-[var(--color-border)]">
+                          <td colSpan={ACCIONES.length + 1} className="px-3 h-9">
+                            <label className="inline-flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-muted)] cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={seccionCompleta}
+                                onChange={() => toggleSeccion(ids)}
+                                aria-label={`Marcar o desmarcar todos los permisos de ${section}`}
+                                title={`Marcar o desmarcar todos los permisos de ${section}`}
+                                className="h-4 w-4 accent-[var(--color-primary)]"
+                              />
+                              {section}
+                            </label>
+                          </td>
+                        </tr>
+                        {items.map(m => {
+                          const visible = formData.moduleKeys.includes(m.id);
+                          return (
+                            <tr key={m.id} className="border-b border-[var(--color-border)] last:border-b-0 hover:bg-[var(--color-surface-2)] transition-colors h-10">
+                              <td className={cn('px-3 text-sm', visible ? 'text-[var(--color-text)] font-medium' : 'text-[var(--color-text-faint)]')}>
+                                {m.label}
+                              </td>
+                              {ACCIONES.map(a => {
+                                const deshabilitada = a.key !== 'ver' && (!visible || esSuperAdmin || !permisosDisponibles);
+                                return (
+                                  <td key={a.key} className="px-2 text-center">
+                                    <input
+                                      type="checkbox"
+                                      checked={valorCelda(m.id, a.key)}
+                                      disabled={deshabilitada}
+                                      onChange={(e) => setCeldas([m.id], a.key, e.target.checked)}
+                                      aria-label={`${a.label} · ${m.label} (${section})`}
+                                      title={`${a.label} · ${m.label}`}
+                                      className="h-4 w-4 accent-[var(--color-primary)] disabled:opacity-40"
+                                    />
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          );
+                        })}
+                      </React.Fragment>
                     );
                   })}
-                </div>
-              </div>
-            ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </SlideOver>

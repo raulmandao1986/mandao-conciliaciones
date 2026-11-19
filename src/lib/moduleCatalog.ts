@@ -61,6 +61,14 @@ export const NAV_SECTIONS: NavSection[] = [
       },
     ]
   },
+  // Planificación de Pagos: menú propio (2026-11-19), reúne las planificaciones
+  // generadas desde Cobros y Pagos de Negocios y de Mensajeros.
+  {
+    title: 'Pagos',
+    items: [
+      { id: 'planificacion-pagos', label: 'Planificación de Pagos', icon: CalendarClock },
+    ]
+  },
   {
     title: 'Módulo Negocios',
     items: [
@@ -68,7 +76,6 @@ export const NAV_SECTIONS: NavSection[] = [
       { id: 'conciliacion-negocio', label: 'Conciliación', icon: GitMerge },
       { id: 'facturacion-negocio', label: 'Facturación', icon: FileText },
       { id: 'cobros-pagos-negocio', label: 'Cobros y Pagos', icon: HandCoins },
-      { id: 'planificacion-pagos-negocio', label: 'Planificación Pagos', icon: CalendarClock },
       { id: 'gestion-negocios', label: 'Gestión de Negocios', icon: Building2 },
     ]
   },
@@ -79,7 +86,6 @@ export const NAV_SECTIONS: NavSection[] = [
       { id: 'conciliacion-mensajero', label: 'Conciliación', icon: GitMerge },
       { id: 'facturacion-mensajero', label: 'Facturación', icon: FileText },
       { id: 'cobros-pagos-mensajero', label: 'Cobros y Pagos', icon: HandCoins },
-      { id: 'planificacion-pagos-mensajero', label: 'Planificación Pagos', icon: CalendarClock },
       { id: 'gestion-mensajeros', label: 'Gestión de Mensajeros', icon: Users },
     ]
   },

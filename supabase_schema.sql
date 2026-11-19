@@ -529,6 +529,9 @@ create table public.access_roles (
   base_role public.user_role not null default 'visitante',
   is_system boolean not null default false,
   module_keys text[] not null default '{}',
+  -- Ver / Crear / Editar / Eliminar por menú (2026-11-19, solo interfaz):
+  -- { "<moduleKey>": { "ver", "crear", "editar", "eliminar" } }
+  permisos jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -563,14 +566,14 @@ create trigger trg_protect_system_access_roles
 insert into public.access_roles (name, description, base_role, is_system, module_keys) values
   ('Super Admin', 'Acceso total a todos los módulos del sistema.', 'super_admin', true, array[
     'dashboard','dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision',
-    'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cobros-pagos-negocio','planificacion-pagos-negocio','gestion-negocios',
-    'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cobros-pagos-mensajero','planificacion-pagos-mensajero','gestion-mensajeros',
+    'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cobros-pagos-negocio','gestion-negocios',
+    'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cobros-pagos-mensajero','gestion-mensajeros','planificacion-pagos',
     'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','grupos-pago','formato-consecutivo','razon-cambio','comision-mandao','correo-conciliacion','documentos-importacion','config-logs'
   ]),
   ('Supervisor', 'Acceso total a todos los módulos del sistema.', 'supervisor', true, array[
     'dashboard','dispatcher-verificacion','dispatcher-revision','disponibilidad-verificacion','disponibilidad-revision',
-    'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cobros-pagos-negocio','planificacion-pagos-negocio','gestion-negocios',
-    'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cobros-pagos-mensajero','planificacion-pagos-mensajero','gestion-mensajeros',
+    'dashboard-negocio','conciliacion-negocio','facturacion-negocio','cobros-pagos-negocio','gestion-negocios',
+    'dashboard-mensajero','conciliacion-mensajero','facturacion-mensajero','cobros-pagos-mensajero','gestion-mensajeros','planificacion-pagos',
     'roles-usuarios','areas','metodos-pago-negocios','metodos-pago-mensajeros','metodos-pago-ordenes','grupos-pago','formato-consecutivo','razon-cambio','comision-mandao','correo-conciliacion','documentos-importacion','config-logs'
   ]),
   ('Operador', 'Puede ejecutar Verificación en Dispatcher y Disponibilidad. Sin acceso a Gestión ni Configuración.', 'operador', true, array[
@@ -1084,7 +1087,7 @@ alter table public.conciliacion_consecutivos enable row level security;
 -- Pago -> Formato de Consecutivo.
 create table public.consecutivo_series (
   serie text primary key,
-  entidad text not null check (entidad in ('negocios', 'mensajeros')),
+  entidad text not null check (entidad in ('negocios', 'mensajeros', 'planificaciones')),
   sentido text not null check (sentido in ('pagar', 'cobrar')),
   moneda text not null check (moneda in ('CUP', 'USD')),
   prefijo text not null unique check (prefijo ~ '^[A-Za-z0-9]{1,10}$'),
@@ -1110,7 +1113,10 @@ insert into public.consecutivo_series (serie, entidad, sentido, moneda, prefijo)
   ('PM',  'mensajeros', 'pagar',  'CUP', 'PM'),
   ('CM',  'mensajeros', 'cobrar', 'CUP', 'CM'),
   ('PMU', 'mensajeros', 'pagar',  'USD', 'PMU'),
-  ('CMU', 'mensajeros', 'cobrar', 'USD', 'CMU')
+  ('CMU', 'mensajeros', 'cobrar', 'USD', 'CMU'),
+  -- Planificación de Pagos: una serie por moneda (2026-11-19).
+  ('PLN',  'planificaciones', 'pagar', 'CUP', 'PLN'),
+  ('PLNU', 'planificaciones', 'pagar', 'USD', 'PLNU')
 on conflict (serie) do nothing;
 
 alter table public.consecutivo_series enable row level security;
@@ -1119,7 +1125,12 @@ create policy "read_all_authenticated" on public.consecutivo_series
 create policy "manage_consecutivo_series" on public.consecutivo_series
   for update using (public.current_user_role() = 'super_admin')
   with check (public.current_user_role() = 'super_admin');
-grant select, update on public.consecutivo_series to anon, authenticated;
+-- Altas y bajas de series desde Configuración -> Formato de Consecutivo (2026-11-19).
+create policy "insert_consecutivo_series" on public.consecutivo_series
+  for insert with check (public.current_user_role() = 'super_admin');
+create policy "delete_consecutivo_series" on public.consecutivo_series
+  for delete using (public.current_user_role() = 'super_admin');
+grant select, insert, update, delete on public.consecutivo_series to anon, authenticated;
 
 -- Generador: arma el código con el formato de la serie. Con reinicio
 -- 'nunca' el contador vive en anio = 0 y arranca después del mayor número
@@ -1320,3 +1331,87 @@ create table public.google_oauth_tokens (
 
 alter table public.google_oauth_tokens enable row level security;
 revoke all on public.google_oauth_tokens from anon, authenticated;
+
+-- =====================================================================
+-- PLANIFICACIÓN DE PAGOS (2026-11-19): generada desde Cobros y Pagos. Cada
+-- conciliación solo en una planificación; el estado (Pendiente / En Proceso /
+-- Pagado) se calcula del estado de sus conciliaciones.
+-- =====================================================================
+create table public.planificaciones_pago (
+  planificacion_id uuid primary key default gen_random_uuid(),
+  consecutivo text unique,
+  fecha date not null default current_date,
+  entidad text not null check (entidad in ('negocios', 'mensajeros')),
+  via_pago text not null,
+  moneda text not null check (moneda in ('CUP', 'USD')),
+  cantidad integer not null default 0,           -- negocios / mensajeros distintos
+  monto_pagar numeric(14,2) not null default 0,  -- suma de netos a pagar
+  monto_cobrar numeric(14,2) not null default 0, -- suma de netos a cobrar
+  neto numeric(14,2) not null default 0,         -- pagar − cobrar
+  areas text[] not null default '{}',
+  filtros jsonb,                                 -- filtros de Cobros y Pagos al generarla
+  notas text,
+  responsable text,
+  responsable_id uuid references auth.users(id),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table public.planificacion_items (
+  item_id uuid primary key default gen_random_uuid(),
+  planificacion_id uuid not null references public.planificaciones_pago(planificacion_id) on delete cascade,
+  entidad text not null check (entidad in ('negocios', 'mensajeros')),
+  conciliacion_id uuid not null,
+  entidad_id uuid,
+  nombre text not null,
+  area text,
+  consecutivo text,
+  periodo_inicial date,
+  periodo_final date,
+  riel text,
+  neto numeric(14,2) not null,   -- positivo = pagar, negativo = cobrar
+  datos_pago text,               -- datos de pago al momento de planificar
+  created_at timestamptz not null default now(),
+  unique (entidad, conciliacion_id)
+);
+create index idx_planificacion_items_plan on public.planificacion_items(planificacion_id);
+
+-- Consecutivo por moneda: series PLN (CUP) y PLNU (USD) de Formato de Consecutivo.
+create or replace function public.set_consecutivo_planificacion()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if new.consecutivo is null then
+    new.consecutivo := public.next_conciliacion_consecutivo(
+      case when new.moneda = 'USD' then 'PLNU' else 'PLN' end, new.fecha);
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_consecutivo_planificacion on public.planificaciones_pago;
+create trigger trg_consecutivo_planificacion
+  before insert on public.planificaciones_pago
+  for each row execute function public.set_consecutivo_planificacion();
+
+alter table public.planificaciones_pago enable row level security;
+alter table public.planificacion_items enable row level security;
+
+drop policy if exists "read_all_authenticated" on public.planificaciones_pago;
+create policy "read_all_authenticated" on public.planificaciones_pago for select using (public.is_active_user());
+drop policy if exists "read_all_authenticated" on public.planificacion_items;
+create policy "read_all_authenticated" on public.planificacion_items for select using (public.is_active_user());
+
+-- Generar / editar / eliminar: mismo nivel que las conciliaciones (Super Admin y Supervisor).
+drop policy if exists "manage_planificaciones_pago" on public.planificaciones_pago;
+create policy "manage_planificaciones_pago" on public.planificaciones_pago
+  for all using (public.is_admin_or_supervisor()) with check (public.is_admin_or_supervisor());
+drop policy if exists "manage_planificacion_items" on public.planificacion_items;
+create policy "manage_planificacion_items" on public.planificacion_items
+  for all using (public.is_admin_or_supervisor()) with check (public.is_admin_or_supervisor());
+
+grant select, insert, update, delete on public.planificaciones_pago to anon, authenticated;
+grant select, insert, update, delete on public.planificacion_items to anon, authenticated;
