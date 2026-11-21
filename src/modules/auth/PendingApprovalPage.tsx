@@ -7,7 +7,7 @@ export function PendingApprovalPage() {
   const { user, logout } = useAuth();
 
   return (
-    <div className="min-h-screen bg-[var(--color-bg)] flex items-center justify-center p-4">
+    <div className="h-dvh overflow-y-auto bg-[var(--color-bg)] flex items-center-safe justify-center p-4">
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}

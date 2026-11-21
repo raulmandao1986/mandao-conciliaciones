@@ -101,8 +101,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [authError, setAuthError] = useState<string | null>(null);
 
   const loadProfile = async (userId: string) => {
-    const p = await fetchProfile(userId);
-    setProfile(p);
+    try {
+      const p = await fetchProfile(userId);
+      setProfile(p);
+    } catch (err) {
+      // Sin perfil se muestra "pendiente de autorización" en vez de quedarse cargando.
+      console.error('No se pudo cargar el perfil:', err);
+      setProfile(null);
+    }
   };
 
   // Segunda capa de defensa: aunque la pantalla de consentimiento OAuth
@@ -124,42 +130,52 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   useEffect(() => {
-    // Sesión inicial al cargar la app
-    supabase.auth.getSession().then(async ({ data }) => {
-      if (data.session?.user && !isAllowedEmail(data.session.user.email)) {
-        setIsLoading(false);
-        await rejectSession(data.session.user.email);
-        return;
+    let activo = true;
+    // Red de seguridad: si algo no responde (red móvil lenta, almacenamiento
+    // bloqueado), a los 15 s se deja de mostrar el loading y se ve el login
+    // o la pantalla de espera en vez de quedarse girando para siempre.
+    const limite = window.setTimeout(() => { if (activo) setIsLoading(false); }, 15000);
+
+    // Aplica una sesión (inicial o nueva) FUERA del callback de
+    // onAuthStateChange: supabase-js documenta que esperar ahí otras llamadas
+    // de Supabase (getSession, consultas) puede bloquearse indefinidamente.
+    // Era la causa del loading infinito al entrar desde el móvil (2026-11-20).
+    let ultima = 0;
+    const aplicarSesion = async (newSession: Session | null) => {
+      const turno = ++ultima;
+      try {
+        if (newSession?.user && !isAllowedEmail(newSession.user.email)) {
+          await rejectSession(newSession.user.email);
+          return;
+        }
+        setSession(newSession);
+        if (newSession?.user) {
+          setAuthError(null);
+          await syncGoogleTokenToSessionStorage(newSession);
+          await loadProfile(newSession.user.id);
+        } else {
+          setProfile(null);
+          sessionStorage.removeItem('google_access_token');
+          sessionStorage.removeItem('google_access_token_exp');
+        }
+      } catch (err) {
+        console.error('Error aplicando la sesión:', err);
+      } finally {
+        if (activo && turno === ultima) setIsLoading(false);
       }
-      setSession(data.session);
-      if (data.session?.user) {
-        await syncGoogleTokenToSessionStorage();
-        await loadProfile(data.session.user.id);
-      }
-      setIsLoading(false);
+    };
+
+    // Sesión inicial (evento INITIAL_SESSION), login, logout y refresh: el
+    // callback es síncrono y difiere el trabajo con setTimeout.
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      window.setTimeout(() => { if (activo) void aplicarSesion(newSession); }, 0);
     });
 
-    // Cambios de sesión (login, logout, refresh de token)
-    const { data: listener } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
-      if (newSession?.user && !isAllowedEmail(newSession.user.email)) {
-        setIsLoading(false);
-        await rejectSession(newSession.user.email);
-        return;
-      }
-      setAuthError(null);
-      setSession(newSession);
-      if (newSession?.user) {
-        await syncGoogleTokenToSessionStorage();
-        await loadProfile(newSession.user.id);
-      } else {
-        setProfile(null);
-        sessionStorage.removeItem('google_access_token');
-        sessionStorage.removeItem('google_access_token_exp');
-      }
-      setIsLoading(false);
-    });
-
-    return () => listener.subscription.unsubscribe();
+    return () => {
+      activo = false;
+      window.clearTimeout(limite);
+      listener.subscription.unsubscribe();
+    };
   }, []);
 
   // Renovación automática del permiso de Google (dura 1 h): se revisa cada

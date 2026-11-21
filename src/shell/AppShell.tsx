@@ -36,13 +36,27 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [activeTab, setActiveTab] = useState(() => {
     return localStorage.getItem('active_tab') || 'dashboard';
   });
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  // Móvil (2026-11-20): por debajo de 1024 px la barra lateral es un menú
+  // desplegable sobre el contenido (cerrado por defecto) y el contenido usa
+  // todo el ancho; en escritorio se mantiene la barra fija colapsable.
+  const [esMovil, setEsMovil] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 1023px)').matches);
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 1023px)');
+    const cambio = () => setEsMovil(mq.matches);
+    cambio();
+    mq.addEventListener('change', cambio);
+    return () => mq.removeEventListener('change', cambio);
+  }, []);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => typeof window === 'undefined' || !window.matchMedia('(max-width: 1023px)').matches);
+  // En el menú móvil siempre se ven las etiquetas completas.
+  const conEtiquetas = esMovil || isSidebarOpen;
   const [isDebugOpen, setIsDebugOpen] = useState(false);
   const [activeDebugTab, setActiveDebugTab] = useState<'diagnostico' | 'instrucciones'>('diagnostico');
   const [testPermissionString, setTestPermissionString] = useState('');
 
   useEffect(() => {
     localStorage.setItem('active_tab', activeTab);
+    if (window.matchMedia('(max-width: 1023px)').matches) setIsSidebarOpen(false);
   }, [activeTab]);
 
   // Navegación pedida desde un módulo (ej. Conciliación -> "Modificar
@@ -132,19 +146,36 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <div 
       className="grid h-dvh overflow-hidden w-full bg-[var(--color-bg)]"
       style={{ 
-        gridTemplateColumns: isSidebarOpen ? "260px 1fr" : "80px 1fr",
+        gridTemplateColumns: esMovil ? "1fr" : isSidebarOpen ? "260px 1fr" : "80px 1fr",
         gridTemplateRows: "auto 1fr",
         transition: 'grid-template-columns 0.2s ease-in-out'
       }}
     >
+      {/* Fondo del menú móvil: tocar fuera lo cierra */}
+      {esMovil && isSidebarOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-[var(--color-text)]/40"
+          onClick={() => setIsSidebarOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
       {/* Sidebar */}
-      <aside className="row-span-2 bg-[var(--color-surface)] border-r border-[var(--color-border)] flex flex-col shadow-[4px_0_24px_rgba(0,0,0,0.02)] relative z-20">
+      <aside
+        className={cn(
+          "bg-[var(--color-surface)] border-r border-[var(--color-border)] flex flex-col shadow-[4px_0_24px_rgba(0,0,0,0.02)]",
+          esMovil
+            ? cn("fixed inset-y-0 left-0 z-40 w-[280px] max-w-[85vw] transition-transform duration-200", isSidebarOpen ? "translate-x-0" : "-translate-x-full")
+            : "row-span-2 relative z-20"
+        )}
+        aria-hidden={esMovil && !isSidebarOpen ? true : undefined}
+      >
         <div className="h-16 flex items-center px-6 border-b border-[var(--color-border)] shrink-0">
           <div className="w-8 h-8 rounded bg-[var(--color-brand)] flex items-center justify-center shrink-0 shadow-sm">
             <span className="font-bold text-[var(--color-brand-ink)]">M</span>
           </div>
           <AnimatePresence>
-            {isSidebarOpen && (
+            {conEtiquetas && (
               <motion.span 
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
@@ -160,7 +191,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <nav className="flex-1 overflow-y-auto pt-4 pb-4 px-3 space-y-6 overscroll-contain custom-scrollbar">
           {filteredSections.map((section) => (
             <div key={section.title} className="space-y-1">
-              <div className={cn("px-3 mb-2 text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-faint)]", !isSidebarOpen && "hidden")}>
+              <div className={cn("px-3 mb-2 text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-faint)]", !conEtiquetas && "hidden")}>
                 {section.title}
               </div>
               
@@ -193,7 +224,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                       )}
                       <item.icon className={cn("w-5 h-5 shrink-0 transition-colors", isActive ? "text-[var(--color-brand-ink)]" : "text-[var(--color-text-faint)] group-hover:text-[var(--color-text)]")} />
                       <AnimatePresence>
-                        {isSidebarOpen && (
+                        {conEtiquetas && (
                           <motion.span 
                             initial={{ opacity: 0 }}
                             animate={{ opacity: 1 }}
@@ -204,12 +235,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                           </motion.span>
                         )}
                       </AnimatePresence>
-                      {isSidebarOpen && item.subItems && (
+                      {conEtiquetas && item.subItems && (
                         <ChevronRight className={cn("w-4 h-4 transition-transform", isExpanded && "rotate-90")} />
                       )}
                     </button>
 
-                    {item.subItems && isExpanded && isSidebarOpen && (
+                    {item.subItems && isExpanded && conEtiquetas && (
                       <div className="ml-4 pl-4 border-l border-[var(--color-border)] space-y-1 mt-1">
                         {item.subItems.map(sub => {
                           const isSubActive = activeTab === sub.id;
@@ -244,14 +275,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           ))}
 
           <div className="pt-4 mt-6 border-t border-[var(--color-border)]">
-             <p className={cn("px-3 mb-2 text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-faint)]", !isSidebarOpen && "hidden")}>Otros Sistemas</p>
+             <p className={cn("px-3 mb-2 text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-faint)]", !conEtiquetas && "hidden")}>Otros Sistemas</p>
              <a 
               href="#"
               className="flex items-center px-3 h-10 rounded-[var(--radius-sm)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-text)] group"
              >
                 <Package className="w-5 h-5 shrink-0 text-[var(--color-text-faint)] group-hover:text-[var(--color-text)]" />
-                {isSidebarOpen && <span className="ml-3 text-sm">Inventario</span>}
-                {isSidebarOpen && <ExternalLink className="ml-auto w-3 h-3 opacity-0 group-hover:opacity-100" />}
+                {conEtiquetas && <span className="ml-3 text-sm">Inventario</span>}
+                {conEtiquetas && <ExternalLink className="ml-auto w-3 h-3 opacity-0 group-hover:opacity-100" />}
              </a>
           </div>
         </nav>
@@ -259,20 +290,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </aside>
 
       {/* Topbar */}
-      <header className="h-16 bg-[var(--color-surface)] border-b border-[var(--color-border)] flex items-center justify-between px-6 sticky top-0 z-10 shadow-sm">
-        <div className="flex items-center gap-4">
-          <button 
+      <header className="h-16 min-w-0 bg-[var(--color-surface)] border-b border-[var(--color-border)] flex items-center justify-between gap-2 px-3 sm:px-6 sticky top-0 z-10 shadow-sm">
+        <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+          <button
             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-            className="p-2 hover:bg-[var(--color-surface-3)] rounded-[var(--radius-sm)] text-[var(--color-text-muted)] transition-colors active:scale-95"
+            aria-label={isSidebarOpen ? 'Cerrar menú' : 'Abrir menú'}
+            title={isSidebarOpen ? 'Cerrar menú' : 'Abrir menú'}
+            className="p-2 shrink-0 hover:bg-[var(--color-surface-3)] rounded-[var(--radius-sm)] text-[var(--color-text-muted)] transition-colors active:scale-95"
           >
-            {isSidebarOpen ? <X size={20} /> : <Menu size={20} />}
+            {isSidebarOpen && !esMovil ? <X size={20} /> : <Menu size={20} />}
           </button>
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-[var(--color-text-faint)] hidden sm:block">Mandao Finance</span>
-            <ChevronRight size={14} className="text-[var(--color-text-faint)] hidden sm:block" />
-            <span className="text-[var(--color-text-faint)]">Conciliaciones</span>
-            <ChevronRight size={14} className="text-[var(--color-text-faint)]" />
-            <span className="font-semibold text-[var(--color-text)] capitalize">
+          <div className="flex items-center gap-2 text-sm min-w-0">
+            <span className="text-[var(--color-text-faint)] hidden md:block">Mandao Finance</span>
+            <ChevronRight size={14} className="text-[var(--color-text-faint)] hidden md:block shrink-0" />
+            <span className="text-[var(--color-text-faint)] hidden sm:block">Conciliaciones</span>
+            <ChevronRight size={14} className="text-[var(--color-text-faint)] hidden sm:block shrink-0" />
+            <span className="font-semibold text-[var(--color-text)] capitalize truncate">
               {allItems.find(i => i.id === activeTab)?.label}
             </span>
           </div>
@@ -288,8 +321,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span className="text-xs font-semibold hidden md:inline">Instrucciones</span>
           </button>
 
-          <div className="flex items-center gap-3 pl-4 border-l border-[var(--color-border)]">
-            <div className="text-right hidden sm:block">
+          <div className="flex items-center gap-3 pl-2 sm:pl-4 border-l border-[var(--color-border)]">
+            <div className="text-right hidden lg:block">
               <p className="text-sm font-bold text-[var(--color-text)] leading-none">{user?.name}</p>
               <div className="mt-1 flex items-center justify-end">
                 <p className="text-[10px] text-[var(--color-brand-ink)] font-bold bg-[var(--color-brand)] px-1.5 py-0.5 rounded uppercase tracking-wider inline-block">
@@ -303,14 +336,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </header>
 
       {/* Content */}
-      <main className="overflow-y-auto overscroll-contain bg-[var(--color-bg)]">
-        <div className="p-6">
+      <main className="min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain bg-[var(--color-bg)]">
+        <div className="p-3 sm:p-6">
           <motion.div
             key={activeTab + user?.role}
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            className="max-w-7xl mx-auto"
+            className="max-w-7xl mx-auto min-w-0"
           >
             {React.cloneElement(children as React.ReactElement, { activeTab, userRole: user?.role })}
           </motion.div>

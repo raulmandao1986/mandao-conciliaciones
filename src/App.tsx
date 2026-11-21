@@ -14,7 +14,7 @@ function AppContent({ activeTab, userRole }: { activeTab?: string; userRole?: st
 
   if (isLoading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-[var(--color-bg)]">
+      <div className="h-dvh flex items-center justify-center bg-[var(--color-bg)]">
         <div className="w-12 h-12 border-4 border-[var(--color-brand)] border-t-transparent rounded-full animate-spin" />
       </div>
     );
