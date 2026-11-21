@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type Session } from '@supabase/supabase-js';
 
 // Variables de entorno — definir en .env.local:
 //   VITE_SUPABASE_URL=https://<tu-proyecto>.supabase.co
@@ -109,8 +109,11 @@ export const reconnectGoogle = signInWithGoogle;
 // sesión de Google activa" (2026-11-05). Ahora se conserva el último token
 // con su vencimiento (los de Google duran 1 h); se borra solo al cerrar sesión.
 export const GOOGLE_TOKEN_EXP_KEY = 'google_access_token_exp';
-export const syncGoogleTokenToSessionStorage = async () => {
-  const { data } = await supabase.auth.getSession();
+// Recibe la sesión cuando se llama al aplicar un cambio de sesión: así no se
+// vuelve a pedir supabase.auth.getSession() mientras supabase-js procesa el
+// login (bloqueo documentado que dejaba la app en el loading en el móvil).
+export const syncGoogleTokenToSessionStorage = async (sesion?: Session | null) => {
+  const data = { session: sesion !== undefined ? sesion : (await supabase.auth.getSession()).data.session };
   const token = data.session?.provider_token;
   if (token && token !== sessionStorage.getItem('google_access_token')) {
     sessionStorage.setItem('google_access_token', token);

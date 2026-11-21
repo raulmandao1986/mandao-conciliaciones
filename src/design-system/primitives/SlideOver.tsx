@@ -38,8 +38,8 @@ export function SlideOver({ isOpen, onClose, title, children, footer, width = 'm
             )}
           >
             {/* Header */}
-            <div className="h-16 px-6 border-b border-[var(--color-border)] flex items-center justify-between shrink-0">
-              <h2 className="text-lg font-bold text-[var(--color-text)] tracking-tight">{title}</h2>
+            <div className="h-16 px-4 sm:px-6 gap-2 border-b border-[var(--color-border)] flex items-center justify-between shrink-0">
+              <h2 className="text-lg font-bold text-[var(--color-text)] tracking-tight truncate">{title}</h2>
               <button
                 onClick={onClose}
                 className="p-2 hover:bg-[var(--color-surface-2)] rounded-[var(--radius-sm)] text-[var(--color-text-faint)] transition-colors"
@@ -49,13 +49,13 @@ export function SlideOver({ isOpen, onClose, title, children, footer, width = 'm
             </div>
 
             {/* Content */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
               {children}
             </div>
 
             {/* Footer */}
             {footer && (
-              <div className="p-6 border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/50 shrink-0">
+              <div className="p-4 sm:p-6 border-t border-[var(--color-border)] bg-[var(--color-surface-2)]/50 shrink-0">
                 {footer}
               </div>
             )}

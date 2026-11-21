@@ -60,6 +60,23 @@
   }
 }
 
+/* ── Móvil y tablet (< 1024 px, 2026-11-20) ──
+   La página nunca se desplaza de lado: las tablas anchas se desplazan dentro
+   de su propio contenedor y las barras de herramientas pasan a otra línea. */
+@media (max-width: 1023px) {
+  main div:has(> table) {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  main .w-max {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  main .flex:not(.flex-col):not(.flex-nowrap):has(> button, > a, > .relative) {
+    flex-wrap: wrap;
+  }
+}
+
 @layer utilities {
   .tabular-nums {
     font-variant-numeric: tabular-nums;

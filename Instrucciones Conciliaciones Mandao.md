@@ -1475,6 +1475,23 @@ Estas reglas son adicionales a las de la Constitución y aplican **solo** a este
 - ❌ Ejecutar una importación sin registrar el log completo en `public.audit_logs` (RN-008)
 - ✅ Toda acción ejecutiva (verificar, importar) debe registrar usuario, fecha y hora
 
+### Acceso desde móvil y diseño responsive (requisito agregado 2026-11-20)
+
+El sistema debe poder usarse desde el navegador del teléfono y de la tablet, no solo desde el escritorio. Se prioriza consultar, revisar y ejecutar acciones puntuales (cambiar estado, enviar, aprobar); las tareas de mucha densidad (conciliar en lote, importar) pueden seguir siendo más cómodas en escritorio, pero no deben quedar bloqueadas.
+
+- ✅ **Punto de corte**: por debajo de **1024 px** (`max-width: 1023px`) la app está en modo móvil.
+- ✅ **Menú lateral en móvil**: cerrado por defecto; se abre con el botón ☰ de la barra superior como panel sobre el contenido (280 px, máx. 85 % del ancho), con fondo que lo cierra al tocar fuera, y se cierra solo al elegir una opción. En escritorio se mantiene la barra fija colapsable (260 px / 80 px). Implementado en `src/shell/AppShell.tsx` (`esMovil`).
+- ✅ **Barra superior compacta**: en móvil solo muestra el botón de menú, el nombre de la vista (truncado), Instrucciones y el avatar; las migas completas aparecen desde `sm`/`md` y el nombre y rol del usuario desde `lg`.
+- ✅ **Una sola región de scroll vertical** (`main`) y **nunca scroll horizontal de la página**: las tablas anchas se desplazan de lado dentro de su propio contenedor y las barras de herramientas pasan a otra línea (reglas `@media (max-width: 1023px)` en `src/index.css`). Toda tabla nueva debe ir dentro de un contenedor con `overflow-x-auto`.
+- ✅ **Relleno reducido**: contenido `p-3` en móvil y `p-6` desde `sm`; los SlideOver ocupan todo el ancho en móvil (`w-full` + `max-w-*`) con relleno `p-4`.
+- ✅ **Pantallas de acceso** (Login, Pendiente de aprobación, carga): usan `h-dvh` con scroll propio (`overflow-y-auto`, `items-center-safe`), porque `html, body` tienen `overflow: hidden` y en teléfonos bajos el contenido quedaba cortado.
+- ✅ **Formularios**: campos a una columna en móvil (`grid-cols-1` y `sm:grid-cols-2` o más), botones con área táctil mínima de 36–40 px.
+- ❌ Anchos fijos en px para contenedores de página, `min-w-[…]` en tarjetas o columnas de layout sin variante responsive, o grids de varias columnas sin `grid-cols-1` de base.
+- ❌ Acciones disponibles solo con hover: en pantallas táctiles no existe hover; toda acción debe ser visible o estar en un menú accesible al toque.
+- ✅ **Verificación obligatoria**: todo cambio de interfaz se revisa también a 375 px de ancho (vista móvil del navegador): sin scroll horizontal de la página y con todas las acciones alcanzables.
+
+**Inicio de sesión en móvil (corrección 2026-11-20)**: la app se quedaba en el ícono de carga al entrar desde el teléfono. Causa: dentro de `supabase.auth.onAuthStateChange` se esperaban otras llamadas de Supabase (`getSession`, consulta del perfil), algo que supabase-js documenta que puede bloquearse indefinidamente, sobre todo al volver del login de Google. Ahora `src/lib/auth.tsx` hace ese trabajo fuera del callback (`setTimeout`), `syncGoogleTokenToSessionStorage` recibe la sesión en vez de pedirla y, como red de seguridad, a los 15 s se retira el loading y se muestra el login o la pantalla de espera. **Regla**: nunca hacer `await` de llamadas a Supabase dentro del callback de `onAuthStateChange`.
+
 ---
 
 ## 16. Anti-patrones específicos de Conciliaciones
