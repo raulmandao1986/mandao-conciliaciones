@@ -18,6 +18,71 @@ if (!SUPABASE_CONFIGURADO) {
   );
 }
 
+// ── Diagnóstico de acceso (2026-11-21) ──
+// En el móvil el login con Google volvía a la pantalla de inicio sin sesión
+// y sin ningún mensaje. Se guarda un registro corto (localStorage) de lo que
+// pasa al volver de Google, que LoginPage muestra en "Diagnóstico de acceso".
+const DIAG_KEY = 'mandao_auth_diag';
+export function registrarDiagAuth(evento: string) {
+  try {
+    const lista: string[] = JSON.parse(localStorage.getItem(DIAG_KEY) || '[]');
+    lista.push(`${new Date().toLocaleString('es-VE')} · ${evento}`);
+    localStorage.setItem(DIAG_KEY, JSON.stringify(lista.slice(-30)));
+  } catch {
+    /* almacenamiento bloqueado: se informa en LoginPage */
+  }
+}
+export function leerDiagAuth(): string[] {
+  try { return JSON.parse(localStorage.getItem(DIAG_KEY) || '[]'); } catch { return ['No se puede leer el almacenamiento del navegador (localStorage bloqueado).']; }
+}
+export function limpiarDiagAuth() {
+  try { localStorage.removeItem(DIAG_KEY); } catch { /* nada */ }
+}
+export const almacenamientoDisponible = (() => {
+  try { localStorage.setItem('mandao_prueba', '1'); localStorage.removeItem('mandao_prueba'); return true; } catch { return false; }
+})();
+
+// Error devuelto por Supabase/Google al volver del login (va en el hash o en
+// la query de la URL) y desfase del reloj del dispositivo. Se leen ANTES de
+// crear el cliente, que limpia la URL al procesarla.
+export const retornoLogin: { error: string | null; desfaseSeg: number | null } = { error: null, desfaseSeg: null };
+if (typeof window !== 'undefined') {
+  const h = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const q = new URLSearchParams(window.location.search);
+  const error = h.get('error_description') || q.get('error_description') || h.get('error') || q.get('error');
+  if (error) {
+    retornoLogin.error = error.replace(/\+/g, ' ');
+    registrarDiagAuth(`Google/Supabase devolvió un error: ${retornoLogin.error}`);
+  }
+  if (h.get('access_token')) {
+    const expAt = Number(h.get('expires_at'));
+    const expIn = Number(h.get('expires_in'));
+    if (expAt && expIn) retornoLogin.desfaseSeg = Math.round(Date.now() / 1000 - (expAt - expIn));
+    registrarDiagAuth(`Volvió de Google con sesión (desfase del reloj del dispositivo ≈ ${retornoLogin.desfaseSeg ?? '?'} s)`);
+  } else if (q.get('code')) {
+    registrarDiagAuth('Volvió de Google con código de autorización');
+  }
+  if (!almacenamientoDisponible) registrarDiagAuth('localStorage no disponible: la sesión no se puede guardar');
+}
+
+// Prueba si el dispositivo llega al servidor de Supabase (para el
+// diagnóstico de conexión lenta). Devuelve los ms que tardó o el error.
+export async function probarConexionSupabase(): Promise<{ ok: boolean; ms: number; detalle: string }> {
+  const inicio = performance.now();
+  const ctrl = new AbortController();
+  const corte = window.setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const r = await fetch(`${supabaseUrl}/auth/v1/health`, { headers: { apikey: supabaseAnonKey }, signal: ctrl.signal, cache: 'no-store' });
+    const ms = Math.round(performance.now() - inicio);
+    return { ok: r.ok, ms, detalle: r.ok ? `responde en ${ms} ms` : `respondió con error ${r.status}` };
+  } catch (err: any) {
+    const ms = Math.round(performance.now() - inicio);
+    return { ok: false, ms, detalle: err?.name === 'AbortError' ? 'no respondió en 15 s' : `sin conexión (${err?.message || err})` };
+  } finally {
+    window.clearTimeout(corte);
+  }
+}
+
 export const supabase = createClient(
   SUPABASE_CONFIGURADO ? supabaseUrl : 'https://sin-configurar.supabase.co',
   SUPABASE_CONFIGURADO ? supabaseAnonKey : 'sin-configurar'
@@ -80,6 +145,7 @@ export const logAuditEvent = async (
 // Supabase usa redirect en vez de popup: al volver, session.provider_token
 // trae el access_token de Google (equivalente a credential.accessToken).
 export const signInWithGoogle = async () => {
+  registrarDiagAuth(`Inicio de login con Google (volverá a ${window.location.origin})`);
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider: 'google',
     options: {

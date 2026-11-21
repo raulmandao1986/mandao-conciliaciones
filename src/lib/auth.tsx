@@ -1,5 +1,5 @@
 import { createContext, useContext, ReactNode, useState, useEffect } from 'react';
-import { supabase, syncGoogleTokenToSessionStorage, renovarGoogleToken, googleTokenPorVencer, ALLOWED_EMAIL_DOMAIN } from './supabase';
+import { supabase, syncGoogleTokenToSessionStorage, renovarGoogleToken, googleTokenPorVencer, ALLOWED_EMAIL_DOMAIN, registrarDiagAuth } from './supabase';
 import type { Session } from '@supabase/supabase-js';
 import { normalizarPermisos, type PermisosPorModulo } from './permisos';
 
@@ -32,6 +32,9 @@ interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  // La sesión lleva más de 10 s sin responder (red lenta / sin acceso a Supabase).
+  cargaLenta: boolean;
+  dejarDeEsperar: () => void;
   authError: string | null;
   logout: () => Promise<void>;
   reloadPermissions: () => Promise<void>;
@@ -98,6 +101,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [cargaLenta, setCargaLenta] = useState(false);
+  // Desde la pantalla de "conexión lenta": deja de esperar y muestra el login.
+  const dejarDeEsperar = () => { setIsLoading(false); setCargaLenta(false); };
   const [authError, setAuthError] = useState<string | null>(null);
 
   const loadProfile = async (userId: string) => {
@@ -107,6 +113,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (err) {
       // Sin perfil se muestra "pendiente de autorización" en vez de quedarse cargando.
       console.error('No se pudo cargar el perfil:', err);
+      registrarDiagAuth(`No se pudo cargar el perfil: ${(err as Error)?.message || err}`);
       setProfile(null);
     }
   };
@@ -131,10 +138,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let activo = true;
-    // Red de seguridad: si algo no responde (red móvil lenta, almacenamiento
-    // bloqueado), a los 15 s se deja de mostrar el loading y se ve el login
-    // o la pantalla de espera en vez de quedarse girando para siempre.
-    const limite = window.setTimeout(() => { if (activo) setIsLoading(false); }, 15000);
+    // Conexión lenta (2026-11-21): si a los 10 s la sesión no ha respondido
+    // (al volver de Google supabase-js valida el token contra el servidor,
+    // y con datos móviles lentos o sin acceso a Supabase eso se demora), NO
+    // se manda al login — eso hacía que el usuario volviera a tocar
+    // "Continuar con Google" y entrara en un ciclo. Se muestra "la conexión
+    // está tardando" con Reintentar y el diagnóstico, y se sigue esperando.
+    const limite = window.setTimeout(() => {
+      if (activo) { registrarDiagAuth('La sesión no respondió en 10 s (conexión lenta con el servidor)'); setCargaLenta(true); }
+    }, 10000);
 
     // Aplica una sesión (inicial o nueva) FUERA del callback de
     // onAuthStateChange: supabase-js documenta que esperar ahí otras llamadas
@@ -161,13 +173,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch (err) {
         console.error('Error aplicando la sesión:', err);
       } finally {
-        if (activo && turno === ultima) setIsLoading(false);
+        if (activo && turno === ultima) { setIsLoading(false); setCargaLenta(false); window.clearTimeout(limite); }
       }
     };
 
     // Sesión inicial (evento INITIAL_SESSION), login, logout y refresh: el
     // callback es síncrono y difiere el trabajo con setTimeout.
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((evento, newSession) => {
+      if (evento !== 'TOKEN_REFRESHED' || !newSession) {
+        registrarDiagAuth(`Evento ${evento}: ${newSession?.user ? `sesión de ${newSession.user.email}` : 'sin sesión'} (a los ${Math.round(performance.now() / 1000)} s de abrir la página)`);
+      }
       window.setTimeout(() => { if (activo) void aplicarSesion(newSession); }, 0);
     });
 
@@ -223,6 +238,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         user,
         isAuthenticated: !!session?.user,
         isLoading,
+        cargaLenta,
+        dejarDeEsperar,
         authError,
         logout,
         reloadPermissions,

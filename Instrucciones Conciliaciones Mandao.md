@@ -1492,6 +1492,12 @@ El sistema debe poder usarse desde el navegador del teléfono y de la tablet, no
 
 **Inicio de sesión en móvil (corrección 2026-11-20)**: la app se quedaba en el ícono de carga al entrar desde el teléfono. Causa: dentro de `supabase.auth.onAuthStateChange` se esperaban otras llamadas de Supabase (`getSession`, consulta del perfil), algo que supabase-js documenta que puede bloquearse indefinidamente, sobre todo al volver del login de Google. Ahora `src/lib/auth.tsx` hace ese trabajo fuera del callback (`setTimeout`), `syncGoogleTokenToSessionStorage` recibe la sesión en vez de pedirla y, como red de seguridad, a los 15 s se retira el loading y se muestra el login o la pantalla de espera. **Regla**: nunca hacer `await` de llamadas a Supabase dentro del callback de `onAuthStateChange`.
 
+**Ciclo de login en móvil (corrección 2026-11-21)**: tras la corrección anterior, en el teléfono la carga duraba más de 15 s (al volver de Google, supabase-js valida el token contra el servidor y con datos móviles lentos eso se demora; en local también se midieron cargas de 18 s), la red de seguridad mostraba el login, el usuario volvía a tocar "Continuar con Google" y entraba en un ciclo. Ahora:
+
+- A los **10 s** sin respuesta **no** se manda al login: se muestra "La conexión está tardando más de lo normal", con una prueba de conexión al servidor (`probarConexionSupabase`, `/auth/v1/health`), **Reintentar** e **Ir a la pantalla de acceso**; la sesión se sigue esperando en segundo plano.
+- **Diagnóstico de acceso** en la pantalla de login (desplegable, con Copiar): registro de los últimos 30 eventos de sesión (`localStorage` `mandao_auth_diag`), error devuelto por Google/Supabase en la URL al volver del login (antes se ignoraba), desfase del reloj del dispositivo y si el navegador permite guardar datos.
+- Avisos visibles en el login: error del regreso de Google, **hora del teléfono desfasada más de 5 min** (la sesión se da por vencida; activar fecha y hora automáticas) y almacenamiento bloqueado.
+
 ---
 
 ## 16. Anti-patrones específicos de Conciliaciones
