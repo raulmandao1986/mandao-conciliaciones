@@ -11,6 +11,7 @@ import { Monto } from '../../design-system/primitives/Monto';
 import { Button } from '../../design-system/primitives/Button';
 import { cn } from '../../lib/utils';
 import { MontoPagarChart, type SemanaMonto } from './MontoPagarChart';
+import { loadPendientes, loadEntidadesPago, agrupar, totalesPorMoneda, type ConciliacionPendiente, type EntidadCobros } from '../../lib/conciliacion/cobrosPagos';
 
 // Dashboard General (pedido por el usuario 2026-10-07): órdenes del
 // Dispatcher, conciliaciones registradas, altas de Negocios/Mensajeros y
@@ -66,7 +67,9 @@ interface DashboardData {
   pagarNegociosCUP: number;
   pagarNegociosUSD: number;
   pagarMensajeros: number;
+  pagarMensajerosUSD: number;
   cobrarCUP: number;
+  cobrarUSD: number;
   semanas: SemanaMonto[];
   logs: AuditLogEntry[];
 }
@@ -75,6 +78,20 @@ async function count(q: PromiseLike<{ count: number | null; error: any }>): Prom
   const { count: c, error } = await q;
   if (error) throw error;
   return c ?? 0;
+}
+
+// Resumen visual (2026-11-22): sale de Cobros y Pagos de Negocios y de
+// Mensajeros — mismas cuentas (conciliaciones Confirmadas), misma agrupación
+// por negocio/mensajero, moneda y vía de pago y mismo neto Pagar / Cobrar —
+// con el filtro de período de esa pantalla (Período desde / hasta) igual al
+// rango Desde–Hasta del Dashboard.
+async function cobrosPagosDelRango(entidad: EntidadCobros, desde: string, hasta: string) {
+  const pendientes = (await loadPendientes(entidad))
+    .filter(c => c.fechaFinal >= desde && c.fechaInicial <= hasta);
+  const ids = Array.from(new Set(pendientes.map(c => c.entidadId).filter((x): x is string => !!x)));
+  const entidades = await loadEntidadesPago(entidad, ids);
+  const grupos = agrupar(entidad, pendientes, entidades);
+  return { grupos, totales: totalesPorMoneda(grupos) };
 }
 
 async function loadDashboard(p: Periodo): Promise<DashboardData> {
@@ -114,6 +131,12 @@ async function loadDashboard(p: Periodo): Promise<DashboardData> {
     fetchAllRows<any>((from, to) => supabase.from('messengers').select('messenger_id, name, area_id').order('messenger_id').range(from, to)),
   ]);
 
+  const hasta = addDays(p.end, -1);
+  const [cpNeg, cpMen] = await Promise.all([
+    cobrosPagosDelRango('negocios', p.start, hasta),
+    cobrosPagosDelRango('mensajeros', p.start, hasta),
+  ]);
+
   // Cuenta los del catálogo (nombre normalizado + Área) que aparecen en las órdenes.
   const operativos = (catalogo: any[], campo: 'store' | 'driver', idCol: string) => {
     const enOrdenes = new Set<string>();
@@ -127,23 +150,25 @@ async function loadDashboard(p: Periodo): Promise<DashboardData> {
     const fin = addDays(d, 6) < p.end ? addDays(d, 6) : addDays(p.end, -1);
     semanas.push({ label: `${ddmm(d)} – ${ddmm(fin)}`, negocios: 0, mensajeros: 0 });
   }
-  const semanaDe = (fecha: string) => Math.min(semanas.length - 1, Math.max(0, Math.floor(daysBetween(p.start, fecha) / 7)));
+  // Semana = la del fin del período de cada cuenta (acotado al rango).
+  const semanaDe = (c: ConciliacionPendiente) => {
+    const f = String(c.fechaFinal).slice(0, 10);
+    const fin = f > hasta ? hasta : f < p.start ? p.start : f;
+    return Math.min(semanas.length - 1, Math.max(0, Math.floor(daysBetween(p.start, fin) / 7)));
+  };
+  // Gráfico (CUP): las cuentas de los renglones "Pagar" de Cobros y Pagos;
+  // la suma de cada renglón coincide con su importe neto.
+  cpNeg.grupos.filter(g => g.moneda === 'CUP' && g.neto > 0.005)
+    .forEach(g => g.conciliaciones.forEach(c => { semanas[semanaDe(c)].negocios += c.neto; }));
+  cpMen.grupos.filter(g => g.moneda === 'CUP' && g.neto > 0.005)
+    .forEach(g => g.conciliaciones.forEach(c => { semanas[semanaDe(c)].mensajeros += c.neto; }));
 
-  // Monto a pagar = neto CxP − CxC de cada conciliación cuando es positivo;
-  // si es negativo, es monto a cobrar.
-  let pagarNegociosCUP = 0, pagarNegociosUSD = 0, pagarMensajeros = 0, cobrarCUP = 0;
-  concNeg.forEach((r: any) => {
-    const neto = (Number(r.cxp_tm) || 0) + (Number(r.cxp_sm) || 0) + (Number(r.cxp_us) || 0) - (Number(r.cxc_cu) || 0);
-    if (neto > 0) {
-      if (r.moneda === 'USD') pagarNegociosUSD += neto;
-      else { pagarNegociosCUP += neto; semanas[semanaDe(r.fecha)].negocios += neto; }
-    } else if (neto < 0 && r.moneda !== 'USD') cobrarCUP += -neto;
-  });
-  concMen.forEach((r: any) => {
-    const neto = (Number(r.total_por_pagar) || 0) - (Number(r.total_por_cobrar) || 0);
-    if (neto > 0) { pagarMensajeros += neto; semanas[semanaDe(r.fecha)].mensajeros += neto; }
-    else if (neto < 0) cobrarCUP += -neto;
-  });
+  const pagarNegociosCUP = cpNeg.totales.CUP.pagar;
+  const pagarNegociosUSD = cpNeg.totales.USD.pagar;
+  const pagarMensajeros = cpMen.totales.CUP.pagar;
+  const pagarMensajerosUSD = cpMen.totales.USD.pagar;
+  const cobrarCUP = cpNeg.totales.CUP.cobrar + cpMen.totales.CUP.cobrar;
+  const cobrarUSD = cpNeg.totales.USD.cobrar + cpMen.totales.USD.cobrar;
 
   return {
     ordenes, ordenesPrev, incidencias,
@@ -152,7 +177,7 @@ async function loadDashboard(p: Periodo): Promise<DashboardData> {
     negociosOperativos: operativos(catNegocios, 'store', 'business_id'),
     mensajerosTotal, mensajerosActivos, mensajerosNuevos,
     mensajerosOperativos: operativos(catMensajeros, 'driver', 'messenger_id'),
-    pagarNegociosCUP, pagarNegociosUSD, pagarMensajeros, cobrarCUP,
+    pagarNegociosCUP, pagarNegociosUSD, pagarMensajeros, pagarMensajerosUSD, cobrarCUP, cobrarUSD,
     semanas,
     logs: (logsRes.data as AuditLogEntry[]) ?? [],
   };
@@ -360,17 +385,20 @@ export function Dashboard() {
             <div>
               <h2 className="font-semibold text-[var(--color-text)] flex items-center gap-2"><Wallet size={16} className="text-[var(--color-primary)]" /> Resumen visual · Monto a pagar a Negocios y Mensajeros</h2>
               <p className="text-xs text-[var(--color-text-muted)] mt-1">
-                Neto a pagar (CxP − CxC) de las conciliaciones registradas en el período, por semana de registro. Los montos en USD
-                (Negocios con vía Transferencia-Exterior) se informan aparte para no mezclar monedas.
+                Importes de Cobros y Pagos (Negocios y Mensajeros) para el período elegido: cuentas Confirmadas pendientes de pagar o
+                cobrar, con el mismo neto que muestra esa pantalla. CUP y USD se informan por separado; el gráfico muestra lo
+                que hay que pagar en CUP por semana de fin del período.
               </p>
             </div>
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
               {[
-                { label: 'Negocios (CUP)', valor: data.pagarNegociosCUP, moneda: 'CUP', dot: '#2a78d6' },
-                { label: 'Mensajeros (CUP)', valor: data.pagarMensajeros, moneda: 'CUP', dot: '#eb6834' },
-                { label: 'Negocios exterior (USD)', valor: data.pagarNegociosUSD, moneda: 'USD' },
+                { label: 'A pagar a Negocios (CUP)', valor: data.pagarNegociosCUP, moneda: 'CUP', dot: '#2a78d6' },
+                { label: 'A pagar a Mensajeros (CUP)', valor: data.pagarMensajeros, moneda: 'CUP', dot: '#eb6834' },
+                { label: 'A pagar a Negocios (USD)', valor: data.pagarNegociosUSD, moneda: 'USD' },
+                ...(data.pagarMensajerosUSD > 0 ? [{ label: 'A pagar a Mensajeros (USD)', valor: data.pagarMensajerosUSD, moneda: 'USD' }] : []),
                 { label: 'A cobrar (CUP)', valor: data.cobrarCUP, moneda: 'CUP' },
-              ].map(t => (
+                ...(data.cobrarUSD > 0 ? [{ label: 'A cobrar (USD)', valor: data.cobrarUSD, moneda: 'USD' }] : []),
+              ].map((t: { label: string; valor: number; moneda: string; dot?: string }) => (
                 <div key={t.label} className="p-3 rounded-[var(--radius-sm)] bg-[var(--color-surface-2)] border border-[var(--color-border)]">
                   <p className="text-[11px] font-medium text-[var(--color-text-muted)] flex items-center gap-1.5">
                     {t.dot && <span className="w-2 h-2 rounded-sm" style={{ background: t.dot }} aria-hidden />}{t.label}
